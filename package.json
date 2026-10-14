@@ -1,0 +1,38 @@
+{
+  "name": "dsh-plugin-agent-collaboration-workspace",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "DSH Agent Community plugin workspace: host service, model tools, browser client and bundle",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "typecheck": "pnpm -r exec tsc -p tsconfig.json --noEmit",
+    "bundle": "pnpm -r run bundle && node scripts/check-build.mjs",
+    "build": "pnpm run bundle",
+    "install:profile": "bash scripts/install-profile.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Leo-sail/dsh-plugin-agent-collaboration.git"
+  },
+  "author": "leochang <leochang@gmail.com>",
+  "homepage": "https://github.com/Leo-sail/dsh-plugin-agent-collaboration#readme",
+  "bugs": {
+    "url": "https://github.com/Leo-sail/dsh-plugin-agent-collaboration/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "deepseek-harness",
+    "agent",
+    "bot",
+    "multi-agent",
+    "cordis"
+  ]
+}

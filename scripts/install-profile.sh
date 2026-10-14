@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+#
+# Install the plugin build outputs into a DSH profile — with integrity checks.
+#
+# Two failure modes this script exists to prevent, both of which cost a debugging
+# session each:
+#
+#   1. Copy-after-delete. Removing the destination before the copy, when the source
+#      is missing or the build failed, deletes the installed plugin and leaves the
+#      profile with no entry at all. Here the sources are validated FIRST.
+#
+#   2. Copying only the browser half. `ui-agent-community` ships TWO files: a
+#      `lib/index.js` Node half (a ~200 byte stub the host imports at boot) and a
+#      `lib/client.js` browser half wrapped in `window.__ModuleLoader__.load(...)`.
+#      Copying the browser bundle over the Node half makes the host's import throw
+#      `window is not defined`, and the plugin silently drops out of the client
+#      manifest — the sidebar entry simply disappears.
+#
+# Usage: scripts/install-profile.sh [profile-name]
+set -euo pipefail
+
+PROFILE="${1:-desktop}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEST="$HOME/.dsh/profiles/$PROFILE/node_modules/@dsh-plugin"
+
+[ -d "$DEST" ] || { echo "install-profile: no such profile dir: $DEST" >&2; exit 1; }
+
+# ── 0. build-shape checks first ───────────────────────────────────────────────
+# Every assertion in there maps to a bug this project actually shipped (bare-ESM bundle, stale
+# lib/, dangling exports target, duplicate CSS selectors). Installing a broken tree is worse than
+# refusing to install.
+node "$ROOT/scripts/check-build.mjs" || { echo "install-profile: build shape check failed; nothing was copied." >&2; exit 1; }
+
+# ── 1. validate every source before touching the destination ──────────────────
+declare -a PAIRS=(
+  "packages/core/agent-community/lib/index.js|agent-community/lib/index.js"
+  "packages/core/agent-community/lib/index.d.ts|agent-community/lib/index.d.ts"
+  "packages/tools/tool-agent-community/lib/index.js|tool-agent-community/lib/index.js"
+  "packages/tools/tool-agent-community/lib/index.d.ts|tool-agent-community/lib/index.d.ts"
+  "packages/ui/ui-agent-community/lib/index.js|ui-agent-community/lib/index.js"
+  "packages/ui/ui-agent-community/lib/index.d.ts|ui-agent-community/lib/index.d.ts"
+  "packages/ui/ui-agent-community/lib/client.js|ui-agent-community/lib/client.js"
+)
+
+fail=0
+for pair in "${PAIRS[@]}"; do
+  src="$ROOT/${pair%%|*}"
+  if [ ! -s "$src" ]; then
+    echo "install-profile: MISSING build output: ${pair%%|*}" >&2
+    fail=1
+  fi
+done
+[ "$fail" = 0 ] || { echo "install-profile: build first; nothing was copied." >&2; exit 1; }
+
+# A stale-but-non-empty lib/ used to install cleanly and ship an old plugin. Compare mtimes.
+for pkg in core/agent-community tools/tool-agent-community ui/ui-agent-community; do
+  lib="$ROOT/packages/$pkg/lib/index.js"
+  [ -e "$lib" ] || continue
+  newer=$(find "$ROOT/packages/$pkg/src" -type f \( -name '*.ts' -o -name '*.tsx' \) -newer "$lib" -print -quit)
+  if [ -n "$newer" ]; then
+    echo "install-profile: packages/$pkg/lib is older than $(basename "$newer") — rebuild (--force not supported)." >&2
+    exit 1
+  fi
+done
+
+# The Node half must never contain the browser loader. This is the exact check that
+# would have caught the regression.
+UI_NODE_HALF="$ROOT/packages/ui/ui-agent-community/lib/index.js"
+if grep -q '__ModuleLoader__' "$UI_NODE_HALF"; then
+  echo "install-profile: lib/index.js contains __ModuleLoader__ — that is the BROWSER" >&2
+  echo "                 bundle. The host imports lib/index.js in Node and would crash." >&2
+  exit 1
+fi
+
+# The browser half must BE wrapped. The inverse check below (Node half carries no loader) has
+# existed all along, which is why a bare-ESM client bundle passed every gate twice.
+UI_CLIENT="$ROOT/packages/ui/ui-agent-community/lib/client.js"
+if ! head -c 80 "$UI_CLIENT" | grep -q 'window.__ModuleLoader__.load({ id: "@dsh-plugin/ui-agent-community"'; then
+  echo "install-profile: lib/client.js is not the wrapped browser bundle — the DSH loader" >&2
+  echo "                 evaluates it as a classic script and the plugin will not activate." >&2
+  exit 1
+fi
+
+# ── 2. copy (never delete first) ──────────────────────────────────────────────
+#
+# THE WHOLE `lib/`, NOT A HAND-PICKED FILE LIST. The list this used to carry named seven
+# files, so everything else in a package's build output was left behind in whatever state
+# the profile happened to be in — measured: `types.d.ts` and `client.d.ts` were missing
+# every field added since the profile was created (a bot's `reasoningEffort`, the fork
+# lineage, `BotRoomNotice`), and a stale `index.js.map` sat in the installed UI package
+# with no source left in the repo. `diff -rq <repo>/lib <profile>/lib` reported all three.
+#
+# Mirroring the directory also means a file DELETED from a package (a module merged away,
+# an entry removed from `exports`) cannot survive in the profile as a phantom.
+for pkg in core/agent-community tools/tool-agent-community ui/ui-agent-community; do
+  src="$ROOT/packages/$pkg/lib"
+  name="$(basename "$pkg")"
+  dst="$DEST/$name/lib"
+  mkdir -p "$dst"
+  # Copy first, then prune: a failure mid-copy must not leave the package without its files.
+  cp -R "$src/." "$dst/"
+  # Remove anything the build no longer produces.
+  while IFS= read -r stale; do
+    [ -n "$stale" ] || continue
+    echo "  prune ${stale#"$dst"/}  (no longer built)"
+    rm -f "$stale"
+  done < <(cd "$dst" && find . -type f | while read -r f; do [ -e "$src/$f" ] || printf '%s\n' "$dst/${f#./}"; done)
+  # Directories the build no longer produces (an entry removed from tsdown's config).
+  find "$dst" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+done
+
+# ── 3. verify the installed tree ──────────────────────────────────────────────
+echo "install-profile: installed into profile '$PROFILE'"
+for pair in "${PAIRS[@]}"; do
+  src="$ROOT/${pair%%|*}"
+  dst="$DEST/${pair##*|}"
+  if [ ! -s "$dst" ]; then
+    echo "  MISSING  ${pair##*|}" >&2
+    exit 1
+  fi
+  if ! cmp -s "$src" "$dst"; then
+    echo "  MISMATCH ${pair##*|}" >&2
+    exit 1
+  fi
+  printf "  ok  %8s bytes  %s\n" "$(wc -c < "$dst" | tr -d ' ')" "${pair##*|}"
+done
+
+# ── 4. the BUNDLE half: its patch layer carries the plugin's Config ───────────
+#
+# pnpm copies this file for a `file:` dependency, so editing the source alone left the
+# profile running the OLD config — the maxConcurrentRuns change is exactly the kind of
+# edit that would silently never arrive. Missing bundle dir is not fatal (a profile may
+# mount the @dsh-plugin rows directly), but a stale patch is.
+BUNDLE_SRC="$ROOT/packages/bundle/agent-collaboration/cordis.patch.yml"
+BUNDLE_DIR="$HOME/.dsh/profiles/$PROFILE/node_modules/dsh-plugin-agent-collaboration"
+if [ ! -d "$BUNDLE_DIR" ]; then
+  # Silently skipping this used to leave the profile running the OLD patch — the failure mode the
+  # header above admits. Refuse unless the caller explicitly says the bundle is mounted elsewhere.
+  if [ "${1:-}" = "--allow-missing-bundle" ]; then
+    echo "install-profile: WARNING no bundle dir at $BUNDLE_DIR (allowed by flag); patch NOT updated"
+  else
+    echo "install-profile: no bundle dir at $BUNDLE_DIR — pass --allow-missing-bundle to skip." >&2
+    exit 1
+  fi
+fi
+if [ -d "$BUNDLE_DIR" ]; then
+  if [ ! -s "$BUNDLE_SRC" ]; then
+    echo "install-profile: MISSING $BUNDLE_SRC" >&2; exit 1
+  fi
+  cp "$BUNDLE_SRC" "$BUNDLE_DIR/cordis.patch.yml"
+  if ! cmp -s "$BUNDLE_SRC" "$BUNDLE_DIR/cordis.patch.yml"; then
+    echo "  MISMATCH cordis.patch.yml" >&2; exit 1
+  fi
+  printf "  ok  %8s bytes  %s\n" "$(wc -c < "$BUNDLE_DIR/cordis.patch.yml" | tr -d ' ')" "dsh-plugin-agent-collaboration/cordis.patch.yml"
+
+  # The bundle's own lib/ too. pnpm materialises a `file:` dependency by copying the package
+  # as it was when the dependency was added, so output built afterwards never arrives —
+  # measured: the repo's `lib/index.d.ts` was missing from the installed bundle while its
+  # `package.json` promised `./lib/index.d.ts` under `exports.types`.
+  BUNDLE_LIB_SRC="$ROOT/packages/bundle/agent-collaboration/lib"
+  if [ -d "$BUNDLE_LIB_SRC" ]; then
+    mkdir -p "$BUNDLE_DIR/lib"
+    cp -R "$BUNDLE_LIB_SRC/." "$BUNDLE_DIR/lib/"
+    while IFS= read -r stale; do
+      [ -n "$stale" ] || continue
+      echo "  prune ${stale#"$BUNDLE_DIR/lib"/}  (no longer built)"
+      rm -f "$stale"
+    done < <(cd "$BUNDLE_DIR/lib" && find . -type f | while read -r f; do [ -e "$BUNDLE_LIB_SRC/$f" ] || printf '%s\n' "$BUNDLE_DIR/lib/${f#./}"; done)
+    echo "  ok  $(find "$BUNDLE_DIR/lib" -type f | wc -l | tr -d ' ') files  dsh-plugin-agent-collaboration/lib"
+  fi
+
+  # The manifest carries `exports`/`files`; a stale one points at files that may not exist.
+  if ! cmp -s "$ROOT/packages/bundle/agent-collaboration/package.json" "$BUNDLE_DIR/package.json"; then
+    cp "$ROOT/packages/bundle/agent-collaboration/package.json" "$BUNDLE_DIR/package.json"
+    echo "  updated dsh-plugin-agent-collaboration/package.json"
+  fi
+fi
+
+# Independent assertion on the installed copy, not just the source.
+if grep -q '__ModuleLoader__' "$DEST/ui-agent-community/lib/index.js"; then
+  echo "install-profile: installed Node half contains the browser loader" >&2
+  exit 1
+fi
+echo "install-profile: all checks passed."

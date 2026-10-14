@@ -1,0 +1,326 @@
+/**
+ * ConversationArea — the page's content column: the open room's conversation, or the
+ * "pick something on the left" state when no room is selected.
+ *
+ * Presentational on purpose, like `RoomList`: it owns no data and calls no RPC of its own
+ * beyond the ones the panel is handed. The panel wiring (room/bot/skill/ledger props and the
+ * whole callback set) lives here so the shell only has to supply the current values. Every
+ * callback the shell passes in is a `useCallback` from the shell — the panel's skill effects
+ * list them as dependencies, so identity stability is the shell's job.
+ */
+import type { BotCommunitySnapshot, BotIdentity, BotRoom, BotRun } from '@dsh-plugin/agent-community'
+import { useState } from 'react'
+import { exportTranscript } from './exportTranscript.ts'
+import type { CommunityRemote, ModelGroup } from './types.ts'
+import { describe } from './types.ts'
+import { css } from '../styles.ts'
+import { BotConversationPanel } from '../conversation/BotConversationPanel.tsx'
+import type { BotConversationPanelProps } from '../conversation/BotConversationPanel.tsx'
+import type { AttachmentItem } from '../conversation/types.ts'
+
+/** One row of the snapshot's task board; the panel's `tasks` prop is narrowed from these. */
+type SnapshotTask = BotCommunitySnapshot['tasks'][number]
+
+export interface ConversationAreaProps {
+  /** The room on screen. `undefined` draws the empty state instead of a panel. */
+  room: BotRoom | undefined
+  /** The selected room id; equals `room.id` whenever `room` is set. */
+  roomId: string | undefined
+  /** The whole directory — the panel resolves the room's own members from it. */
+  bots: readonly BotIdentity[]
+  /** This room's runs (already filtered by the shell), for the panel's live-run tests. */
+  runs: readonly BotRun[]
+  modelGroups: readonly ModelGroup[]
+  /** The snapshot's task board; filtered to this room below. */
+  tasks: readonly SnapshotTask[]
+  skills: ReadonlyArray<{ id: string; name: string; description: string; path: string }> | undefined
+  skillsError: string | undefined
+  /** Last snapshot failure, painted above the panel and inside the empty state. */
+  error: string | undefined
+  /** Picks the empty state's wording: bots list or group list. */
+  isBotMode: boolean
+  remote: CommunityRemote
+  /** Stable skill loaders — see the note on the composer's dependency list in the shell. */
+  onLoadSkill: (name: string) => Promise<{ name: string; content: string } | undefined>
+  onListSkillFiles: (dir: string) => Promise<Array<{ path: string; isDir: boolean }>>
+  listLedger: BotConversationPanelProps['listLedger']
+  /** The shell's notice line (model/permission/command feedback, fork results). */
+  onNotice: (text: string) => void
+  /** §5.4: after a DM send, ask the host whether the task should become a group. */
+  onDetectProposal: (roomId: string, messageId: string) => void
+  /** Reload the snapshot, optionally keeping `preferId` selected (the fork path). */
+  onReload: (preferId?: string) => Promise<void>
+  /** Land in a freshly forked bot's room: switch to the bots tab and select it. */
+  onOpenBotRoom: (roomId: string) => void
+}
+
+export function ConversationArea({
+  room, roomId, bots, runs, modelGroups, tasks, skills, skillsError, error, isBotMode,
+  remote, onLoadSkill, onListSkillFiles, listLedger, onNotice, onDetectProposal, onReload,
+  onOpenBotRoom,
+}: ConversationAreaProps) {
+  /**
+   * Bumped after a compaction to REMOUNT the transcript.
+   *
+   * The panel merges ledger rows by id and never drops one (that is what keeps a streamed
+   * turn from reordering the list), so rows for messages the host has just deleted would
+   * stay on screen for ever. A compaction is the one event that removes rows, and a fresh
+   * mount is the one thing that forgets them. Hook lives above the early return below
+   * because hooks may not be conditional.
+   */
+  const [transcriptEpoch, setTranscriptEpoch] = useState(0)
+
+  if (room === undefined) {
+    return (
+      <div className={css.emptyState} style={{ gridRow: '1 / -1' }}>
+        {error !== undefined && <p style={{ color: 'var(--dsw-alias-state-error-primary)', fontSize: 13 }}>{error}</p>}
+        <p className={css.emptyTitle}>{isBotMode ? '选择一个 Bot' : '选择一个群聊'}</p>
+        <p className={css.emptyHint}>{isBotMode ? '从左侧选择 Bot 开始聊天，或点击 + 新建。' : '从左侧选择群聊，或点击 + 新建。'}</p>
+      </div>
+    )
+  }
+
+  return (
+    <>
+      {/* The room header is deliberately gone: the panel's own
+          SessionHeader already carries the name, stop, and clear
+          controls, so the page header was pure duplication. */}
+      {error !== undefined && <div className={css.error}>{error}</div>}
+      {/* P1-P8: BotConversationPanel — self-contained conversation UI.
+          Data comes from the plugin's own ledger RPC, not DSH session.
+          css.content is a grid (grid-template-rows: auto minmax(0,1fr) auto).
+          Use gridRow:'2/-1' so the panel always fills all remaining rows
+          regardless of whether the error div is present; height:100% is
+          correct for a grid child (flex:1 does nothing here). */}
+      <div style={{ gridRow: '2 / -1', height: '100%', minHeight: 0, overflow: 'hidden' }}>
+        <BotConversationPanel
+          key={`${roomId}#${transcriptEpoch}`}
+          roomId={roomId!}
+          roomName={room.directBotId !== undefined
+            ? (bots.find(b => b.id === room.directBotId)?.name ?? room.name ?? 'Bot 会话')
+            : (room.name ?? '群聊')}
+          isGroup={room.directBotId === undefined}
+          bots={bots
+            .filter(b => room.memberIds.includes(b.id))
+            .map(b => ({ id: b.id, name: b.name, avatarSeed: b.avatar.seed }))}
+          // THE ROOM'S runs, not the members' runs: a member busy in ANOTHER room used
+          // to satisfy the task dock's "something is running" test, so the card stayed
+          // on screen in a room where nothing was happening.
+          runs={runs.filter(r => r.roomId === roomId)}
+          modelGroups={modelGroups as Array<{ id: string; label?: string; models: Array<{ id: string; name?: string }> }>}
+          skills={skills}
+          skillsError={skillsError}
+          onLoadSkill={onLoadSkill}
+          onListSkillFiles={onListSkillFiles}
+          onSend={async (roomId, text, modelPayload, attachments, mentions) => {
+            // `text` is the draft (what the bubble shows); `modelPayload` adds the
+            // expanded `/skill` bodies for the model only. Attachments travel as base64
+            // bytes: the page cannot see the host's filesystem, and the host refuses to
+            // accept a caller-supplied path. The host stores each file inside the
+            // receiving bot's own workspace and appends an `[附件]` block to the MODEL
+            // payload, so the bubble still shows exactly what the user typed.
+            const sent = await remote.sendMessage({
+              roomId, text, modelText: modelPayload,
+              ...(attachments.length > 0
+                ? { attachments: await readAttachmentsForRpc(attachments) }
+                : {}),
+            } as Parameters<typeof remote.sendMessage>[0])
+            // ── THE USER'S OWN MESSAGE IS NOT UNREAD ────────────────────────────────
+            //
+            // Sending means "I have seen everything up to this point", so the room's read
+            // water mark advances to the message just sent. Without this the mark stayed at
+            // the instant the room was OPENED, so the user's own message — and every reply
+            // that followed it — counted as unread while the user was staring at the
+            // transcript, reported as 「明明处在会话界面却依然显示未读，还把我发送的消息也
+            // 识别为未读」.
+            //
+            // The id comes from the send's own answer, so the mark is exact rather than a
+            // timestamp compared against the client's clock.
+            void remote.markRoomRead({ roomId, upToId: sent.id })
+              .then(() => onReload(roomId))
+              .catch(() => undefined)
+            // §5.4: only a DM can escalate into a group — a group already has
+            // its members — and the check runs AFTER the send resolved so the
+            // message the proposal is about is already in the room.
+            if (room.directBotId !== undefined) void onDetectProposal(roomId, sent.id)
+          }}
+          onStop={async (_roomId) => {
+            const activeRuns = runs.filter(r =>
+              room.memberIds.includes(r.botId) &&
+              (r.status === 'running' || r.status === 'queued'),
+            )
+            await Promise.all(activeRuns.map(r =>
+              remote.controlRun({ id: r.id, action: 'cancel', expectedRevision: r.controlRevision }),
+            ))
+          }}
+          onApprove={async (callId) => {
+            await remote.approveBotToolCall(callId, 'allowed-once')
+          }}
+          onReject={async (callId) => {
+            await remote.approveBotToolCall(callId, 'rejected')
+          }}
+          // A blocked question: the answer unblocks the bot's turn, so the panel reloads
+          // straight away rather than waiting for the next poll tick.
+          onAnswerQuestion={async (questionId, answer) => {
+            await remote.answerBotQuestion({ roomId: roomId!, questionId, answer })
+            void onReload()
+          }}
+          onSkipQuestion={async (questionId) => {
+            await remote.answerBotQuestion({ roomId: roomId!, questionId, skip: true })
+            void onReload()
+          }}
+          onCommand={(_roomId, cmdId, subId) => {
+            // ── EVERY ROW MUST DO SOMETHING REAL ────────────────────────────────
+            //
+            // This handler used to be a pile of placeholders: `file` had no branch at
+            // all (the menu row did nothing), `permission` and `model` answered with a
+            // notice and changed nothing, and `compact` silently DELETED the room's
+            // messages — a destructive surprise behind a label that means "compress".
+            // A menu whose rows lie is worse than a menu with fewer rows, so each branch
+            // below either performs the action or says plainly why it cannot.
+            const botId = room.directBotId ?? room.memberIds[0]
+            const bot = bots.find(b => b.id === botId)
+            if (botId === undefined || bot === undefined) {
+              onNotice('这个房间没有可配置的 Bot。')
+              return
+            }
+            const botName = bot.name
+
+            if (cmdId === 'permission' && subId !== undefined) {
+              // The bot's permission IS the session's sandbox/approval preset
+              // (`SessionRunner.applyPermissionPreset`), so the stored value is the
+              // switch that matters — no session-level knob exists to poke instead.
+              const label = { 'read-only': '仅可查看', 'workspace-write': '工作区内修改', 'full-access': '完全权限' }[subId] ?? subId
+              void remote.updateBot({ id: botId, permission: subId as 'read-only' | 'workspace-write' | 'full-access' })
+                .then(() => {
+                  onNotice(`已把「${botName}」的权限设为：${label}。正在进行的这一轮不受影响，下一次运行生效。`)
+                  return onReload(roomId)
+                })
+                .catch((e: unknown) => { onNotice(`设置权限失败：${describe(e)}`) })
+              return
+            }
+
+            if (cmdId === 'model' && subId !== undefined) {
+              if (subId === 'default') {
+                onNotice('这是占位项：模型目录还没加载完，稍后再试。')
+                return
+              }
+              // The submenu carries model ids only, so resolve the provider from the
+              // catalog the menu was built from rather than guessing it.
+              const group = modelGroups.find(g => g.models.some(m => m.id === subId))
+              if (group === undefined) {
+                onNotice(`找不到模型「${subId}」所属的提供方，未做修改。`)
+                return
+              }
+              const modelName = group.models.find(m => m.id === subId)?.name ?? subId
+              const providerName = group.label ?? group.id
+              void remote.updateBot({ id: botId, provider: group.id, model: subId })
+                .then(() => {
+                  // The provider belongs in the notice: two providers offer the same model
+                  // ids, so "model set to X" alone cannot tell the user what changed.
+                  onNotice(`已把「${botName}」的模型设为：${modelName}（提供方：${providerName}）。正在进行的这一轮不受影响，下一次运行生效。`)
+                  return onReload(roomId)
+                })
+                .catch((e: unknown) => { onNotice(`设置模型失败：${describe(e)}`) })
+              return
+            }
+
+            if (cmdId === 'compact') {
+              // 压缩 now DOES what its label says. The host owns the work — it is the only
+              // side that can read the room's messages, rebuild the ledger the panel draws
+              // from and retire the session that would otherwise replay the whole
+              // transcript — so this branch is: call, report, reload.
+              //
+              // The old branch printed an explanation pointing at 清空消息 because there was
+              // no summariser to call. There is one now (`compactRoom` → the plugin's own
+              // `ctx.llm.stream` path), and it keeps the newest messages verbatim.
+              void remote.compactRoom({ roomId: roomId! })
+                .then((result) => {
+                  if (!result.compacted) {
+                    // A refusal is a normal answer and NOTHING was touched: say why and stop.
+                    onNotice(result.reason ?? '这次没有压缩：房间不需要压缩。')
+                    return
+                  }
+                  onNotice(
+                    `已压缩 ${result.removed} 条历史消息为摘要，保留最近 ${result.kept} 条`
+                    + `${result.sessionsRetired > 0 ? '；更早的原文不再保留' : ''}`
+                    + '。下一次回复会从摘要继续。',
+                  )
+                  // ── THE TRANSCRIPT HAS TO BE REBUILT, NOT PATCHED ──────────────
+                  //
+                  // The panel merges ledger rows by id and never drops one, so the rows of
+                  // the messages this call just replaced would stay on screen. Bumping the
+                  // epoch remounts the panel, which fetches the host's rebuilt ledger.
+                  setTranscriptEpoch(epoch => epoch + 1)
+                  return onReload(roomId)
+                })
+                .catch((e: unknown) => { onNotice(`压缩失败：${describe(e)}`) })
+              return
+            }
+
+            // `file` never reaches here: the composer owns both the menu and the file
+            // input, so it opens the picker in `selectSlashCommand` and does not call
+            // onCommand. Noted so a later reader does not add a "missing" branch.
+
+            onNotice(`「${cmdId}」这个命令还没有实现。`)
+          }}
+          onClear={(_roomId) => {
+            remote.clearMessages(roomId!).catch(() => undefined)
+          }}
+          round={room.taskState?.round}
+          tasks={tasks.filter(t => t.roomId === roomId).map(t => ({
+            id: t.id, subject: t.subject, status: t.status, round: t.round,
+            ...(t.assigneeName !== undefined ? { assigneeName: t.assigneeName } : {}),
+          }))}
+          listLedger={listLedger}
+          onFork={room.directBotId === undefined ? undefined : (messageId) => {
+            const botId = room.directBotId
+            if (botId === undefined) return
+            void remote.copyBot(botId, room.id, messageId)
+              .then(({ bot, room: copy }) => {
+                onNotice(`已分叉出新 Bot：${bot.name}（已带上该条及之前的消息）`)
+                // Land in the copy's conversation, not the original's.
+                void onReload(copy.id).then(() => {
+                  onOpenBotRoom(copy.id)
+                })
+              })
+              .catch((e: unknown) => { onNotice(`分叉失败：${describe(e)}`) })
+          }}
+        />
+      </div>
+    </>
+  )
+}
+
+/**
+ * Read the composer's picked files into the send RPC's inline shape.
+ *
+ * BASE64, not a path: the page cannot see the host's filesystem, and the host must not
+ * accept a path — an "attachment name" like `../../x` would otherwise be an arbitrary
+ * write. `FileReader` rather than a manual byte loop because `String.fromCharCode(...)`
+ * over a multi-megabyte array overflows the stack.
+ */
+async function readAttachmentsForRpc(
+  items: readonly AttachmentItem[],
+): Promise<Array<{ name: string; mime?: string; dataBase64: string }>> {
+  return Promise.all(items.map(async item => ({
+    name: item.name,
+    ...(item.file.type !== '' ? { mime: item.file.type } : {}),
+    dataBase64: await readAsBase64(item.file),
+  })))
+}
+
+function readAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error(`读取附件失败：${file.name}`))
+    reader.onload = () => {
+      // readAsDataURL always yields `data:<mime>;base64,<payload>`; the RPC carries the
+      // payload alone, and the host resolves the MIME from the explicit field.
+      const result = String(reader.result ?? '')
+      const comma = result.indexOf(',')
+      resolve(comma >= 0 ? result.slice(comma + 1) : result)
+    }
+    reader.readAsDataURL(file)
+  })
+}

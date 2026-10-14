@@ -1,0 +1,66 @@
+# Agent Collaboration bundle — Community only (route A).
+#
+# Route A: DSH's built-in Agent Teams bundle stays enabled and owns teammates,
+# the shared task board, and peer messaging. This bundle mounts only the Bot
+# Community, which has no in-box equivalent.
+#
+# The three Agent Team rows below are deliberately commented out. This plugin's
+# team packages are a same-origin fork of an older built-in generation: they
+# share the persisted session event vocabulary (`team/member`, `team/task`,
+# `team/message/queued`, `team/message/delivered`, all `version: 2`) and the
+# projection `stateVersion` with the built-in. Mounting both makes two
+# projections replay one session log. They also call the 0.1.x subagent API,
+# which no longer matches the 0.2.0 signatures.
+#
+# To take over instead, uncomment those rows AND disable the built-in bundle
+# (`@deepseek-ai/dsh-experimental-agent-team-profile`) in the profile patch.
+
+- insert:
+    - id: plugin-agent-community
+      name: "@dsh-plugin/agent-community"
+      config:
+        maxBots: 32
+        maxRooms: 64
+        maxMessages: 10000
+        maxRuns: 1000
+        # Executor tunables — adjust here, no code change needed
+        #
+        # The slot count is GLOBAL, not per room: `slots = maxConcurrent - active.size`
+        # in RunExecutor.tick(). At 2, a four-bot group ran two bots and parked the
+        # other two behind the 排队 banner, which is the opposite of the product
+        # expectation — a group exists so its members work AT THE SAME TIME. 8 is the
+        # packaged ceiling on runaway fan-out (each run is a live Agent making its own
+        # provider call); raise it here if a room should hold more concurrent bots.
+        maxConcurrentRuns: 8
+        runTimeoutMs: 600000
+        runLeaseMs: 60000
+        historyMessagesInPrompt: 10
+        a2aMinIntervalMs: 3000
+
+    - id: plugin-tool-agent-community
+      name: "@dsh-plugin/tool-agent-community"
+
+    - id: plugin-ui-agent-community
+      name: "@dsh-plugin/ui-agent-community"
+
+    # NOTE: a fourth row used to mount a second @deepseek-ai/dsh-permission-presets
+    # instance here to add a read-only preset. It can never activate: this DSH's own
+    # dsh-base layer already mounts that package as row id `permission`, and
+    # cordis.provide() refuses a duplicate service name, so every reload failed with
+    #   service "permissionPresets" has been registered at <PermissionPresetService>
+    # The built-in row already ships read-only / workspace-write / danger-full-access
+    # presets (sandbox + approval), so nothing is lost. To restyle them, patch the
+    # existing row by id instead of inserting a new one — and remember that an
+    # id-targeted `config` REPLACES the whole config rather than deep-merging:
+    #
+    #   - id: permission
+    #     name: "@deepseek-ai/dsh-permission-presets"
+    #     config:
+    #       presets: { read-only: {...}, workspace-write: {...}, danger-full-access: {...} }
+    #
+    # resolvePresetName() in runs.ts matches by sandbox value, so preset key
+    # renaming in a future DSH version will not break the executor.
+
+    # The legacy `agent-team` fork's rows used to live here. Its three packages were removed on
+    # 2026-10-14 (never mounted, never built — see pnpm-workspace.yaml), so there is nothing left to
+    # enable: this bundle mounts the Community packages only.

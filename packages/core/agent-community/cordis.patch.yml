@@ -1,0 +1,36 @@
+# @dsh-plugin/agent-community — the Bot Community service.
+#
+# This patch is what makes THIS package installable on its own:
+#
+#   dsh plugin --profile <profile> add @dsh-plugin/agent-community
+#
+# The host half is the whole plugin — Bots, rooms, runs, the ledger the panel draws.
+# `packages/bundle/agent-collaboration` mounts the same row and adds the two halves
+# that only make sense together with it (the model-facing tools and the browser
+# panel); installing this package alone gives a working service with no UI, which is
+# the right shape for a headless or scripted deployment.
+#
+# Keep the row id in sync with the bundle's patch: two rows mounting the same plugin
+# is a config mistake, and the ids are how that is noticed.
+
+- insert:
+    - id: plugin-agent-community
+      name: "@dsh-plugin/agent-community"
+      config:
+        maxBots: 32
+        maxRooms: 64
+        maxMessages: 10000
+        maxRuns: 1000
+        # Executor tunables.
+        #
+        # The slot count is GLOBAL, not per room: `slots = maxConcurrent - active.size`
+        # in RunExecutor.tick(). At 2, a four-bot group ran two bots and parked the
+        # other two behind the 排队 banner, which is the opposite of the product
+        # expectation — a group exists so its members work AT THE SAME TIME. 8 is the
+        # packaged ceiling on runaway fan-out (each run is a live Agent making its own
+        # provider call); raise it here if a room should hold more concurrent bots.
+        maxConcurrentRuns: 8
+        runTimeoutMs: 600000
+        runLeaseMs: 60000
+        historyMessagesInPrompt: 10
+        a2aMinIntervalMs: 3000
