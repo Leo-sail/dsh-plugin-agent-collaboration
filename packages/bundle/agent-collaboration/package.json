@@ -38,7 +38,8 @@
     "typescript": "^6.0.3"
   },
   "scripts": {
-    "bundle": "tsdown"
+    "bundle": "tsdown",
+    "pack:release": "bash ../../../scripts/pack-release.sh"
   },
   "publishConfig": {
     "access": "public"

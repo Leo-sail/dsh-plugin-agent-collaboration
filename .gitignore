@@ -16,4 +16,5 @@ lib/
 *.tsbuildinfo
 # Packed tarballs are release artifacts, not sources
 *.tgz
+dist/
 _native-reference/

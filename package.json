@@ -9,7 +9,8 @@
     "typecheck": "pnpm -r exec tsc -p tsconfig.json --noEmit",
     "bundle": "pnpm -r run bundle && node scripts/check-build.mjs",
     "build": "pnpm run bundle",
-    "install:profile": "bash scripts/install-profile.sh"
+    "install:profile": "bash scripts/install-profile.sh",
+    "pack:release": "bash scripts/pack-release.sh"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
