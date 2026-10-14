@@ -1,10 +1,15 @@
 .DS_Store
 
-# Editor / agent tooling that is per-machine. A contributor's global git config may or may
-# not ignore these, so the repo does not depend on it: `.claude/settings.local.json` here
-# held 28 KB of this machine's command history, including absolute paths.
-.claude/settings.local.json
+# Editor / agent tooling that is per-machine, and never part of the plugin. A contributor's
+# global git config may or may not ignore these, so the repo does not depend on it:
+# `.claude/settings.local.json` here held 28 KB of this machine's command history, including
+# absolute paths, and `CLAUDE.md` was a set of instructions for an AI coding assistant that
+# had no business in a plugin's public repository.
 .claude/
+CLAUDE.md
+AGENTS.md
+.cursor/
+.cursorrules
 .vscode/
 .idea/
 
