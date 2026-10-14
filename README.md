@@ -67,7 +67,17 @@ the plugin is meant to be installed *into* a DSH profile, where those packages a
 
 ## Installation
 
-The installable unit is one bundle:
+Install the released tarball — no npm account and no local build:
+
+```bash
+dsh plugin --profile <your-profile> add \
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.0/dsh-plugin-agent-collaboration-0.1.0.tgz
+```
+
+That archive carries all three packages prebuilt, so nothing is compiled on your machine and nothing is
+fetched from a registry. Restart DSH and refresh the page — **Bots团队** appears in the sidebar.
+
+### Installing from a checkout instead
 
 ```bash
 dsh plugin --profile <your-profile> add "file:/path/to/this/repo/packages/bundle/agent-collaboration"
@@ -78,8 +88,6 @@ the bundle's own `file:` dependencies; the profile ends up with the bundle and n
 and every row fails to import. The same applies to DSH's own plugin manager, which passes an absolute
 path through unchanged.
 
-After it installs, restart DSH and refresh the page. **Bots团队** appears in the sidebar.
-
 Verify the install — all three must be real directories, not symlinks:
 
 ```bash
@@ -89,8 +97,9 @@ ls -ld ~/.dsh/profiles/<your-profile>/node_modules/@dsh-plugin/*
 ### Ask an agent to do it
 
 ```text
-Install the DSH plugin from file:/path/to/this/repo/packages/bundle/agent-collaboration into my DSH
-profile, restart DSH, and confirm the "Bots团队" entry appears in the sidebar.
+Install the DSH plugin at
+https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.0/dsh-plugin-agent-collaboration-0.1.0.tgz
+into my DSH profile, restart DSH, and confirm the "Bots团队" entry appears in the sidebar.
 ```
 
 ## Usage
