@@ -81,6 +81,66 @@ export function mentionsEveryone(text: string): boolean {
   return text.includes('@所有人') || text.includes('@全体')
 }
 
+/**
+ * Whether the message addresses the WHOLE room in words rather than by `@all`.
+ *
+ * Two strengths, because Chinese uses the same word for "everything" and "everybody":
+ *
+ *   · STRONG (`大家`/`各位`/`所有人`/`全体`/`全员`/`everyone`…) is always the room;
+ *   · WEAK is a plural INVITATION — `一起`, `各自`, `分别`, or `都` followed by a verb that
+ *     several bots can perform (`都看一下`, `都说说`). `都` alone is not enough: "这个设计都改一下"
+ *     means "change all of the design", not "all of you do it", and waking a second bot on that
+ *     is the same false positive the role matcher was fixed for.
+ */
+const COLLECTIVE_STRONG = [
+  '大家', '各位', '所有人', '全体', '全员', '每个bot', '每个 bot', '每个机器人',
+  'everyone', 'everybody', 'all of you', 'all bots',
+]
+const COLLECTIVE_INVITATIONS = ['一起', '各自', '分别', '逐个', '一一', 'each of you']
+/** Verbs several bots can do, so `都` in front of one of them is an invitation to all. */
+const COLLECTIVE_VERBS = ['看', '说', '来', '做', '试', '回答', '参与', '讨论', '写', '想', '给', '帮', '聊']
+
+export function asksEveryone(text: string): boolean {
+  const hay = text.toLowerCase()
+  if (COLLECTIVE_STRONG.some(term => hay.includes(term))) return true
+  if (COLLECTIVE_INVITATIONS.some(term => hay.includes(term))) return true
+  let at = hay.indexOf('都')
+  while (at >= 0) {
+    const after = hay.slice(at + 1, at + 2)
+    if (after !== '' && COLLECTIVE_VERBS.some(verb => after === verb)) return true
+    at = hay.indexOf('都', at + 1)
+  }
+  return false
+}
+
+/**
+ * The greeting vocabulary a room actually uses, in both languages.
+ *
+ * Kept as whole tokens: a greeting is recognised by REMOVING them and finding nothing left, so
+ * "你好，帮我把首页改一下" is a work request that happens to start with a greeting.
+ */
+const GREETINGS = [
+  '你好', '您好', '哈喽', '哈啰', '嗨', '大家好', '各位好', '早上好', '中午好', '下午好', '晚上好',
+  '在吗', '在么', 'hello', 'hi', 'hey', 'good morning', 'good evening',
+]
+
+/**
+ * Whether the message is ONLY a greeting.
+ *
+ * WHY THIS IS CONTENT AND NOT A FALLBACK. A greeting is addressed to the room by definition —
+ * 「你好」 in a group is not a request aimed at one bot, and the user's rule is that the CONTENT
+ * decides whether one bot answers, several do, or all of them. So this is a decision, not a
+ * default: strip the greeting tokens and if nothing is left, the room was addressed.
+ */
+export function isGreeting(text: string): boolean {
+  let rest = text.toLowerCase()
+  if (rest.trim() === '') return false
+  for (const token of GREETINGS) rest = rest.split(token).join('')
+  rest = rest.replace(/[\s，。,.、；;：:！!？?~～\-—…「」“”"'（）()【】\[\]]+/gu, '')
+  // Up to three leftover characters, so 「你好呀」「大家好~」「hi 在吗」 still read as greetings.
+  return rest.length <= 3
+}
+
 export interface RouteDecision {
   /** Bots that should run, in member order. */
   readonly targets: readonly string[]
@@ -189,11 +249,14 @@ function haystackOf(text: string): string {
  *      leader — never to the bot it names. Checked BEFORE name matching, because the name
  *      there is the object of the action, not the addressee.
  *   5. A member's NAME written out in the text ("让 A 看一下") addresses that member.
- *   6. A role/domain match: the member whose role matches MOST wins; a tie keeps them all.
- *      A single incidental shared word must not wake a second bot.
- *   7. Nothing matched — a message with no answer at all is a bug, so the LEADER takes it
- *      and decides. It does NOT fan out to every member: "你好" used to wake a four-bot
- *      room (four full model calls) and the user reported exactly that as wrong.
+ *   6. The message ADDRESSES THE ROOM IN WORDS (`大家`/`各位`/`一起`/`都看一下`…) → everyone.
+ *   7. The message is nothing but a GREETING → everyone. A greeting is addressed to the room;
+ *      it is not a request aimed at one bot.
+ *   8. A role/domain match: the member whose role matches MOST wins; a tie keeps them all.
+ *      THE CONTENT DECIDES HOW MANY ANSWER — one bot when one domain is meant, several when
+ *      several are, all of them when the message is collective.
+ *   9. Nothing matched → the LEADER takes it and decides (it may dispatch). This is the last
+ *      resort, not the rule: an unrecognised message is not automatically a one-bot message.
  *
  * "Who runs" has this single decision point. Nothing else in the plugin may enqueue a run
  * for a user message — two wake-up paths is how the same message ends up answered twice.
@@ -271,7 +334,20 @@ export function routeMessage(input: RouteInput): RouteDecision {
     }
   }
 
-  // 6. Role match: the BEST match wins, ties keep everyone.
+  // 6. The room addressed in words: 大家/各位/一起/都看一下…
+  //
+  // Checked AFTER names and mentions, so 「让 fgchb 给大家说一下」 still goes to fgchb, and BEFORE
+  // role matching, because an invitation to the room outranks a guess about who owns the subject.
+  if (asksEveryone(input.message.text)) {
+    return { targets: input.members.map(m => m.id), reason: 'all', matched: {} }
+  }
+
+  // 7. Nothing but a greeting: the room was addressed, so the room answers.
+  if (isGreeting(input.message.text)) {
+    return { targets: input.members.map(m => m.id), reason: 'all', matched: {} }
+  }
+
+  // 8. Role match: the BEST match wins, ties keep everyone.
   //
   // Picking every member with ANY hit woke a second bot on one shared word (two bots whose
   // roles both mention 设计). Ranking by hit count keeps "让画师画一张" → the artist while
@@ -295,7 +371,7 @@ export function routeMessage(input: RouteInput): RouteDecision {
     }
   }
 
-  // 7. Nothing matched: the LEADER takes it (and decides how many bots the job needs).
+  // 9. Nothing matched: the LEADER takes it (and decides how many bots the job needs).
   //    A room with no leader falls back to its first member in join order — the same
   //    member leadership would be handed to.
   const leader = input.leaderId !== undefined && byId.has(input.leaderId)

@@ -2,8 +2,8 @@
  * Routing regression suite — 「群里到底谁运行」.
  *
  * The user's rules, which this file exists to keep true:
- *   · only the bots that were ADDRESSED run — an unaddressed message goes to the leader,
- *     and a bare 「你好」 must not wake every member (four bots = four full model calls);
+ *   · the CONTENT decides how many bots answer: one (a request one bot owns), several (a
+ *     request several own), or all (a greeting, or the room addressed in words like 大家/一起);
  *   · `@all` / `@所有人` is the ONE way to ask the whole room;
  *   · a written-out name addresses that member; the BEST role match wins, ties keep all;
  *   · "把 A 踢出去" belongs to the leader, never to the bot it names;
@@ -82,13 +82,41 @@ check(ids(role) === 'a', '角色词命中前端 → 只叫它', ids(role))
 const tie = route('前端和测试都要看一下')
 check(ids(tie) === 'a,c', '两个成员并列命中 → 都叫', ids(tie))
 
-// ── 7. 什么都没匹配 → 只有 leader ───────────────────────────────────────────
+// ── 7. 内容决定人数：1 个 / 多个 / 全部 ─────────────────────────────────────
+//
+// The user's rule: the CONTENT decides how many bots answer — not a blanket "unaddressed
+// messages go to the leader". A greeting addresses the room; a domain request aims at the bot
+// that owns it; a collective request is the whole room.
 const hello = route('你好', { leaderId: 'a' })
-check(ids(hello) === 'a' && hello.reason === 'leader', '"你好" → 只有 leader（不再全员）', `${ids(hello)}/${hello.reason}`)
-const helloNoLeader = route('你好')
-check(helloNoLeader.targets.length === 1, '没有 leader 时也只叫 join order 第一个成员', ids(helloNoLeader))
+check(ids(hello) === 'a,b,c' && hello.reason === 'all', '「你好」→ 全员（打招呼是对着房间说的）', `${ids(hello)}/${hello.reason}`)
+check(ids(route('大家好')) === 'a,b,c', '「大家好」→ 全员')
+check(ids(route('你好呀~')) === 'a,b,c', '「你好呀~」→ 全员（残留字符不影响判定）')
+check(ids(route('早上好，在吗')) === 'a,b,c', '「早上好，在吗」→ 全员')
+// A request one bot owns answers alone. ("代码/设计" are deliberately NOT used here: the role
+// texts make several bots match those words, which is the "several" case below, not this one.)
+check(ids(route('帮我画一张分镜稿')) === 'b', '任务性质的内容只叫该领域的 1 个', ids(route('帮我画一张分镜稿')))
+check(ids(route('这个分镜都改一下')) === 'b',
+  '「都」指的是东西不是人 → 仍然只叫绘画那一个', ids(route('这个分镜都改一下')))
+// Several: two domains are named, neither collectively, and they tie — so both answer.
+const several = route('前端和测试分头看一下')
+check(ids(several) === 'a,c', '内容落在两个成员身上且势均力敌 → 两个都回', ids(several))
+
+// 集体语气（对房间说的邀请）→ 全员
+for (const text of ['大家看一下这个设计', '各位给点意见', '你们一起看看', '都来说说想法', '所有人各写一句']) {
+  const d = route(text)
+  check(ids(d) === 'a,b,c' && d.reason === 'all', `「${text}」→ 全员`, `${ids(d)}/${d.reason}`)
+}
+// 但显式点名优先于集体语气
+const namedBeatsAll = route('让 小毕 给大家说一下')
+check(ids(namedBeatsAll) === 'b', '点名 + 集体语气 → 听点名的（只叫 b）', ids(namedBeatsAll))
+
+// ── 8. 兜底：内容不指向任何人时，leader 接管 ────────────────────────────────
+const unclear = route('那个事怎么样了', { leaderId: 'a' })
+check(ids(unclear) === 'a' && unclear.reason === 'leader', '内容啥也不指向 → leader 接管', `${ids(unclear)}/${unclear.reason}`)
+const unclearNoLeader = route('那个事怎么样了')
+check(unclearNoLeader.targets.length === 1, '没有 leader 时也只叫 join order 第一个成员', ids(unclearNoLeader))
 const empty = routeMessage({ members: [], message: { text: '你好', mentions: [], mentionedIds: [] } })
-check(empty.targets.length === 0 && empty.reason === 'leader', '空房间 → 没有人运行（不报错）')
+check(empty.targets.length === 0, '空房间 → 没有人运行（不报错）', empty.reason)
 
 // ── 8. 名字解析（给"拉人"这类跨成员指令用） ─────────────────────────────────
 check(namedBotIdsIn('把 小毕 拉进群', MEMBERS.map(m => ({ id: m.id, name: m.name }))).join(',') === 'b',
