@@ -7,6 +7,11 @@
  * is typed — no centered modal, nothing to find. When the question is answered the composer
  * comes straight back.
  *
+ * CHOOSING IS NOT ANSWERING. Clicking an option used to answer immediately, which made a
+ * mis-click final and gave the user no chance to change their mind (and, for a question whose
+ * options are the whole answer, no confirmation step at all). Picking now only marks the row;
+ * 提交 sends it. Typed text still wins over a picked row (see `answerSelection`).
+ *
  * WHY IT EXISTS AT ALL
  * Bots have `ask_user_question`, but the host's implementation waits for an answer submitted
  * through the DSH session UI — and a bot's session is a hidden subagent session with no such
@@ -18,6 +23,7 @@ import { useState } from 'react'
 import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import { css } from '../styles.ts'
 import type { LedgerEntry } from './types.ts'
+import { canSubmit, resolveAnswer } from './answerSelection.ts'
 
 export interface QuestionView {
   readonly questionId: string
@@ -56,11 +62,13 @@ export function QuestionComposer({ view, busy = false, onAnswer, onSkip }: {
   onSkip: (questionId: string) => void | Promise<void>
 }): ReturnType<typeof Input> {
   const [text, setText] = useState('')
-  const pick = (option: string): void => { void onAnswer(view.questionId, option) }
-  const submitText = (): void => {
-    const trimmed = text.trim()
-    if (trimmed === '') return
-    void onAnswer(view.questionId, trimmed)
+  const [picked, setPicked] = useState<string | undefined>(undefined)
+  // Picking only selects. `resolveAnswer` decides what actually goes to the bot, and refuses when
+  // there is nothing to send (an empty answer would look like a real reply to a waiting bot).
+  const submit = (): void => {
+    const answer = resolveAnswer({ picked, text })
+    if (answer === undefined) return
+    void onAnswer(view.questionId, answer)
   }
   return (
     // Same shell as the composer it replaces — same width, radius, surface and elevation.
@@ -77,9 +85,12 @@ export function QuestionComposer({ view, busy = false, onAnswer, onSkip }: {
               <button
                 key={option}
                 type="button"
-                className={css.questionOption}
+                // Attribute AND class: assistive tech reads the pressed state, the stylesheet
+                // paints it, and neither depends on the other.
+                aria-pressed={picked === option}
+                className={picked === option ? `${css.questionOption} ${css.questionOptionPicked}` : css.questionOption}
                 disabled={busy}
-                onClick={() => pick(option)}
+                onClick={() => { setPicked(current => (current === option ? undefined : option)) }}
               >{option}</button>
             ))}
           </div>
@@ -95,13 +106,19 @@ export function QuestionComposer({ view, busy = false, onAnswer, onSkip }: {
               placeholder="或者直接输入你的回答"
               disabled={busy}
               onChange={e => setText(e.target.value)}
-              onKeyDown={(e: { key: string }) => { if (e.key === 'Enter') submitText() }}
+              onKeyDown={(e: { key: string }) => { if (e.key === 'Enter') submit() }}
             />
           )}
           <Button className={css.pick} variant="ghost" disabled={busy} onClick={() => { void onSkip(view.questionId) }}>跳过</Button>
-          {view.allowFreeText && (
-            <Button className={css.pick} variant="primary" disabled={busy || text.trim() === ''} onClick={submitText}>提交</Button>
-          )}
+          {/* ALWAYS RENDERED. It used to appear only for questions that allowed free text, so a
+              question whose options ARE the answer had no submit control at all — picking one
+              was the only way to answer, and therefore had to answer immediately. */}
+          <Button
+            className={css.pick}
+            variant="primary"
+            disabled={busy || !canSubmit({ picked, text })}
+            onClick={submit}
+          >提交</Button>
         </div>
       </div>
     </div>

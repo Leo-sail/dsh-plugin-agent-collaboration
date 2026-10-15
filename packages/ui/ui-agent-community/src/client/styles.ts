@@ -107,6 +107,9 @@ const CSS = `
 .dsh-plugin-community-question-option{display:block;width:100%;text-align:left;padding:10px 14px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;cursor:pointer;overflow-wrap:anywhere}
 .dsh-plugin-community-question-option:hover:not(:disabled){border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dsh-plugin-community-question-option:disabled{cursor:default;opacity:.5}
+/* Picked but not yet submitted: the row the 提交 button will send. Selection is a state the
+   user can change their mind about, so it must be visible before anything is committed. */
+.dsh-plugin-community-question-option-picked,.dsh-plugin-community-question-option[aria-pressed="true"]{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-active,var(--dsw-alias-interactive-bg-hover));font-weight:500}
 /* ── dialog chrome ────────────────────────────────────────────────────────────
    Geometry transcribed from the native tabbed dialog (PresetGuideDialog in
    dsh-client-ui-agent-preset, classes ZwjoKq_*): 640x600, no padding of its own, a
@@ -242,6 +245,7 @@ export const css = {
   pick: 'dsh-plugin-community-pick',
   checkbox: 'dsh-plugin-community-checkbox',
   questionOption: 'dsh-plugin-community-question-option',
+  questionOptionPicked: 'dsh-plugin-community-question-option-picked',
   questionHead: 'dsh-plugin-community-question-head',
   questionFrom: 'dsh-plugin-community-question-from',
   questionHint: 'dsh-plugin-community-question-hint',

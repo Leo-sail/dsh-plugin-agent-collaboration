@@ -6,7 +6,7 @@
   "description": "DSH Agent Community plugin workspace: host service, model tools, browser client and bundle",
   "packageManager": "pnpm@11.7.0",
   "scripts": {
-    "test": "node tests/version-agnostic.mjs && node tests/tool-schema.mjs && node tests/routing.mjs && node tests/tool-mask.mjs && node tests/tool-registration.mjs && node tests/bot-prompt.mjs && node tests/room-goal.mjs && node tests/dispatch.mjs && node tests/memory-store.mjs && node tests/memory-promote.mjs && node tests/compact-window.mjs && node tests/unread-flash.mjs && node tests/group-dedupe.mjs && node tests/bot-memory.mjs",
+    "test": "node tests/question-card.mjs && node tests/version-agnostic.mjs && node tests/tool-schema.mjs && node tests/routing.mjs && node tests/tool-mask.mjs && node tests/tool-registration.mjs && node tests/bot-prompt.mjs && node tests/room-goal.mjs && node tests/dispatch.mjs && node tests/memory-store.mjs && node tests/memory-promote.mjs && node tests/compact-window.mjs && node tests/unread-flash.mjs && node tests/group-dedupe.mjs && node tests/bot-memory.mjs",
     "typecheck": "pnpm -r exec tsc -p tsconfig.json --noEmit",
     "bundle": "pnpm -r run bundle && node scripts/check-build.mjs",
     "build": "pnpm run bundle",
