@@ -39,6 +39,9 @@ mkdir -p "$PKG"
 cp "$BUNDLE/package.json" "$PKG/package.json"
 cp -R "$BUNDLE/lib" "$PKG/lib"
 cp "$BUNDLE/cordis.patch.yml" "$PKG/cordis.patch.yml"
+# npm renders this on the package page, and the tarball is published to npm as well as attached to
+# the release — one README, or the two artifacts describe the plugin differently.
+if [ -f "$BUNDLE/README.md" ]; then cp "$BUNDLE/README.md" "$PKG/README.md"; fi
 
 node - "$ROOT" "$PKG" <<'NODE'
 const fs = require('fs'), path = require('path')
