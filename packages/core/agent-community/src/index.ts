@@ -41,7 +41,7 @@ import { advanceSchedule, dueSchedules, planImport, type BotSchedule, type HostS
 import type { ApprovalBridgeAccessor } from './approval-bridge.ts'
 import { SkillLifecycle, type LlmStream, type SkillEntry } from './skills-profile.ts'
 import { DEFAULT_MAX_ROUNDS, GroupFlowService, type GroupFlowPort } from './group-flow.ts'
-import { SessionRunner, optionalService } from './session-runner.ts'
+import { SessionRunner, optionalService, DEFAULT_DENIED_TOOLS } from './session-runner.ts'
 import { CURRENT_VERSION, emptyState, parsePersistedState, type PersistedState, type RoomAgentSession } from './persistence.ts'
 import { decideReadMark, repairReadMarks, totalUnread, unreadByRoom } from './unread.ts'
 import { LedgerProjection } from './ledger-projection.ts'
@@ -547,7 +547,7 @@ export class AgentCommunityService extends TypertRemoteService {
       historyMessagesInPrompt: config.historyMessagesInPrompt ?? 10,
       a2aMinIntervalMs: config.a2aMinIntervalMs ?? 3_000,
       botAgentPreset: config.botAgentPreset ?? 'standard',
-      botDeniedTools: config.botDeniedTools ?? ['plugin_manager', 'ask_user_question', 'skill'],
+      botDeniedTools: config.botDeniedTools ?? [...DEFAULT_DENIED_TOOLS],
       memoryEntriesPerRoom: config.memoryEntriesPerRoom ?? 12,
       memoryPromptEntries: config.memoryPromptEntries ?? 8,
       groupProposalTimeoutMs: config.groupProposalTimeoutMs ?? 120_000,
@@ -686,7 +686,7 @@ export class AgentCommunityService extends TypertRemoteService {
         // plugin-registered community tools. Before this they had 31 tools and none of
         // the core ones, which is why they kept saying they could not touch files.
         agentPreset: config.botAgentPreset ?? 'standard',
-        deniedTools: config.botDeniedTools ?? ['plugin_manager', 'ask_user_question', 'skill'],
+        deniedTools: config.botDeniedTools ?? DEFAULT_DENIED_TOOLS,
         // Where the preset-mount diagnostic lands (plugin data dir, not the profile).
         presetLogDir: join(this.home, 'agent-community'),
         setupAgent: (agentCtx, roomId, botId) => {

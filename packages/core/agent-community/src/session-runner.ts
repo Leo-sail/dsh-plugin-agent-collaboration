@@ -174,6 +174,43 @@ const OWNED_PREFIX = 'ac:'
  */
 const OWNED_SEP = ':'
 
+/**
+ * The host tools a bot session must never see, in one place.
+ *
+ * TWO KINDS OF ENTRY, and the difference matters:
+ *   · `plugin_manager` — genuinely dangerous for a bot (it can disable or uninstall plugins,
+ *     this one included), and
+ *   · names the PLUGIN ITSELF re-registers in the agent scope (`ask_user_question` → the
+ *     ledger question card, `skill` → the plugin's own framing wrapper). A global deny does
+ *     not hide a scoped registration (DSH: "scoped registrations remain visible"), so the
+ *     bot keeps the working card while the host's UI-bound version stays hidden.
+ *
+ * The rest is the room-bot tool surface: every entry brings system-prompt guidance that
+ * assumes a role a Bot in a room does not have. Measured on a real bot session before this
+ * list existed: `workflow`, `subagent`, `subagent_fork`, `create_goal`/`get_goal`/
+ * `update_goal`, `present`, `exit_plan_mode`, `list_agents`, `send_message` and
+ * `interrupt_agent` were all in the catalog, and their paragraphs were in the prompt.
+ *
+ * NOTE: this list is a MASK, not an unmount. A name the scope does not know is skipped (see
+ * `restrictGlobalTools`), so a deployment may trim it without breaking startup.
+ */
+export const DEFAULT_DENIED_TOOLS: readonly string[] = [
+  'plugin_manager',
+  'ask_user_question',
+  'skill',
+  // Fans out to hidden child agents; the room's own `dispatch` replaces it.
+  'workflow',
+  'subagent', 'subagent_fork', 'list_subagent_models',
+  // No plan-mode context, no deliverables panel, no bot-owned workspace dependencies.
+  'exit_plan_mode', 'present', 'load_workspace_dependencies',
+  // Agent Teams is a different thing from room members.
+  'list_agents', 'send_message', 'interrupt_agent',
+  // DSH goals require a top-level human request, which never happens in a bot turn; the
+  // room's own goal replaces them. `get_goal` stays and is re-pointed at the current room.
+  'create_goal', 'update_goal',
+]
+
+
 const DEFAULTS = {
   idleLimit: 12,
   hardLimit: 24,
@@ -194,7 +231,7 @@ const DEFAULTS = {
    */
   // `skill` is denied in favour of the plugin's own wrapper, which prefixes every skill body with
   // the "this is a method, not an order" framing — see collaboration-tools.ts.
-  deniedTools: ['plugin_manager', 'ask_user_question', 'skill'] as readonly string[],
+  deniedTools: DEFAULT_DENIED_TOOLS,
 } as const
 
 /**
@@ -783,7 +820,18 @@ export class SessionRunner {
       this.installRequestOverride(agentCtx, key)
       if (mountPreset) await this.mountAgentPreset(agentCtx, preset)
       const deny = this.opts.deniedTools
-      if (deny !== undefined && deny.length > 0) restrictGlobalTools(agentCtx, deny)
+      if (deny !== undefined && deny.length > 0) {
+        const mask = restrictGlobalTools(agentCtx, deny)
+        // ONE LINE OF TRUTH about the mask. A skipped name used to be invisible: the whole
+        // restriction silently did nothing while the catalog still showed the tools.
+        this.ctx.logger?.info?.(
+          `agent-community: bot tool mask room=${roomId} bot=${botId} `
+          + `applied=[${mask.applied.join(',')}] skipped=[${mask.skipped.join(',')}]`,
+        )
+      }
+      // Collaboration tools are installed AFTER the mask on purpose: they are scoped
+      // registrations, and DSH keeps those visible through a global deny — which is what
+      // makes the plugin's own `ask_user_question`/`skill` work while the host's stay hidden.
       this.opts.setupAgent?.(agentCtx, roomId, botId)
     }
     // ── THE VISIBILITY SOLUTION ────────────────────────────────────────────────
@@ -1231,15 +1279,38 @@ export class SessionRunner {
  * plugin's own scoped tools (the community families) survive untouched. A deployment
  * without the tools service simply keeps every tool.
  */
-export function restrictGlobalTools(agentCtx: Context, deny: readonly string[]): void {
+export function restrictGlobalTools(
+  agentCtx: Context,
+  deny: readonly string[],
+): { readonly applied: readonly string[]; readonly skipped: readonly string[] } {
   const tools = optionalService<{ restrict?(filter: { deny: readonly string[] }): unknown }>(agentCtx, 'tools')
-  if (tools?.restrict === undefined) return
-  try {
-    tools.restrict({ deny })
-  } catch {
-    // An unknown or scope-local name is rejected by the registry; the bot then keeps
-    // that tool rather than failing to start.
+  if (tools?.restrict === undefined) return { applied: [], skipped: [...deny] }
+  const applied: string[] = []
+  const skipped: string[] = []
+  for (const name of deny) {
+    try {
+      // ONE NAME PER CALL, and that is the whole point of this function.
+      //
+      // `tools.restrict()` validates the ENTIRE filter first and rejects the call when any
+      // name is unknown to the scope ("names unknown global tool ...; known global tools:"),
+      // and the old code called it once inside a bare `catch {}`. Measured on a real bot
+      // session: its tool catalog still listed `ask_user_question` and `skill` even though
+      // both sat in `botDeniedTools` — one name the scope did not know about (the plugin
+      // registers its OWN tool of that name after this runs) discarded the whole mask.
+      //
+      // DSH appends restrictions, so per-name calls intersect to exactly the intended mask;
+      // the only difference is that a bad name now costs one name instead of all of them.
+      tools.restrict({ deny: [name] })
+      applied.push(name)
+    } catch {
+      // Either the name is unknown to this scope, or it names a tool the plugin registered
+      // in the agent scope itself — and those stay visible by design (`restrict` cannot and
+      // must not hide a scoped registration). Recorded, not thrown: a stale entry in a
+      // deployment's deny list must not stop a bot from starting.
+      skipped.push(name)
+    }
   }
+  return { applied, skipped }
 }
 
 /**
