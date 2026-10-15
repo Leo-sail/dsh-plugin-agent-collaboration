@@ -29,7 +29,7 @@
     "@dsh-plugin-agent-community/ui-agent-community": "file:../../ui/ui-agent-community"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.0.0 <5.0.0"
+    "@deepseek-ai/cordis": "*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0 <5.0.0",

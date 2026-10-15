@@ -38,9 +38,8 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.0.0 <5.0.0",
-    "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.0-rc.1 <0.3.0",
-    "@dsh-plugin-agent-community/agent-community": "workspace:*"
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-client-ui-primitives": "*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0 <5.0.0",
@@ -73,5 +72,10 @@
     "deepseek-harness",
     "bot",
     "agent"
-  ]
+  ],
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      "optional": true
+    }
+  }
 }

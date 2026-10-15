@@ -35,7 +35,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage } from './dsh-compat.ts'
 import type { BotId, BotRoomId } from './types.ts'
 import { installBotPrompt } from './bot-prompt.ts'
 
@@ -488,7 +488,7 @@ export class SessionRunner {
       // state are decoupled, which is what makes this safe.
       await this.opts.restoreSession?.(this.accessor.sessionIdFor(roomId, botId))
       if (contextDelta !== undefined && contextDelta !== '') {
-        agent.inject(createUserMessage({
+        agent.inject(await createUserMessage({
           content: [{ type: 'text', text: contextDelta }],
           source: { kind: 'user' },
         }))
@@ -514,7 +514,7 @@ export class SessionRunner {
         // `followup` queues a next-turn prompt and wakes the driver. The source is
         // `user` so the loop treats it as ordinary input; for repairs we mark it as a
         // plugin message so it is distinguishable in the transcript.
-        agent.followup(createUserMessage({
+        agent.followup(await createUserMessage({
           content: [{ type: 'text', text }],
           // A repair is delivered on the user channel (that is the only channel a
           // followup can use), so `user` is the honest source — the transcript shows
@@ -1284,7 +1284,7 @@ export class SessionRunner {
     const transcript = history
       .map((m) => `${m.senderName}: ${m.text}`)
       .join('\n')
-    agent.inject(createUserMessage({
+    agent.inject(await createUserMessage({
       content: [{ type: 'text', text: `[房间历史摘要]\n以下是本房间此前的对话，供你了解上下文：\n${transcript}` }],
       source: { kind: 'user' },
     }))

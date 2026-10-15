@@ -27,10 +27,11 @@
  *
  * @module
  */
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { BotMemoryEntry, BotMemoryRecord } from './types.ts'
 import { appendEntry, clip, entriesFor, MAX_ENTRY_CHARS } from './bot-memory.ts'
+import { writeFileAtomic as writeAtomic } from './atomic.ts'
 
 /** What a memory file says about itself. */
 export interface RoomMemoryMeta {
@@ -334,13 +335,6 @@ export class MemoryStore {
   entriesFor(roomId: string, botId: string): Promise<readonly BotMemoryEntry[]> {
     return this.read(roomId, botId)
   }
-}
-
-/** Atomic write: temp file in the same directory, then rename. */
-async function writeAtomic(path: string, text: string): Promise<void> {
-  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
-  await writeFile(tmp, text, 'utf8')
-  await rename(tmp, path)
 }
 
 async function appendLines(path: string, lines: readonly string[]): Promise<void> {
