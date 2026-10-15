@@ -27,45 +27,38 @@ bundle 的 `cordis.patch.yml` 用**模块名**挂载三行：
 **`package.json`**（`main`/`exports` 指向 `lib/index.js`）——只有 `lib/` 的话，`require`/`import` 解析不到包。
 `scripts/install-profile.sh` 只负责刷新 `lib/*` 字节，包目录本身要存在。
 
-### 2. 插件自己的 DSH 依赖必须在**同一个** node_modules 里可解析
+### 2. ⛔ 绝对不要把 `@deepseek-ai/*` 装进 profile —— 这是 2026-10-15 那次事故的根因
 
-插件的运行时代码 `import` 这些包（不是类型导入，是真导入）：
+我按前一节的推理手装了一套 `@deepseek-ai/dsh-*@0.2.0-rc.2` 到 profile，结果**把启动这个 profile 的运行时
+自带的同名包遮蔽掉了**。用 `npx @deepseek-ai/dsh`（0.1.2-rc.1）启动时直接炸：
 
 ```
-@deepseek-ai/dsh-atomic-write   @deepseek-ai/dsh-llm
-@deepseek-ai/dsh-typert-protocol  @deepseek-ai/schemastery
+parameter codec is not backed by a zod v4 schema
+    at requireStrictCodec (file:///Users/changhao/.npm/_npx/1e7f6d9597241db0/node_modules/...)
 ```
 
-而它们的传递图还会拉进 `dsh-session` → `dsh-scope`、`dsh-sandbox` 等。**宿主不会替插件解析这些**：
-宿主自己的包在 `app.asar` 里，插件文件在 asar 之外，Node 只会从插件的真实路径向上找。所以 profile 里要有这张图：
+连带症状：**无法创建原生会话、无法在原生会话发消息**，而且 Agent Teams 的行被挂载两次 →
+`tool "send_message" is already registered`。
+
+**规则**：profile 里只有你自己插件的包；DSH 的包由**启动这个 profile 的那个运行时**提供。
+插件声明的是 peerDependencies，装插件请用**同一个运行时**的插件管理器：
 
 ```bash
-cd ~/.dsh/profiles/<profile>
-node ~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/pnpm/bin/pnpm.cjs add \
-  @deepseek-ai/cordis@4.0.4 \
-  @deepseek-ai/dsh-agent@0.2.0-rc.2 \
-  @deepseek-ai/dsh-atomic-write@0.2.0-rc.2 \
-  @deepseek-ai/dsh-llm@0.2.0-rc.2 \
-  @deepseek-ai/dsh-session@0.2.0-rc.2 \
-  @deepseek-ai/dsh-typert-protocol@0.2.0-rc.2 \
-  @deepseek-ai/dsh-tools@0.2.0-rc.2 \
-  @deepseek-ai/dsh-scope@0.2.0-rc.2 \
-  @deepseek-ai/dsh-sandbox@0.2.0-rc.2 \
-  @deepseek-ai/schemastery@3.18.4
+dsh plugin --profile <profile> add <插件包或本地路径>     # 用启动该 profile 的那个 dsh
 ```
 
-版本号要对齐宿主当前的 DSH 版本（`~/.dsh/dsh-runtimes/dsh-primary-runtime/runtime.json` 里的
-`desktopVersion`）。少了哪个包，验证脚本会直接告诉你是哪一个。
+运行时的版本必须 ≥ 插件的 peer 要求（本插件 0.2.0 要求 `@deepseek-ai/dsh-* >= 0.2.0-rc.1`）。
+旧 CLI（0.1.2-rc.1）装不了本插件；要么升级运行时，要么别在那个运行时里用它。
 
-### 3. 别让 pnpm 的清理把这张图删掉
+### 2b. 三行 patch 挂的组件名必须在 profile 的 node_modules 里解析得到
 
-`dsh plugin add` / 插件管理器的安装会用 pnpm 重算依赖树。当 bundle 的组件依赖从「按版本发布」变成
-`file:` 本地路径时，pnpm 不再把它们声明为 peer 的 DSH 包视作需要安装的东西，会**顺手删掉**
-（实测：一次重装输出 `Packages: -7`，插件随即无法启动）。所以本地开发时：
+### 3. 出问题时的清理顺序
 
-- 用 `scripts/install-profile.sh` 刷组件字节；
-- 用上面的 `pnpm add` 补依赖图；
-- 装完之后跑一次验证（下一节）。
+1. 从 profile 的 `bundles` 里去掉 `dsh-plugin-agent-collaboration`，并删掉它的 dependency；
+2. 删 `node_modules/dsh-plugin-agent-collaboration`；
+3. 跑一次 `pnpm install`（会按 package.json 重算依赖树）；
+4. **删掉手装进 profile 的 `node_modules/@deepseek-ai/`** —— 这是遮蔽源，留着就还会炸；
+5. 重启 DSH。
 
 ### 4. 验证（不需要启动服务）
 

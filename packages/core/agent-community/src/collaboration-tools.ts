@@ -166,11 +166,16 @@ const strList = (args: Record<string, unknown>, key: string): string[] => {
 /** JSON Schema for a tool that returns a small object; the model reads the text form. */
 const OPEN_OBJECT = { type: 'object', additionalProperties: true } as const
 
-export function registerCollaborationTools(agentCtx: Context, deps: CollaborationToolDeps): void {
+export function registerCollaborationTools(
+  agentCtx: Context,
+  deps: CollaborationToolDeps,
+): ReadonlyArray<{ readonly name: string; readonly reason: string }> {
   const tools = (agentCtx as unknown as {
     tools?: { register(definition: unknown): void }
   }).tools
-  if (tools === undefined || typeof tools.register !== 'function') return
+  if (tools === undefined || typeof tools.register !== 'function') {
+    return [{ name: '(all)', reason: 'this agent scope has no tools service' }]
+  }
 
   /**
    * Register one tool.
@@ -179,7 +184,36 @@ export function registerCollaborationTools(agentCtx: Context, deps: Collaboratio
    * actionable sentence rather than a JSON blob — the model acts on the outcome, and
    * a refusal has to say what to do instead.
    */
+  const failedTools: Array<{ name: string; reason: string }> = []
   const add = (spec: {
+    name: string
+    description: string
+    properties: Record<string, unknown>
+    required: readonly string[]
+    run(
+      args: Record<string, unknown>,
+      exec: ToolExec,
+    ): { value: unknown; text: string } | Promise<{ value: unknown; text: string }>
+  }): void => {
+    // ── ONE COLLISION MUST NOT COST THE OTHER TOOLS ─────────────────────────────
+    //
+    // `tools.register` throws when the name is already taken IN THIS SCOPE, and this scope is
+    // the agent's — where the deployment preset has already mounted its own tools. Measured on
+    // a real install: the bot lost `agent_community_dispatch`, `agent_community_goal` and
+    // `agent_community_recall` (every tool registered after the clashing one) and the host
+    // surfaced the collision as a plugin failure, which the user saw as "the plugin broke my
+    // session". A refused name is now recorded and the rest still register; the room's tools are
+    // independent of each other, so there is no reason for one to take the others down.
+    try {
+      registerOne(spec)
+    } catch (error: unknown) {
+      failedTools.push({ name: spec.name, reason: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  const failed: Array<{ name: string; reason: string }> = []
+
+  const registerOne = (spec: {
     name: string
     description: string
     properties: Record<string, unknown>
@@ -256,32 +290,18 @@ export function registerCollaborationTools(agentCtx: Context, deps: Collaboratio
     },
   })
 
-  // ── get_goal (room-scoped, shadows the host tool of the same name) ──────────
+  // ── NO `get_goal` REGISTRATION, ON PURPOSE ─────────────────────────────────
   //
-  // DSH ships `get_goal` for session goals. A Bot's goal is the ROOM's, so this scoped
-  // registration replaces it: the room comes from the caller's session and there is no room
-  // argument, which is the structural half of "one room's goal never affects another".
-  add({
-    name: 'get_goal',
-    description:
-      'Read the goal of the room you are working in right now (its text, status and when it '
-      + 'changed). Goals belong to one room: you cannot see or affect another room\'s goal.',
-    properties: {},
-    required: [],
-    run: (_args, exec) => {
-      const who = caller(exec)
-      if (typeof who === 'string') return { value: { ok: false }, text: who }
-      const goal = deps.roomGoal({ roomId: who.roomId })
-      if (goal === undefined) {
-        return { value: { ok: true, goal: null }, text: '本房间目前没有设定目标。' }
-      }
-      const label = goal.status === 'active' ? '进行中' : goal.status === 'paused' ? '已暂停' : '已完成'
-      return {
-        value: { ok: true, goal },
-        text: `本房间目标（${label}）：${goal.text}（最后更新 ${goal.updatedAt}）`,
-      }
-    },
-  })
+  // This used to register a tool named `get_goal` to re-point the host's goal tool at the room.
+  // It cannot work: `tools.register` refuses a name that already exists in the scope, and the
+  // deployment preset mounts `get_goal` per agent — so the registration threw, and (before the
+  // per-tool guard above) took the rest of the room's tools with it. Measured on a real install:
+  // `tool "get_goal" is already registered (for a per-agent variant, register through that
+  // agent's agent.ctx instead)`.
+  //
+  // The room's goal is therefore read through `agent_community_goal` (`action: "get"`), which is
+  // a name nothing else owns. The host's `get_goal` stays visible and answers about DSH's session
+  // goal — the prompt tells the bot which is which (see `bots:goal` in bot-prompt.ts).
 
   // ── agent_community_goal (room-scoped) ──────────────────────────────────────
   add({
@@ -293,8 +313,8 @@ export function registerCollaborationTools(agentCtx: Context, deps: Collaboratio
     properties: {
       action: {
         type: 'string',
-        enum: ['set', 'pause', 'resume', 'done'],
-        description: 'set = 设定/改写目标；pause/resume/done = 暂停/继续/完成当前目标。',
+        enum: ['get', 'set', 'pause', 'resume', 'done'],
+        description: 'get = 读当前房间目标；set = 设定/改写；pause/resume/done = 暂停/继续/完成。',
       },
       text: { type: 'string', description: 'action=set 时的目标内容（一句话）。' },
     },
@@ -304,6 +324,19 @@ export function registerCollaborationTools(agentCtx: Context, deps: Collaboratio
       if (typeof who === 'string') return { value: { ok: false }, text: who }
       const action = str(args, 'action')
       const text = str(args, 'text').trim()
+      if (action === 'get') {
+        // The room's goal is read through THIS tool: the host already owns the name `get_goal`
+        // in the agent scope (see the note above), so a separate read tool cannot exist.
+        const goal = deps.roomGoal({ roomId: who.roomId })
+        if (goal === undefined) {
+          return { value: { ok: true, goal: null }, text: '本房间目前没有设定目标。' }
+        }
+        const label = goal.status === 'active' ? '进行中' : goal.status === 'paused' ? '已暂停' : '已完成'
+        return {
+          value: { ok: true, goal },
+          text: `本房间目标（${label}）：${goal.text}（最后更新 ${goal.updatedAt}）`,
+        }
+      }
       if (action === 'set' && text === '') {
         return { value: { ok: false }, text: 'action=set 需要给出 text（一句话的目标）。' }
       }
@@ -701,4 +734,11 @@ export function registerCollaborationTools(agentCtx: Context, deps: Collaboratio
       return { value: { ok: true, finished: true }, text: '已汇报并结束本轮。' }
     },
   })
+
+  if (failedTools.length > 0) {
+    // Reported, never swallowed: a missing tool is why a bot "cannot do X", and the reason
+    // (a name the deployment already owns) is not something the model can guess.
+    return failedTools
+  }
+  return []
 }

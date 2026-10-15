@@ -720,7 +720,15 @@ export class AgentCommunityService extends TypertRemoteService {
           // harmful: `tools.register` THROWS on a duplicate name
           // (`tool "read" is already registered`), so doing it here aborted the agent's
           // setup and left the bot with no working context at all.
-          this.installCollaborationTools(agentCtx, roomId, botId)
+          const failedTools = this.installCollaborationTools(agentCtx, roomId, botId)
+          if (failedTools.length > 0) {
+            // A name the deployment already owns in this scope. The bot loses that ONE tool;
+            // everything else registered, which is the whole point of the per-tool guard.
+            this.ctx.logger?.warn?.(
+              `agent-community: ${failedTools.length} collaboration tool(s) could not register for `
+              + `room=${roomId} bot=${botId}: ${failedTools.map(f => `${f.name} (${f.reason})`).join('; ')}`,
+            )
+          }
         },
         // How aggressively materialised agents are retired (see Config.idleLimit).
         // Disposal is what closes the session write handle, so these limits decide
@@ -1056,16 +1064,12 @@ export class AgentCommunityService extends TypertRemoteService {
     }
   }
 
-  /**
-   * Register the collaboration tools for one agent.
-   *
-   * WHICH tools exist depends on the room kind, and that split is load-bearing:
-   * `propose_group` only makes sense in a 1:1 (it is how a bot asks for a team), and
-   * the coordination trio only makes sense in a group. Registering all four
-   * everywhere would let a bot try to spawn a group from inside one.
-   */
-  private installCollaborationTools(agentCtx: Context, roomId: string, botId: string): void {
-    registerCollaborationTools(agentCtx, {
+  private installCollaborationTools(
+    agentCtx: Context,
+    roomId: string,
+    botId: string,
+  ): ReadonlyArray<{ readonly name: string; readonly reason: string }> {
+    return registerCollaborationTools(agentCtx, {
       ownerOf: (exec) => {
         const viaExec = (exec as { agent?: { session?: { id?: string } } })?.agent?.session?.id
         if (typeof viaExec === 'string') return SessionRunner.parseSessionId(viaExec)
