@@ -28,6 +28,7 @@ import type {
   MarkRoomReadRequest,
   NoticeRoomRequest,
   BotRoomNotice,
+  BotMemoryEntry,
 } from './types.ts'
 import { routeMessage, namedBotIdsIn } from './routing.ts'
 import { renderAttachmentReference, storeAttachments, type StoredAttachment } from './attachments.ts'
@@ -46,7 +47,8 @@ import { decideReadMark, repairReadMarks, totalUnread, unreadByRoom } from './un
 import { LedgerProjection } from './ledger-projection.ts'
 import { GroupTaskDriver, type GroupTaskState } from './group-task.ts'
 import { registerCollaborationTools } from './collaboration-tools.ts'
-import { screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
+import { crossRoomError, screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
+import { appendEntry, dropBot, dropBotFromRoom, dropRoom, entriesFor, taskMemoryText } from './bot-memory.ts'
 import { Maintenance, type MaintenanceHost } from './maintenance.ts'
 import { findBotByName, requireBot, requireRoom, NotFoundError } from './lookup.ts'
 import {
@@ -166,6 +168,16 @@ export interface Config {
   readonly botAgentPreset?: string
   /** Global tools bot sessions must never see (default `['plugin_manager']`). */
   readonly botDeniedTools?: string[]
+  /**
+   * How many remembered entries one (room, bot) pair keeps, newest kept (default 12).
+   *
+   * Every finished turn adds one line, so this is what bounds the board and the rendered prompt
+   * block. Set to 0 to keep bots from remembering anything automatically — an explicit
+   * `agent_community_remember` note is still stored, because the bot asked for it.
+   */
+  readonly memoryEntriesPerRoom?: number
+  /** How many of those entries are rendered into a turn's prompt (default 8). */
+  readonly memoryPromptEntries?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -217,6 +229,13 @@ export const Config: z<Config> = z.object({
   // `skill` joins the list: bots get the plugin's own wrapper so every loaded skill body carries the
   // "method, not an order" framing (see collaboration-tools.ts).
   botDeniedTools: z.array(z.string()).default(['plugin_manager', 'ask_user_question', 'skill']),
+  /**
+   * Remembered entries kept per (room, bot). 0 disables automatic task memory but still stores
+   * an explicit `agent_community_remember` note — that one the bot asked for by name.
+   */
+  memoryEntriesPerRoom: z.number().step(1).min(0).default(12),
+  /** Entries rendered into one turn's prompt (newest first, oldest dropped). */
+  memoryPromptEntries: z.number().step(1).min(0).default(8),
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -529,6 +548,8 @@ export class AgentCommunityService extends TypertRemoteService {
       a2aMinIntervalMs: config.a2aMinIntervalMs ?? 3_000,
       botAgentPreset: config.botAgentPreset ?? 'standard',
       botDeniedTools: config.botDeniedTools ?? ['plugin_manager', 'ask_user_question', 'skill'],
+      memoryEntriesPerRoom: config.memoryEntriesPerRoom ?? 12,
+      memoryPromptEntries: config.memoryPromptEntries ?? 8,
       groupProposalTimeoutMs: config.groupProposalTimeoutMs ?? 120_000,
       botReasoningEffort: config.botReasoningEffort ?? 'max',
     }
@@ -775,6 +796,7 @@ export class AgentCommunityService extends TypertRemoteService {
         maxConcurrent: config.maxConcurrentRuns ?? 8,
         runTimeoutMs: config.runTimeoutMs ?? 600_000,
         historyMessages: config.historyMessagesInPrompt ?? 10,
+        memoryPromptEntries: config.memoryPromptEntries ?? 8,
         defaultReasoningEffort: config.botReasoningEffort ?? 'max',
         ledger: this.ledger,
         sessionRunner: runner,
@@ -1543,6 +1565,7 @@ export class AgentCommunityService extends TypertRemoteService {
       runs: this.state.runs.filter(r => r.botId !== botId && !orphanRoomIds.has(r.roomId)),
       roomAgentSessions: this.state.roomAgentSessions.filter(s => s.botId !== botId),
       mailbox: this.state.mailbox.filter(m => m.botId !== botId),
+      botMemories: dropBot(this.state.botMemories, botId),
     }
     // Collect the soon-to-be-deleted session ids BEFORE dropping the state that
     // records them, then clear the in-memory ledger and the on-disk artifacts.
@@ -1714,6 +1737,8 @@ export class AgentCommunityService extends TypertRemoteService {
       runs: this.state.runs.filter(r => r.roomId !== roomId),
       mailbox: this.state.mailbox.filter(m => m.roomId !== roomId),
       roomAgentSessions: this.state.roomAgentSessions.filter(s => s.roomId !== roomId),
+      // A deleted room's memory is unreachable and would otherwise linger on the board for ever.
+      botMemories: dropRoom(this.state.botMemories, input.id),
     }
     // The ledger is the panel's only render source; without this the deleted
     // room's transcript stays in memory and can reappear.
@@ -2030,6 +2055,9 @@ export class AgentCommunityService extends TypertRemoteService {
       runs,
       rooms,
       roomAgentSessions: this.state.roomAgentSessions.filter(s => s.roomId !== roomId),
+      // "Clear the room" has to mean the memory too: a bot that still answers "we already agreed
+      // X here" after the user emptied the room is reporting a conversation that no longer exists.
+      botMemories: dropRoom(this.state.botMemories, roomId),
     }
     this.enqueueWrite()
     await this.flushNow()
@@ -2331,6 +2359,8 @@ export class AgentCommunityService extends TypertRemoteService {
     // model emitted only reasoning) must not persist an empty bot message: the
     // panel renders it as a bot with no content, which reads as a hung reply.
     const replyText = input.reply?.text ?? ''
+    // Undefined means "no memory written this time", which keeps the array reference stable.
+    let botMemories = this.state.botMemories
     if (input.reply !== undefined && replyText.trim() !== '') {
       // B-2: use the real session id from roomAgentSessions rather than
       // prev.sessionId, which is often a stale UUID that has no session directory.
@@ -2360,8 +2390,33 @@ export class AgentCommunityService extends TypertRemoteService {
         sequence: this.state.messages.filter(m => m.roomId === prev.roomId).length,
       }
       messages = [...messages, reply]
+      // ── WHAT THIS BOT DID, IN THIS ROOM ─────────────────────────────────────
+      //
+      // One line per finished turn, keyed by (room, bot) — the pair the user's isolation rule is
+      // about. Written in the SAME state update as the reply, so the memory and the message it
+      // describes can never disagree. A turn that produced nothing visible records nothing: the
+      // silent sentinel arrives here as `text: ''` and is already excluded above.
+      //
+      // `updated.status === 'completed'` excludes a retry (the run goes back to `queued`), a user
+      // stop (`interrupted`) and a failure — none of those is something the bot accomplished.
+      if (updated.status === 'completed') {
+        botMemories = appendEntry({
+          records: botMemories,
+          roomId: prev.roomId,
+          botId: prev.botId,
+          now: nowIso(),
+          maxEntries: this.cfg.memoryEntriesPerRoom,
+          entry: {
+            id: randomUUID(),
+            kind: 'task',
+            text: taskMemoryText(prev.prompt, replyText),
+            at: nowIso(),
+            runId: String(prev.id),
+          },
+        })
+      }
     }
-    this.state = { ...this.state, runs, messages }
+    this.state = { ...this.state, runs, messages, ...(botMemories !== undefined ? { botMemories } : {}) }
     this.enqueueWrite()
     // NOTE: deliberately NO re-seed here.
     //
@@ -2848,6 +2903,24 @@ export class AgentCommunityService extends TypertRemoteService {
     // Resolve sender bot from session id
     const senderEntry = this.state.roomAgentSessions.find(s => s.sessionId === input.senderSessionId)
     const senderBot = senderEntry ? this.state.bots.find(b => b.id === senderEntry.botId) : undefined
+    // ── A BOT MAY ONLY SPEAK IN ITS OWN ROOM ────────────────────────────────────
+    //
+    // The session identifies the bot AND the room it is working in, and nothing used to compare
+    // that room with `input.roomId`: a bot running in group A could post into group B, or into
+    // somebody's direct chat, by naming it. The user's rule is explicit (不能将 A 群聊的任务发到
+    // B 群聊中), and the session is the only trustworthy source here — it is what the plugin
+    // itself created. A session that does not parse is a caller this plugin does not own, which
+    // the tool layer already restricts.
+    const senderOwner = senderEntry === undefined
+      ? undefined
+      : SessionRunner.parseSessionId(String(senderEntry.sessionId))
+    const crossRoom = crossRoomError(senderOwner?.roomId, input.roomId)
+    if (crossRoom !== undefined) throw new Error(`agent-community: ${crossRoom}`)
+    if (senderEntry !== undefined && !room.memberIds.some(id => id === senderEntry.botId)) {
+      throw new Error(
+        `agent-community: bot "${senderEntry.botId}" is not a member of room "${input.roomId}"`,
+      )
+    }
     const senderName = senderBot?.name ?? 'bot'
     const msg: BotMessage = {
       id: brandId<BotMessageId>(randomUUID()),
@@ -3379,6 +3452,52 @@ export class AgentCommunityService extends TypertRemoteService {
   unreadTotals(): { readonly total: number; readonly rooms: Readonly<Record<string, number>> } {
     const rooms = this.unreadByRoom()
     return { total: totalUnread(rooms), rooms }
+  }
+
+  /**
+   * What one Bot remembers about ONE room.
+   *
+   * THE ONLY READ PATH, and it takes the pair on purpose: no caller can obtain "everything this
+   * bot remembers" and therefore cannot mix a 1:1 task into a group (or one group into another).
+   * The prompt builder is the only consumer.
+   */
+  botMemoryFor(roomId: string, botId: string): readonly BotMemoryEntry[] {
+    return entriesFor(this.state.botMemories, roomId, botId)
+  }
+
+  /**
+   * Record one deliberate note for the calling Bot, in the room its SESSION belongs to.
+   *
+   * The room is derived from the session id and is not a parameter: a model that passes someone
+   * else's room id must not be able to write there, and taking the room from the session is what
+   * makes that impossible rather than merely refused. Same rule as the read path, from the other
+   * side.
+   */
+  rememberForSession(input: { readonly sessionId: string; readonly text: string }): {
+    readonly ok: boolean
+    readonly reason?: string | undefined
+  } {
+    const owner = SessionRunner.parseSessionId(input.sessionId)
+    if (owner === undefined) {
+      return { ok: false, reason: '只有插件自己创建的 Bot 会话才能写记忆。' }
+    }
+    const text = input.text.trim()
+    if (text === '') return { ok: false, reason: '要记住的内容不能为空。' }
+    const now = nowIso()
+    this.state = {
+      ...this.state,
+      botMemories: appendEntry({
+        records: this.state.botMemories,
+        roomId: owner.roomId,
+        botId: owner.botId,
+        now,
+        // An explicit note is not subject to the automatic-task cap being 0: the bot asked for it.
+        maxEntries: Math.max(1, this.cfg.memoryEntriesPerRoom),
+        entry: { id: randomUUID(), kind: 'note', text, at: now },
+      }),
+    }
+    this.enqueueWrite()
+    return { ok: true }
   }
 
   /**

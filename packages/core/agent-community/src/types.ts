@@ -727,3 +727,45 @@ export interface PendingGroupProposal {
   /** Set once confirmed, so the panel can navigate to the room it created. */
   readonly createdRoomId?: BotRoomId | undefined
 }
+
+// ── Per-(room, bot) memory ────────────────────────────────────────────────────
+
+/**
+ * One thing a Bot remembers about ONE room it worked in.
+ *
+ * The user's rule for this feature is an isolation rule: a Bot carries what it did in a direct
+ * chat and what it did in each group it belongs to, and those memories are never shared — a task
+ * from one group must not surface in another, and a 1:1 task must not surface in a group. The key
+ * below is therefore the PAIR, not the bot: there is no structure anywhere that holds one bot's
+ * memories for two rooms at once.
+ */
+export interface BotMemoryEntry {
+  readonly id: string
+  /**
+   * `task` — written automatically when a run of this bot finishes in this room.
+   * `note` — written by the bot itself through the `agent_community_remember` tool.
+   */
+  readonly kind: 'task' | 'note'
+  /** One compact line: what was asked, and what came of it. */
+  readonly text: string
+  /** When it was recorded (ISO). */
+  readonly at: string
+  /** The run that produced it, for `task` entries. */
+  readonly runId?: string | undefined
+}
+
+/**
+ * One (room, bot) pair's memory — the whole partition, bounded by the caps in `bot-memory.ts`.
+ *
+ * Stored as a top-level array keyed by the pair (like `roomAgentSessions`), deliberately NOT as a
+ * field on the room: `snapshot()` and `listRooms()` hand room records to the browser whole and the
+ * panel polls them every 400ms while a run is live, so memory stored there would be shipped to the
+ * client on every tick. Here it never reaches an RPC payload.
+ */
+export interface BotMemoryRecord {
+  readonly roomId: BotRoomId
+  readonly botId: BotId
+  /** Oldest first; trimmed from the front when the cap is reached. */
+  readonly entries: BotMemoryEntry[]
+  readonly updatedAt: string
+}

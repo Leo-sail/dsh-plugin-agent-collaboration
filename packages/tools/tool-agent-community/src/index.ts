@@ -24,6 +24,31 @@ function caller(agent: Agent | undefined, toolName: string): Agent {
   return agent
 }
 
+/**
+ * Refuse a `room_id` that is not the room the calling Bot is working in.
+ *
+ * A Bot's session names exactly one room, and a tool parameter must never widen that: without this
+ * check a bot running in group A could read or post into group B (or into somebody's 1:1) simply by
+ * naming it — measured in the host, where `postBotMessage` resolved the sender from the session but
+ * never compared the session's room with the requested one. The user's rule for this plugin is
+ * explicit: 不能将单聊中的任务发到群聊内，也不能将群聊内的任务发到单聊中，也不能将A群聊的任务发到B群聊中.
+ *
+ * A caller with NO plugin session (the user's own agent, or the panel) is not restricted: there is
+ * no bot identity to protect, and the user may legitimately address any room.
+ */
+function assertOwnRoom(ctx: Context, agent: Agent, roomId: string, toolName: string): void {
+  const own = ctx.agentCommunity.roomForSession(agent.session.id)
+  // `undefined` = the caller is not a plugin bot (the user's own agent, the panel): the user may
+  // address any room. The host enforces the same rule again where the session is authoritative
+  // (see room-guard.ts `crossRoomError`) — a tool-level check alone would be one refactor away
+  // from being bypassed.
+  if (own === undefined || own === roomId) return
+  throw new Error(
+    `${toolName}: 你只能在自己所在的房间操作（当前房间 ${own}），不能对其它房间读写；`
+    + '跨房间的任务请由用户转发，或由用户在界面上把 Bot 拉进那个房间。',
+  )
+}
+
 // `{ type: 'json' as const }` lets the `O` type parameter infer as
 // `JsonValueSchemaSpec`, so `InferValue<O>` becomes `JsonValue` and `execute`
 // can return any JSON-safe value.  Per-tool object shapes would give a tighter
@@ -148,12 +173,35 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
     output: jsonOutput(),
     async execute(args, exec) {
-      void caller(exec.agent, 'agent_community_send_message')
+      const agent = caller(exec.agent, 'agent_community_send_message')
+      assertOwnRoom(ctx, agent, args.room_id, 'agent_community_send_message')
       return JSON.parse(JSON.stringify(await ctx.agentCommunity.sendMessage({
         roomId: args.room_id,
         text: args.text,
         ...(args.sender_name !== undefined ? { senderName: args.sender_name } : {}),
       })))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'agent_community_remember',
+    description: [
+      'Remember ONE durable line about the room you are working in right now — a decision, a',
+      'preference, a constraint — so your next turn in this same room still knows it.',
+      'THIS ROOM ONLY: what you remember here never appears in another room, and your memory of',
+      'another room is not visible to you here. Keep it to one short sentence; the room you write',
+      'to is taken from your own session, so there is no room to specify.',
+    ].join(' '),
+    parameters: {
+      text: { type: 'string', required: true, description: 'One short sentence to remember.' },
+    },
+    output: jsonOutput(),
+    execute(args, exec) {
+      const agent = caller(exec.agent, 'agent_community_remember')
+      const result = ctx.agentCommunity.rememberForSession({ sessionId: agent.session.id, text: args.text })
+      return Promise.resolve(result.ok
+        ? { stored: true, note: '已记住（仅本房间可见）。' }
+        : { stored: false, error: result.reason ?? '无法写入记忆' })
     },
   }))
 
@@ -187,6 +235,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // Resolve room from explicit arg or from the caller's session
       const roomId = args.room_id ?? ctx.agentCommunity.roomForSession(agent.session.id)
       if (roomId === undefined) throw new Error('room_id required — cannot infer from caller')
+      assertOwnRoom(ctx, agent, roomId, 'agent_community_get_context')
       return Promise.resolve(JSON.parse(JSON.stringify(ctx.agentCommunity.getRoomContext(roomId))))
     },
   }))
@@ -212,6 +261,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const agent = caller(exec.agent, 'agent_community_post_message')
       const roomId = args.room_id ?? ctx.agentCommunity.roomForSession(agent.session.id)
       if (roomId === undefined) throw new Error('room_id required')
+      assertOwnRoom(ctx, agent, roomId, 'agent_community_post_message')
       const posted = JSON.parse(JSON.stringify(await ctx.agentCommunity.postBotMessage({
         roomId,
         senderSessionId: agent.session.id,
@@ -258,6 +308,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const agent = caller(exec.agent, 'agent_community_task_decompose')
       const roomId = args.room_id ?? ctx.agentCommunity.roomForSession(agent.session.id)
       if (roomId === undefined) throw new Error('room_id required')
+      assertOwnRoom(ctx, agent, roomId, 'agent_community_task_decompose')
       const tasks = (args.tasks as Array<{ subject: string; detail?: string; assignee?: string }>)
       return JSON.parse(JSON.stringify(await ctx.agentCommunity.decomposeTasks({
         roomId,
@@ -289,6 +340,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const agent = caller(exec.agent, 'agent_community_task_assign')
       const roomId = args.room_id ?? ctx.agentCommunity.roomForSession(agent.session.id)
       if (roomId === undefined) throw new Error('room_id required')
+      assertOwnRoom(ctx, agent, roomId, 'agent_community_task_assign')
       return JSON.parse(JSON.stringify(await ctx.agentCommunity.assignTasks({
         roomId,
         leaderSessionId: agent.session.id,
@@ -309,6 +361,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const agent = caller(exec.agent, 'agent_community_task_status')
       const roomId = args.room_id ?? ctx.agentCommunity.roomForSession(agent.session.id)
       if (roomId === undefined) throw new Error('room_id required')
+      assertOwnRoom(ctx, agent, roomId, 'agent_community_task_status')
       return Promise.resolve(JSON.parse(JSON.stringify(ctx.agentCommunity.getTaskStatus(roomId))))
     },
   }))

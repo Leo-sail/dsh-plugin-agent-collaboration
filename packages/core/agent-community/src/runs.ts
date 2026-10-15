@@ -22,6 +22,7 @@ import { VisibilityController } from './visibility.ts'
 import { toolSchemas, ToolRunner, type ToolInvocation } from './tools.ts'
 import { buildPerception, type Perception, type PerceptionValue } from './perception.ts'
 import { optionalService } from './session-runner.ts'
+import { renderMemoryBlock } from './bot-memory.ts'
 import type { SessionRunner } from './session-runner.ts'
 import type { LedgerProjector } from './ledger.ts'
 
@@ -194,6 +195,14 @@ export interface CommunityStateAccessor {
     | undefined
   listRuns(botId?: string): RunSnapshot[]
   listMessages(roomId: string): MessageSnapshot[]
+  /**
+   * What THIS bot remembers about THIS room, oldest first.
+   *
+   * The pair is the interface: there is no "everything this bot remembers" method, so the prompt
+   * builder has no way to leak one room's work into another. Memory is written by the service when
+   * a turn finishes (`settleRun`) and by the bot's own `agent_community_remember` tool.
+   */
+  botMemoryFor(roomId: string, botId: string): ReadonlyArray<{ readonly kind: string; readonly text: string; readonly at: string }>
   /** Every bot in the community (id + name are what the prompt needs). */
   /** Every bot, with the role text a 1:1 needs to decide who to propose. */
   listBots(): Array<{
@@ -300,6 +309,8 @@ export class RunExecutor {
   private disposed = false
   /** Default reasoning effort for bot calls when the bot sets none. '' disables. */
   private readonly defaultReasoningEffort: string
+  /** Remembered entries rendered into a turn's prompt; 0 disables the block. */
+  private readonly memoryPromptEntries: number
 
   constructor(
     ctx: Context,
@@ -308,6 +319,11 @@ export class RunExecutor {
       maxConcurrent?: number
       runTimeoutMs?: number
       historyMessages?: number
+      /**
+       * How many remembered entries one turn sees. 0 removes the block entirely — memory is
+       * still recorded, so a deployment can turn the prompt half off without losing the record.
+       */
+      memoryPromptEntries?: number
       defaultReasoningEffort?: string
       ledger?: LedgerProjector
       /**
@@ -325,6 +341,7 @@ export class RunExecutor {
     this.maxConcurrent = opts.maxConcurrent ?? 8
     this.runTimeoutMs = opts.runTimeoutMs ?? 600_000
     this.historyMessages = opts.historyMessages ?? 10
+    this.memoryPromptEntries = opts.memoryPromptEntries ?? 8
     this.defaultReasoningEffort = opts.defaultReasoningEffort ?? ''
     // Reminders must be able to fire: archiving a session deletes its pending schedules
     // (see VisibilityController.activeSchedules), so hiding asks first.
@@ -971,7 +988,13 @@ export class RunExecutor {
 
     const parts: string[] = []
     if (bot !== undefined) {
-      parts.push(`[角色]\n你是 ${bot.name}。${bot.description ?? ''}`)
+      // The bot's own system prompt belongs here. It was only ever read by the LEGACY
+      // non-session path, so on the native prompt path — the one every real run takes — a bot
+      // created with a system prompt behaved as if it had none.
+      const persona = bot.systemPrompt !== undefined && bot.systemPrompt !== ''
+        ? `${bot.systemPrompt}\n你是 ${bot.name}。${bot.description ?? ''}`
+        : `你是 ${bot.name}。${bot.description ?? ''}`
+      parts.push(`[角色]\n${persona}`)
     }
     // ── 没有要求就不要开工 ────────────────────────────────────────────────────────────────────────
     // Stated on EVERY turn, not just when a question is pending: a bot that treats an unanswered
@@ -1014,6 +1037,20 @@ export class RunExecutor {
     // builder used to render its own names-only list, which ignored the profile.
     const skillBlock = this.svc.skillPromptFor(run.roomId, botId)
     if (skillBlock !== undefined && skillBlock !== '') parts.push(skillBlock)
+    // ── WHAT THIS BOT ALREADY DID IN THIS ROOM ──────────────────────────────────
+    //
+    // Before the recent-message window on purpose: this is standing knowledge about the room,
+    // while the window is the immediate context. `renderMemoryBlock` receives only this pair's
+    // entries, so the block cannot name another room's work — the isolation rule is structural
+    // here, not a request written into the prompt.
+    if (bot !== undefined) {
+      const memory = this.memoryPromptEntries === 0
+        ? undefined
+        : renderMemoryBlock(this.svc.botMemoryFor(run.roomId, bot.id), {
+          limit: this.memoryPromptEntries,
+        })
+      if (memory !== undefined) parts.push(memory)
+    }
     if (history) parts.push(`[最近 ${this.historyMessages} 条消息]\n${history}`)
     parts.push(`[本轮输入]\n${run.prompt}`)
     return parts.join('\n\n')

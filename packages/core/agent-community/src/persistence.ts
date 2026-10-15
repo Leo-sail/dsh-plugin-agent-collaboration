@@ -59,6 +59,18 @@ export interface PersistedState {
    * message's time so the mark outlives the message (compaction). Both are accepted.
    */
   readonly roomReadAt?: Record<string, string | import('./unread.ts').ReadMark>
+  /**
+   * What each Bot remembers about each room it worked in — see `bot-memory.ts`.
+   *
+   * Top-level and keyed by (roomId, botId) on purpose: memory attached to the room record would be
+   * shipped to the browser by `snapshot()` and `listRooms()` on every poll, and attaching it to the
+   * bot instead would put two rooms' memories in one place — exactly the mixing the feature forbids.
+   *
+   * Additive: a board written before this field simply lacks it (`?? []` at every reader), which is
+   * why `CURRENT_VERSION` does NOT move. Bumping it would make every older build refuse the whole
+   * board — the version check rejects anything above the version it knows.
+   */
+  readonly botMemories?: import('./types.ts').BotMemoryRecord[]
 }
 
 export const CURRENT_VERSION = 6
@@ -127,5 +139,6 @@ export function emptyState(): PersistedState {
     botSchedules: [],
     firedHostIds: [],
     roomReadAt: {},
+    botMemories: [],
   }
 }

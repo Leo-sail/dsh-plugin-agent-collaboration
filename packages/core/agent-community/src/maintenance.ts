@@ -14,6 +14,7 @@ import type { BotId, BotRoom, BotRoomId, BotTask, RoomTaskState } from './types.
 import type { LedgerProjector, SeedRoomItem } from './ledger.ts'
 import type { PersistedState } from './persistence.ts'
 import { SessionRunner, optionalService } from './session-runner.ts'
+import { dropBotFromRoom } from './bot-memory.ts'
 
 /**
  * What `Maintenance` needs from `AgentCommunityService`.
@@ -486,6 +487,9 @@ export class Maintenance {
       ...this.host.state,
       rooms,
       roomAgentSessions: this.host.state.roomAgentSessions.filter(s => !(s.roomId === roomId && gone.has(s.botId))),
+      // Same residue class as the session log above: a removed member re-invited later must not
+      // resume what it knew before it was kicked out of THIS room.
+      botMemories: dropBotFromRoom(this.host.state.botMemories, roomId, gone),
     }
     this.host.enqueueWrite()
     await this.host.flushNow()

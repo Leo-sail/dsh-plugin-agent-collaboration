@@ -17,7 +17,7 @@
  *
  * Usage: node tests/group-dedupe.mjs
  */
-import { screenRoomCreation, isGroupCreation } from '../packages/core/agent-community/src/room-guard.ts'
+import { screenRoomCreation, isGroupCreation, crossRoomError } from '../packages/core/agent-community/src/room-guard.ts'
 import { GroupFlowService } from '../packages/core/agent-community/src/group-flow.ts'
 
 let pass = 0
@@ -105,6 +105,12 @@ check(groupRefusal.allow === false, 'Bot 在群里建群 → 拒绝')
 check(groupRefusal.reason.includes('界面'), '拒绝理由指向让用户在界面新建', groupRefusal.reason)
 check(screenRoomCreation({ directBotId: 'botB' }, asBotInDm).allow === true, 'Bot 建单聊房间 → 允许（不是团队决策）')
 check(screenRoomCreation({ memberIds: ['botA'] }, asBotInDm).allow === true, 'Bot 建只有一个成员的房间 → 允许')
+
+// ── 1b. cross-room isolation (「不能将 A 群聊的任务发到 B 群聊中」) ──────────
+check(crossRoomError('roomA', 'roomA') === undefined, 'Bot 在自己房间里操作 → 放行')
+check(crossRoomError(undefined, 'anything') === undefined, '没有插件会话的调用方（用户）→ 不限制')
+check(typeof crossRoomError('roomA', 'roomB') === 'string', 'A 群的 Bot 去读/写 B 群 → 拒绝')
+check(crossRoomError('roomA', 'roomB').includes('roomA'), '拒绝理由说出它当前在哪个房间')
 
 // ── 2. propose → confirm, and the fields the old tool path lost ──────────────
 const h = makeHarness()

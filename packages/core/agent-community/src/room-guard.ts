@@ -64,3 +64,18 @@ export function screenRoomCreation(
         + '本群的协作请用 invite_bot / assign_task 完成。',
   }
 }
+
+/**
+ * Why a Bot may not touch the room it named, or `undefined` when there is no objection.
+ *
+ * ONE RULE, TWO CALLERS: the tool layer (a `room_id` parameter the model filled in) and the host
+ * (`postBotMessage`, where the session — not the model — says which room the bot is in). Both used
+ * to accept the requested room on trust, which is how a task from group A could be posted into
+ * group B. `own` is the room the calling SESSION belongs to; `undefined` means the caller is not a
+ * plugin bot (the user, or the panel), and the user may address any room.
+ */
+export function crossRoomError(own: string | undefined, asked: string): string | undefined {
+  if (own === undefined || own === asked) return undefined
+  return `你只能在自己所在的房间操作（当前房间 ${own}），不能对其它房间读写；`
+    + '跨房间的任务请由用户转发，或由用户在界面上把 Bot 拉进那个房间。'
+}
