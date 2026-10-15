@@ -9,7 +9,8 @@
  * Usage: node tests/memory-promote.mjs
  */
 import {
-  scanPromotions, signatureOf, similarity, isCorrection, isIntervention, SIMILARITY_THRESHOLD,
+  scanPromotions, signatureOf, similarity, isCorrection, isIntervention, looksLikeRefusal,
+  SIMILARITY_THRESHOLD,
 } from '../packages/core/agent-community/src/memory-promote.ts'
 
 let pass = 0
@@ -119,6 +120,37 @@ const noRun = scanPromotions({
   alreadyLearned: [],
 })
 check(noRun.length === 0, '没有 run 的自述不产生任何晋升（弱证据）')
+
+
+// ── 8. 拒绝回答永远不晋升（线上实测：把"我做不到"学成了做法）────────────────────
+//
+// The bot's refusal — 「不是推脱，是插件层面拦住了…要用 bot id，不是显示名」 — was promoted as a
+// procedure, so the instruction file kept teaching a limitation that had already been fixed.
+check(looksLikeRefusal('我这边已经没有任何可执行的路径了') === false, '这句话本身不含拒绝词（靠词表判定）')
+check(looksLikeRefusal('这件事我自己做不到，只有队长能执行') === true, '「做不到」判为拒绝')
+check(looksLikeRefusal('not a member of this group') === true, '英文拒绝也认得')
+const refusalRepeat = scanPromotions({
+  entries: [
+    task('2026-10-15T10:00:00.000Z', '任务：把 A 踢出群 → 结果：这件事我自己做不到，只有队长能执行', 'r1'),
+    task('2026-10-15T11:00:00.000Z', '任务：把 A 踢出群 → 结果：我试了两次，插件层面拦住了，not a member of this group', 'r2'),
+  ],
+  messages: [],
+  alreadyLearned: [],
+})
+check(refusalRepeat.length === 0, '两次都是拒绝 → 不晋升为 procedure（否则会把旧限制刻进记忆）')
+
+const refusalLesson = scanPromotions({
+  entries: [
+    task('2026-10-15T10:00:00.000Z', '任务：改配置 → 结果：改了常量', 'r1'),
+    task('2026-10-15T10:40:00.000Z', '任务：改配置 → 结果：我无法完成这个修改', 'r2'),
+  ],
+  messages: [
+    user('2026-10-15T10:10:00.000Z', '不对，应该改配置文件'),
+    user('2026-10-15T10:30:00.000Z', '还是不对，应该改成配置里的字段'),
+  ],
+  alreadyLearned: [],
+})
+check(refusalLesson.length === 0, '纠错通道的"做对了"是拒绝 → 也不算学到东西')
 
 console.log(`\n[memory-promote] ${pass}/${total} 通过`)
 process.exit(pass === total ? 0 : 1)

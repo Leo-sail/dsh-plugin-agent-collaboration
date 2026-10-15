@@ -40,6 +40,28 @@ const CORRECTION_WORDS = [
 /** A correction that says what to do instead is an intervention; a bare "no" is only a signal. */
 const INTERVENTION_HINTS = ['改成', '应该', '要这样', '按', '用', '而不是', '应该是', '重新做', '换成']
 
+/**
+ * Phrases that mean the bot did NOT do the work.
+ *
+ * A REFUSAL MUST NEVER BE PROMOTED. Measured on a live group: the bot answered 「我认真试了两次，
+ * 不是推脱，是插件层面拦住了…要用 bot id，不是显示名」, the run counted as `completed` (it did
+ * answer), and the repetition channel promoted that text as "做法" — so the instruction file then
+ * taught the bot an outdated conclusion ("I cannot do this") that outlived the bug it described.
+ * Memory is supposed to make the bot more capable, not to freeze its limitations.
+ *
+ * A refusal is recognised in the ANSWER, where it lives — not in the request, which is neutral.
+ */
+const REFUSAL_MARKERS = [
+  '做不到', '不能', '无法', '移不了', '改不了', '办不到', '无权', '没有权限', '不允许',
+  'not a member', 'cannot', "can't", 'unable to', 'refused', 'not allowed', 'no permission',
+]
+
+/** Whether an answer says "I did not do it" rather than reporting what it did. */
+export function looksLikeRefusal(text: string): boolean {
+  const lower = text.toLowerCase()
+  return REFUSAL_MARKERS.some(marker => lower.includes(marker.toLowerCase()))
+}
+
 /** A candidate line for the global instruction file. */
 export interface PromotionCandidate {
   readonly kind: 'procedure' | 'lesson'
@@ -125,6 +147,8 @@ export function scanPromotions(input: {
     if (firstSig === '' || outcomeOf(first.text) === '') continue
     const repeat = tasks.slice(i + 1).find(other => similarity(signatureOf(other.text), firstSig) >= SIMILARITY_THRESHOLD)
     if (repeat === undefined || outcomeOf(repeat.text) === '') continue
+    // Both attempts must report real work; a refusal is not a method.
+    if (looksLikeRefusal(outcomeOf(first.text)) || looksLikeRefusal(outcomeOf(repeat.text))) continue
     // A correction between the two attempts means the first one was NOT the right way.
     const corrected = userSpokeBetween(input.messages, first.at, repeat.at, true)
     if (corrected) continue
@@ -150,6 +174,8 @@ export function scanPromotions(input: {
     const wrong = family[0] ?? lastWrong
     const right = after.find(t => outcomeOf(t.text) !== '')
     if (right === undefined) continue
+    // "Did it right" cannot mean "explained that it could not".
+    if (looksLikeRefusal(outcomeOf(right.text))) continue
     // "Doing it right" must be a DIFFERENT approach, or nothing was learned. The comparison is
     // on the OUTCOME (what was actually done), not on the request: both attempts ask for the
     // same thing — that is the whole point — while the answer changed.
