@@ -1,0 +1,65 @@
+# Changelog
+
+## 0.2.0（本地，尚未发布）
+
+> 这一版把 Bots团队 从"群里每个 Bot 都会看见每条消息"改成一个真正的房间：**只有一个地方决定谁运行**，Bot 有自己的房间记忆与目标，能调用其他成员干活，并且**不会**在别人说话时白跑一轮。
+
+### 运行策略（谁被唤醒）
+
+- **一个决策点**：`routing.ts` 的七步表，其余任何地方都不再为用户消息排 run。
+- 七步：单聊 → `@all`/`@所有人` → `@某人` → 管理指令（"把 A 踢出去"给 leader，不给 A 本人）→ 写出名字 → **角色词命中最多者胜、并列才全叫** → **兜底只有 leader**。
+- **没点名不再全员运行**：以前一句「你好」会唤醒四个 Bot（四次完整模型调用），现在只有 leader，由它决定要不要分工。
+- 新增 **`@all` / `@所有人`**：唯一让全员回答的方式；mention 菜单里有"所有人"一行。普通文本"大家"不触发。
+- `@all` 超过并发槽的成员排队，面板提示"已排队 N 个"。
+- **删除静默哨兵**（`（无需补充）` 常量、判定、提示词分支）：被点名的才会运行，因此不再需要"叫醒了但要闭嘴"这条路径，也不再出现"跑完整一轮只为说没事"的浪费。
+- **删除死代码** `GroupTaskDriver.onUserMessage`（从未被调用，是第二条唤醒路径）。
+
+### 工具面
+
+- **修复黑名单根本没生效**：`tools.restrict()` 会因**任一未知名字**让整次调用失败，而插件只调一次并吞掉异常 —— 实测 Bot 目录里 `ask_user_question`、`skill` 明明在黑名单里却仍在。现在**逐名调用**、单项失败只损失那一个名字，并把 `applied/skipped` 写进日志。
+- 默认黑名单收敛为完整的"房间 Bot 工具面"：`plugin_manager`、`workflow`、`subagent*`、`goal` 三件套、`present`、`exit_plan_mode`、`load_workspace_dependencies`、Agent Teams 三件套。
+- 插件自己注册的同名工具（提问卡、skill 包装）**仍然可用** —— DSH 规定作用域内注册不会被全局禁用遮蔽。
+
+### Bot 的系统提示词
+
+- `bot-prompt.ts` 八段（identity / room / collaboration / memory / boundary / tools / goal / workflow）注册在 **Bot 自己的 agent 作用域**，遮蔽预设里那套"编码代理"的说法。
+- 用**空文本遮蔽**五个不适用分节：`tool:goal`、`tool:workflow`、`ui:deliverable-file-references`、`harness:source`、`app:web-surface`。
+- 每轮重复注入的 `[工作边界]`、`[群聊规则]`、`[对话]` 移除 —— 它们是系统提示词的一部分，不该每条消息重发一遍。
+
+### 目标与派工
+
+- **目标属于房间**（`room.goal`，只按 `roomId` 索引）：单聊 A／单聊 B／群 A／群 B 四重隔离是**结构性**的，没有"所有目标"的读取口，工具连房间参数都没有。
+- `get_goal` 改为读**当前房间**的目标；`agent_community_goal` 负责设定/暂停/继续/完成；群里只有 leader（或用户）能改。
+- 目标续跑由插件决定：有实际进展才排下一轮，**连续 3 轮无进展自动暂停**并提示；用户发言重置预算。
+- **`agent_community_dispatch`**：把活交给房间里**已存在的成员**（1–4 个），**立即返回**——leader 本轮先向用户汇报"已派给谁"，成员完成后系统带着回报唤醒 leader 继续。单聊里拒绝并提示先建群；只有 leader 能派；每次失败都逐条说明原因。
+- `workflow`（DSH 的）被移除：它开的是**调用者会话里的子代理**，房间里看不见、不占并发额度、停止按钮也够不着。
+
+### 记忆
+
+- **文件优先**：`memory/<botId>/rooms/<roomId>.md` 一个房间一个文件，人可以直接打开、编辑；`INDEX.md` 是派生文件，删了能重建。
+- **生命周期**：清空消息**不动**记忆；删除群聊**归档**记忆；踢人**保留**；**删除 Bot 才彻底删除**，且先把它在群里的分区归档到 `_archive/<roomId>/` 再删目录。
+- **晋升双通道**：同一请求成功两次 → `procedure`；**反复犯错 → 用户干预 → 做对** → `lesson`，**负例与正例都写进 `<Bot 工作区>/AGENTS.md` 的托管区**，带 run id 证据。没有 run 支撑的自述不晋升（弱证据）。用户手写的内容永不覆盖。
+- 超限的旧条目移入 `*.overflow.md`（只移不删），文件与注入都有硬预算。
+- **注入改成 baseline + 增量**：首轮给最近记忆，之后只给新增，省 token 并保护 prefix cache。
+- 新增 `agent_community_recall`：在本房间记忆里按关键词检索，返回**出处**（时间 + run id + 文件路径）——优先参考实际运行，而不是凭记忆推测。
+
+### 上下文压缩
+
+- **压缩 = 折叠，不是删除**：原文留在转写里（可以往上翻），只有模型的窗口换成"1 条摘要 + 最近 N 条"。折叠区间记录在 `room.foldedSeqs`。
+- 不再 dispose 成员的 agent、不再清空 `roomAgentSessions`、不再 purge 会话日志、不再推进 `compactCount` —— Bot 自己的上下文窗口交给 DSH（`standard` 预设自带压缩）。
+- 折叠不影响未读计算（有夹具断言）。
+
+### 修复
+
+- 未读角标闪烁（`planMarkRead` 按时间去重 + 发送路径用真实返回的消息做锚点）。
+- 单聊一句话建出两个群（建群只走确认框）。
+- 安装脚本因 `head -c 80` 与 83 字节特征串不匹配而永远失败。
+- 跨房间读取/写入一律拒绝。
+
+### 测试
+
+`pnpm test` 共 **281 条断言**、11 个夹具文件：routing 19、tool-mask 9、bot-prompt 42、room-goal 26、dispatch 20、memory-store 27、memory-promote 19、compact-window 14、unread-flash 26、group-dedupe 30、bot-memory 49。
+
+## 0.1.2（已发布）
+
+上一个公开发布版本。安装方式见 README。

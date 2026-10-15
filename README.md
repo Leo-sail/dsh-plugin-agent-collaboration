@@ -76,6 +76,10 @@ Restart DSH and refresh the page — **Bots团队** appears in the sidebar.
 
 ```bash
 dsh plugin --profile <your-profile> add \
+  > NOTE: this repository is at **0.2.0, not released yet**. The link below points at the last
+  > public release (v0.1.2); see [CHANGELOG.md](CHANGELOG.md) for what 0.2.0 changes and
+  > [ACCEPTANCE.zh-CN.md](ACCEPTANCE.zh-CN.md) for the steps to verify it after installing.
+
   https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
 ```
 

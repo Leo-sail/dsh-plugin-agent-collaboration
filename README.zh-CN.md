@@ -83,6 +83,9 @@ ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/
 ### 让 Agent 帮你装
 
 ```text
+> **注意**：仓库里的当前版本是 **0.2.0，尚未发布**。下面的链接指向最近一次公开发布（v0.1.2）；
+> 0.2.0 的改动见 [CHANGELOG.md](CHANGELOG.md)，装好后的自测步骤见 [ACCEPTANCE.zh-CN.md](ACCEPTANCE.zh-CN.md)。
+
 把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
 这个 DSH 插件装进我的 DSH profile，重启 DSH，并确认侧栏出现「Bots团队」。
 ```
