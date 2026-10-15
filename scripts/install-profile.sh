@@ -21,9 +21,18 @@ set -euo pipefail
 
 PROFILE="${1:-desktop}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="$HOME/.dsh/profiles/$PROFILE/node_modules/@dsh-plugin"
+# The scope the bundle's patch rows mount. It moved from `@dsh-plugin` to
+# `@dsh-plugin-agent-community` when the components were published under this account's own scope,
+# and the copy target has to follow: files left in the old directory are never mounted, because
+# nothing names them any more.
+PROFILE_DIR="$HOME/.dsh/profiles/$PROFILE"
+DEST="$PROFILE_DIR/node_modules/@dsh-plugin-agent-community"
 
-[ -d "$DEST" ] || { echo "install-profile: no such profile dir: $DEST" >&2; exit 1; }
+# The PROFILE is what must exist — that is the typo guard. The scope directory is created here
+# rather than required: a profile installed before the rename only has the old one, and pnpm
+# materialises the new scope only on a fresh `dsh plugin add`.
+[ -d "$PROFILE_DIR" ] || { echo "install-profile: no such profile dir: $PROFILE_DIR" >&2; exit 1; }
+mkdir -p "$DEST"
 
 # ── 0. build-shape checks first ───────────────────────────────────────────────
 # Every assertion in there maps to a bug this project actually shipped (bare-ESM bundle, stale
@@ -74,8 +83,13 @@ fi
 
 # The browser half must BE wrapped. The inverse check below (Node half carries no loader) has
 # existed all along, which is why a bare-ESM client bundle passed every gate twice.
+#
+# THE WINDOW HAS TO FIT THE PATTERN. This read 80 bytes; the pattern is 83 (it grew by 16 when the
+# scope moved from `@dsh-plugin` to `@dsh-plugin-agent-community`), so the check could never match
+# and every install stopped here with "not the wrapped browser bundle" — measured on a build whose
+# first bytes are exactly the expected line.
 UI_CLIENT="$ROOT/packages/ui/ui-agent-community/lib/client.js"
-if ! head -c 80 "$UI_CLIENT" | grep -q 'window.__ModuleLoader__.load({ id: "@dsh-plugin-agent-community/ui-agent-community"'; then
+if ! head -c 200 "$UI_CLIENT" | grep -q 'window.__ModuleLoader__.load({ id: "@dsh-plugin-agent-community/ui-agent-community"'; then
   echo "install-profile: lib/client.js is not the wrapped browser bundle — the DSH loader" >&2
   echo "                 evaluates it as a classic script and the plugin will not activate." >&2
   exit 1
