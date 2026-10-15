@@ -11,7 +11,7 @@
  */
 import {
   clip, taskMemoryText, appendEntry, entriesFor, memoryFor, renderMemoryBlock,
-  dropRoom, dropBot, dropBotFromRoom,
+  dropRoom, dropBot, dropBotFromRoom, renderMemoryDelta, searchMemory,
   DEFAULT_MAX_ENTRIES, MAX_ENTRY_CHARS,
 } from '../packages/core/agent-community/src/bot-memory.ts'
 
@@ -101,6 +101,47 @@ const kicked = dropBotFromRoom(records, GROUP_A, new Set([BOT]))
 check(kicked.every(r => !(r.roomId === GROUP_A && r.botId === BOT)), '踢人 → 只清该房间该 Bot 的分区')
 check(kicked.some(r => r.roomId === GROUP_A && r.botId === OTHER), '同群其他成员的分区保留')
 check(kicked.some(r => r.roomId === GROUP_B && r.botId === BOT), '同一 Bot 在别的群的记忆保留')
+
+
+// ── 6. 注入：baseline 一次 + 之后只给增量（S5）───────────────────────────────
+const turn = (id, second, text) => ({ id, kind: 'task', text, at: at(second), runId: `r${second}` })
+const history = [turn('e1', 1, '任务：A → 结果：a'), turn('e2', 2, '任务：B → 结果：b')]
+
+const baseline = renderMemoryDelta(history, undefined, { limit: 8 })
+check(baseline.baseline === true && baseline.block.includes('A') && baseline.block.includes('B'),
+  '首轮：baseline 包含最近若干条')
+check(baseline.newestId === 'e2', '首轮记住边界（最新条目 id）')
+
+const nothing = renderMemoryDelta(history, 'e2', { limit: 8 })
+check(nothing.block === undefined, '没有新增 → 不再重复注入同一段（省 token、保护 prefix cache）')
+
+const withNew = renderMemoryDelta([...history, turn('e3', 3, '任务：C → 结果：c')], 'e2', { limit: 8 })
+check(withNew.block.includes('C') && !withNew.block.includes('A'), '有新增 → 只注入增量', String(withNew.block.length))
+check(withNew.newestId === 'e3', '边界推进到最新')
+
+const gone = renderMemoryDelta(history, 'e-gone', { limit: 8 })
+check(gone.baseline === true, '边界条目消失（overflow/清空）→ 退回 baseline，不丢内容')
+check(renderMemoryDelta([], undefined).block === undefined, '没有记忆 → 不注入')
+
+const budgeted2 = renderMemoryDelta(
+  Array.from({ length: 20 }, (_, i) => turn(`b${i}`, i, `任务：第 ${i} 件 ${'内'.repeat(120)} → 结果：ok`)),
+  undefined, { limit: 8, budget: 600 },
+)
+check(budgeted2.block.length < 900, '增量同样受预算限制', String(budgeted2.block.length))
+
+// ── 7. recall：本地检索 + 出处 ───────────────────────────────────────────────
+const indexed = [
+  turn('s1', 1, '任务：把配置超时改成 30s → 结果：改了 src/config.ts'),
+  turn('s2', 2, '任务：写一份周报 → 结果：写完了'),
+  { id: 's3', kind: 'note', text: '用户偏好：回复用中文', at: at(3) },
+]
+const found = searchMemory(indexed, '超时', 5)
+check(found.length === 1 && found[0].entry.id === 's1', '按关键词命中', String(found.length))
+check(searchMemory(indexed, '周报')[0].entry.id === 's2', '命中另一条')
+check(searchMemory(indexed, '中文')[0].entry.id === 's3', 'note 条目也可检索')
+check(searchMemory(indexed, '完全不相关的东西').length === 0, '不相关 → 空结果（不硬凑）')
+check(searchMemory(indexed, '   ').length === 0, '空 query → 空结果')
+check(searchMemory(indexed, '超时', 1).length === 1, 'limit 生效')
 
 console.log(`\n[bot-memory] ${pass}/${total} 通过`)
 process.exit(pass === total ? 0 : 1)

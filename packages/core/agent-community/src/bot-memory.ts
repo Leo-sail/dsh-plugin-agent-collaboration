@@ -163,3 +163,61 @@ export function dropBotFromRoom(
 ): BotMemoryRecord[] {
   return (records ?? []).filter(r => !(r.roomId === roomId && botIds.has(r.botId)))
 }
+
+/**
+ * What a turn should be told about this room's memory, given what it was already told.
+ *
+ * BASELINE ONCE, DELTA AFTER. The first turn in a room carries the recent memory; later turns
+ * carry only the entries added since — the same paragraph repeated every turn is pure prompt
+ * cost, and it also breaks the request prefix cache, which the host explicitly protects.
+ *
+ * @param entries - the pair's entries, oldest first.
+ * @param alreadyInjectedId - the newest entry id already shown to this session (undefined = none).
+ * @returns the block to add, or undefined when there is nothing new.
+ */
+export function renderMemoryDelta(
+  entries: ReadonlyArray<{ readonly id: string; readonly text: string; readonly at: string }>,
+  alreadyInjectedId: string | undefined,
+  options: { readonly limit?: number | undefined; readonly budget?: number | undefined } = {},
+): { readonly block: string | undefined; readonly newestId: string | undefined; readonly baseline: boolean } {
+  if (entries.length === 0) return { block: undefined, newestId: alreadyInjectedId, baseline: false }
+  const newestId = entries[entries.length - 1]!.id
+  if (alreadyInjectedId === newestId) return { block: undefined, newestId, baseline: false }
+  const at = alreadyInjectedId === undefined ? -1 : entries.findIndex(e => e.id === alreadyInjectedId)
+  // A baseline (nothing shown yet, or the boundary entry is gone after an overflow/clear) is
+  // the recent window; a delta is everything after the boundary.
+  const fresh = at < 0 ? entries.slice(-(options.limit ?? DEFAULT_PROMPT_ENTRIES)) : entries.slice(at + 1)
+  if (fresh.length === 0) return { block: undefined, newestId, baseline: at < 0 }
+  const block = renderMemoryBlock(fresh, options)
+  return { block, newestId, baseline: at < 0 }
+}
+
+/**
+ * Rank one pair's entries against a query — the `recall` tool's search.
+ *
+ * Local and dependency-free on purpose: the host's `sessionQuery` scores Chinese poorly
+ * (unicode61 tokenising), and memory is Markdown, not a session log. Character bigrams plus a
+ * substring bonus are enough to find "把超时改成 30s" from "超时", and the result carries its
+ * provenance so the model can go back to the file rather than trusting a summary.
+ */
+export function searchMemory(
+  entries: readonly BotMemoryEntry[],
+  query: string,
+  limit = 5,
+): ReadonlyArray<{ readonly entry: BotMemoryEntry; readonly score: number }> {
+  const needle = query.replace(/\s+/gu, '').toLowerCase()
+  if (needle === '') return []
+  const grams = new Set<string>()
+  for (let i = 0; i + 1 < needle.length; i += 1) grams.add(needle.slice(i, i + 2))
+  const scored = entries.map((entry) => {
+    const hay = entry.text.toLowerCase()
+    let score = 0
+    if (hay.includes(needle)) score += 2
+    for (const gram of grams) if (hay.includes(gram)) score += 1
+    return { entry, score }
+  })
+  return scored
+    .filter(row => row.score > 0)
+    .sort((a, b) => b.score - a.score || (a.entry.at < b.entry.at ? 1 : -1))
+    .slice(0, limit)
+}

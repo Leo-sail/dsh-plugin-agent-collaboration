@@ -295,3 +295,21 @@ export interface CompactRoomResult {
    */
   readonly sessionsRetired: number
 }
+
+/**
+ * The messages a turn should see, given what has been folded.
+ *
+ * Folding is a WINDOW operation, not a delete: the folded rows stay in the transcript (the
+ * panel still shows them, unread arithmetic still counts them) while the prompt gets the
+ * checkpoint plus everything that came after it. Without this the room would "compact" and then
+ * keep sending the same history to the model.
+ */
+export function windowForPrompt<T extends { readonly id: string }>(
+  messages: readonly T[],
+  foldedIds: readonly string[] | undefined,
+  historyMessages: number,
+): T[] {
+  const folded = new Set(foldedIds ?? [])
+  const visible = folded.size === 0 ? [...messages] : messages.filter(m => !folded.has(m.id))
+  return historyMessages <= 0 ? [] : visible.slice(-historyMessages)
+}

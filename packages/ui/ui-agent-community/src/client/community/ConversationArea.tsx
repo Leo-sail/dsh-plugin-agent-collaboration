@@ -236,10 +236,10 @@ export function ConversationArea({
             }
 
             if (cmdId === 'compact') {
-              // 压缩 now DOES what its label says. The host owns the work — it is the only
-              // side that can read the room's messages, rebuild the ledger the panel draws
-              // from and retire the session that would otherwise replay the whole
-              // transcript — so this branch is: call, report, reload.
+              // 压缩 folds the room's older messages behind one checkpoint. The host owns
+              // the work — only it can read the room's messages and write the checkpoint —
+              // so this branch is: call, report, reload. Nothing is deleted: the originals
+              // stay in the transcript and the bots' own sessions are left to DSH.
               //
               // The old branch printed an explanation pointing at 清空消息 because there was
               // no summariser to call. There is one now (`compactRoom` → the plugin's own
@@ -251,10 +251,12 @@ export function ConversationArea({
                     onNotice(result.reason ?? '这次没有压缩：房间不需要压缩。')
                     return
                   }
+                  // NON-DESTRUCTIVE, and the wording has to match: the folded messages are
+                  // still in the transcript (scroll up and they are there) — what changed is
+                  // the model's window. Claiming "原文不再保留" would now be false.
                   onNotice(
-                    `已压缩 ${result.removed} 条历史消息为摘要，保留最近 ${result.kept} 条`
-                    + `${result.sessionsRetired > 0 ? '；更早的原文不再保留' : ''}`
-                    + '。下一次回复会从摘要继续。',
+                    `已把 ${result.removed} 条较早的消息折叠成 1 条摘要；原文仍在，向上翻可以看到，`
+                    + `模型从摘要 + 最近 ${result.kept} 条继续。Bot 自己的上下文由 DSH 负责压缩。`,
                   )
                   // ── THE TRANSCRIPT HAS TO BE REBUILT, NOT PATCHED ──────────────
                   //

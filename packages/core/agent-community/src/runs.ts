@@ -22,7 +22,8 @@ import { VisibilityController } from './visibility.ts'
 import { toolSchemas, ToolRunner, type ToolInvocation } from './tools.ts'
 import { buildPerception, type Perception, type PerceptionValue } from './perception.ts'
 import { optionalService } from './session-runner.ts'
-import { renderMemoryBlock } from './bot-memory.ts'
+import { renderMemoryDelta } from './bot-memory.ts'
+import { windowForPrompt } from './compact.ts'
 import type { SessionRunner } from './session-runner.ts'
 import type { LedgerProjector } from './ledger.ts'
 
@@ -160,6 +161,8 @@ interface BotSnapshot {
 }
 
 interface MessageSnapshot {
+  /** Message id, used by the fold window (`windowForPrompt`). */
+  readonly id: string
   readonly roomId: BotRoomId
   readonly sender: { readonly kind: string; readonly name: string }
   /** Visible text. */
@@ -191,6 +194,8 @@ export interface CommunityStateAccessor {
         readonly paused?: boolean | undefined
         readonly memberIds: readonly BotId[]
         readonly directBotId?: BotId | undefined
+        /** Folded message ids: excluded from the prompt, kept in the transcript. */
+        readonly foldedSeqs?: readonly string[] | undefined
       }
     | undefined
   listRuns(botId?: string): RunSnapshot[]
@@ -202,7 +207,12 @@ export interface CommunityStateAccessor {
    * builder has no way to leak one room's work into another. Memory is written by the service when
    * a turn finishes (`settleRun`) and by the bot's own `agent_community_remember` tool.
    */
-  botMemoryFor(roomId: string, botId: string): ReadonlyArray<{ readonly kind: string; readonly text: string; readonly at: string }>
+  botMemoryFor(roomId: string, botId: string): ReadonlyArray<{
+    readonly id: string
+    readonly kind: string
+    readonly text: string
+    readonly at: string
+  }>
   /**
    * The `[本房间目标]` block for THIS room, or undefined when it has no goal.
    *
@@ -318,6 +328,13 @@ export class RunExecutor {
   private readonly defaultReasoningEffort: string
   /** Remembered entries rendered into a turn's prompt; 0 disables the block. */
   private readonly memoryPromptEntries: number
+  /**
+   * The newest memory entry each (room, bot) pair has already been shown in this process.
+   *
+   * In-memory on purpose: a restart re-sends the baseline once, which is the cheap and safe
+   * direction to be wrong in.
+   */
+  private readonly injectedMemory = new Map<string, string>()
 
   constructor(
     ctx: Context,
@@ -952,9 +969,9 @@ export class RunExecutor {
     bot: BotSnapshot | undefined,
     botId: string,
   ): string {
+    const roomForFold = this.svc.getRoom(run.roomId)
     const messages = this.svc.listMessages(run.roomId)
-    const history = messages
-      .slice(-this.historyMessages)
+    const history = windowForPrompt(messages, roomForFold?.foldedSeqs, this.historyMessages)
       // Prefer the model-facing payload: a `/skill` message carries the expanded
       // skill body there while `text` stays the plain draft for display.
       .map(m => `${m.sender.name}: ${m.modelText ?? m.text}`)
@@ -1024,13 +1041,17 @@ export class RunExecutor {
     // have I done here".
     const goal = this.svc.roomGoalBlock(run.roomId)
     if (goal !== undefined) parts.push(goal)
-    if (bot !== undefined) {
-      const memory = this.memoryPromptEntries === 0
-        ? undefined
-        : renderMemoryBlock(this.svc.botMemoryFor(run.roomId, bot.id), {
-          limit: this.memoryPromptEntries,
-        })
-      if (memory !== undefined) parts.push(memory)
+    if (bot !== undefined && this.memoryPromptEntries > 0) {
+      // BASELINE ONCE, DELTA AFTER: the executor remembers what this pair has already been
+      // shown, so a turn carries the recent memory only when it is the first, and otherwise
+      // just the new lines. Repeating the same paragraph every turn is pure prompt cost and it
+      // breaks the request prefix cache.
+      const key = `${run.roomId}\u0000${bot.id}`
+      const delta = renderMemoryDelta(this.svc.botMemoryFor(run.roomId, bot.id), this.injectedMemory.get(key), {
+        limit: this.memoryPromptEntries,
+      })
+      if (delta.block !== undefined) parts.push(delta.block)
+      if (delta.newestId !== undefined) this.injectedMemory.set(key, delta.newestId)
     }
     if (history) parts.push(`[最近 ${this.historyMessages} 条消息]\n${history}`)
     parts.push(`[本轮输入]\n${run.prompt}`)

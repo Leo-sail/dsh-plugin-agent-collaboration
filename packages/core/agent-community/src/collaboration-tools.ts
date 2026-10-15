@@ -41,6 +41,21 @@ export interface CollaborationToolDeps {
   memberIds(roomId: string): readonly string[]
   /** Every bot that exists, so a proposal can only name live bots. */
   liveBotIds(): readonly string[]
+  /**
+   * Search this room's memory for entries about a query, with provenance.
+   *
+   * Returns file path + timestamp + run id so the model can go back to what really happened.
+   */
+  recall(input: {
+    roomId: string
+    botId: string
+    query: string
+  }): Promise<{
+    readonly hits: ReadonlyArray<{ readonly text: string; readonly at: string; readonly runId?: string | undefined }>
+    readonly learned: readonly string[]
+    readonly path: string
+  }>
+
   /** Read THIS room's goal (never another room's). */
   roomGoal(input: { roomId: string }): {
     readonly text: string
@@ -208,6 +223,38 @@ export function registerCollaborationTools(agentCtx: Context, deps: Collaboratio
     if (kind === undefined) return 'the room no longer exists'
     return { ...owner, kind }
   }
+
+  // ── agent_community_recall (room-scoped search) ─────────────────────────────
+  add({
+    name: 'agent_community_recall',
+    description:
+      'Search what you have actually done in THIS room (and the lessons in your global memory '
+      + 'file) for a keyword. Use it when the injected memory is not enough: it returns the real '
+      + 'entries with their run id and time, so you can rely on what happened instead of '
+      + 'guessing. Another room\'s memory is not searchable from here.',
+    properties: {
+      query: { type: 'string', required: true, description: 'Keyword or phrase to look for.' },
+    },
+    required: ['query'],
+    run: async (args, exec) => {
+      const who = caller(exec)
+      if (typeof who === 'string') return { value: { ok: false }, text: who }
+      const query = str(args, 'query').trim()
+      if (query === '') return { value: { ok: false }, text: 'query 不能为空。' }
+      const found = await deps.recall({ roomId: who.roomId, botId: who.botId, query })
+      const lines: string[] = []
+      for (const hit of found.hits) {
+        lines.push(`· [${hit.at}${hit.runId === undefined ? '' : ` run=${hit.runId}`}] ${hit.text}`)
+      }
+      if (found.learned.length > 0) {
+        lines.push(`· 全局记忆里相关：${found.learned.join(' / ')}`)
+      }
+      if (lines.length === 0) {
+        return { value: { ok: true, hits: [] }, text: `本房间没有与「${query}」相关的记忆（出处：${found.path}）。` }
+      }
+      return { value: { ok: true, hits: found.hits }, text: `本房间记忆中与「${query}」相关的 ${found.hits.length} 条：\n${lines.join('\n')}\n出处：${found.path}` }
+    },
+  })
 
   // ── get_goal (room-scoped, shadows the host tool of the same name) ──────────
   //

@@ -152,6 +152,15 @@ export interface BotRoom {
   /** This room's objective, if any — see `RoomGoal`. */
   readonly goal?: RoomGoal | undefined
   /**
+   * Messages folded into a checkpoint: kept in the transcript, EXCLUDED from the prompt.
+   *
+   * This is what makes compaction non-destructive — the original rows stay (the panel can still
+   * scroll back, the unread arithmetic is untouched) while the model stops paying for them.
+   */
+  readonly foldedSeqs?: readonly string[] | undefined
+  /** The checkpoint row the folded region was replaced by, for the window's ordering. */
+  readonly foldCheckpointId?: string | undefined
+  /**
    * The room's background task board (§5.4/§6). There is no task-board UI; the
    * leader's assignments and the members' reports live here so progress survives
    * the leader's own context.

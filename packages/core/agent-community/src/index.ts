@@ -51,8 +51,8 @@ import { registerCollaborationTools } from './collaboration-tools.ts'
 import { crossRoomError, screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
 import { canEditGoal, canReadGoal, describeGoal, goalPromptBlock, shouldContinueGoal, GOAL_STALL_LIMIT, type GoalActor } from './room-goal.ts'
 import { planDispatch, handoffReport, MAX_DISPATCH_TASKS, type DispatchTask } from './dispatch.ts'
-import { taskMemoryText } from './bot-memory.ts'
-import { MemoryStore, type RoomMemoryMeta } from './memory-store.ts'
+import { searchMemory, taskMemoryText } from './bot-memory.ts'
+import { MemoryStore, memoryPaths, type RoomMemoryMeta } from './memory-store.ts'
 import { scanPromotions } from './memory-promote.ts'
 import { Maintenance, type MaintenanceHost } from './maintenance.ts'
 import { findBotByName, requireBot, requireRoom, NotFoundError } from './lookup.ts'
@@ -1184,6 +1184,11 @@ export class AgentCommunityService extends TypertRemoteService {
         })
         return result.ok ? { ok: true } : { ok: false, ...(result.reason !== undefined ? { reason: result.reason } : {}) }
       },
+      recall: (input) => this.recallMemory({
+        roomId: input.roomId,
+        botId: input.botId,
+        query: input.query,
+      }),
       dispatch: (input) => {
         const result = this.dispatchToMembers({
           roomId: input.roomId,
@@ -2280,13 +2285,12 @@ export class AgentCommunityService extends TypertRemoteService {
       }
     }
 
-    // Read the OLD generation's session ids before `compactCount` advances: after the
-    // bump they are unreachable, and an unreferenced log is exactly what the purge below
-    // needs to find.
-    const staleSessions = this.maintenance.sessionIdsOfRoom(roomId)
-    // Stop the room's live agents before rewriting the history they append to. No run is
-    // live (checked twice), so this cannot interrupt a turn.
-    await this.disposeRoomAgents(roomId)
+    // ── NON-DESTRUCTIVE FROM HERE (the user's rule: 压缩必须可找回) ─────────────
+    //
+    // The bot sessions are NOT disposed and their logs are NOT purged: a bot's own window is
+    // DSH's business — the `standard` preset already compacts it under its own pressure line
+    // (80% of the window, keeping the newest 16% verbatim) — and retiring the session here was
+    // the plugin deleting memory the user never asked it to delete.
 
     const summaryMessage: BotMessage = {
       id: brandId<BotMessageId>(randomUUID()),
@@ -2300,35 +2304,39 @@ export class AgentCommunityService extends TypertRemoteService {
       createdAt: older[0]!.createdAt,
       kind: 'summary',
     }
+    // The ORIGINAL rows stay. The checkpoint is ADDED, and the folded ids are recorded so the
+    // prompt can skip them — folding is a window operation, not a delete.
+    const foldedIds = this.state.messages
+      .filter(m => m.roomId === roomId && m.createdAt < summaryMessage.createdAt)
+      .map(m => m.id)
     this.state = {
       ...this.state,
-      messages: [
-        ...this.state.messages.filter(m => m.roomId !== roomId),
-        summaryMessage,
-        ...tail,
-      ],
-      rooms: this.state.rooms.map(r =>
-        r.id === roomId ? { ...r, compactCount: (r.compactCount ?? 0) + 1 } : r,
-      ),
-      roomAgentSessions: this.state.roomAgentSessions.filter(s => s.roomId !== roomId),
+      messages: [...this.state.messages, summaryMessage],
+      rooms: this.state.rooms.map(r => r.id === roomId
+        ? {
+          ...r,
+          foldedSeqs: foldedIds,
+          foldCheckpointId: summaryMessage.id,
+          // `compactCount` is deliberately NOT bumped: it advances the session generation,
+          // which would abandon every member's conversation — the opposite of what the user
+          // asked for.
+          updatedAt: nowIso(),
+        }
+        : r),
     }
-    // The panel renders the ledger; without this rebuild it would keep showing the rows of
-    // the messages that no longer exist. Rebuilding from the new list is what makes the
-    // transcript show the summary + the kept tail.
-    this.maintenance.seedLedgerRoom(roomId)
     this.enqueueWrite()
     await this.flushNow()
-    await this.maintenance.purgeRoomArtifacts(roomId, staleSessions)
-    await this.maintenance.purgeProjectionCache(staleSessions)
     this.ctx.logger?.info?.(
-      `agent-community: compacted room ${roomId}: ${older.length} message(s) → 1 summary, kept ${tail.length}, retired ${staleSessions.length} session id(s)`,
+      `agent-community: folded room ${roomId}: ${foldedIds.length} message(s) behind 1 checkpoint, `
+      + `${tail.length} kept in the window; originals retained, bot sessions untouched`,
     )
     return {
       compacted: true,
-      removed: older.length,
+      removed: foldedIds.length,
       kept: tail.length,
       summary,
-      sessionsRetired: staleSessions.length,
+      // Always 0 now: no session is retired, because a bot's own window belongs to DSH.
+      sessionsRetired: 0,
     }
   }
 
@@ -3894,6 +3902,43 @@ export class AgentCommunityService extends TypertRemoteService {
   /** The bot's own workspace, used when a bot record has none. */
   private async defaultBotWorkspace(): Promise<string> {
     return join(this.home, 'agent-community', 'workspaces')
+  }
+
+  /**
+   * Search THIS room's memory (and the bot's learned lines) for entries matching a query.
+   *
+   * The result carries PROVENANCE — file, timestamp, run id — because the whole point of the
+   * feature is that the model can go back to what actually happened instead of trusting a
+   * summary. Scoped to the caller's own room, like every other memory read.
+   */
+  async recallMemory(input: {
+    readonly roomId: string
+    readonly botId: string
+    readonly query: string
+    readonly limit?: number | undefined
+  }): Promise<{
+    readonly hits: ReadonlyArray<{ readonly text: string; readonly at: string; readonly runId?: string | undefined }>
+    readonly learned: readonly string[]
+    readonly path: string
+  }> {
+    const store = this.memoryStore
+    const entries = this.botMemoryFor(input.roomId, input.botId)
+    const hits = store === undefined
+      ? []
+      : searchMemory(entries, input.query, input.limit ?? 5).map(row => ({
+        text: row.entry.text,
+        at: row.entry.at,
+        ...(row.entry.runId !== undefined ? { runId: row.entry.runId } : {}),
+      }))
+    const bot = this.state.bots.find(b => b.id === input.botId)
+    const workspace = bot?.workspace ?? await this.defaultBotWorkspace()
+    const learned = store === undefined ? [] : (await store.readLearned(workspace)).lines
+    const needle = input.query.trim().toLowerCase()
+    return {
+      hits,
+      learned: needle === '' ? learned.slice(-5) : learned.filter(l => l.toLowerCase().includes(needle)).slice(0, 5),
+      path: memoryPaths(join(this.home, 'agent-community', 'memory'), input.botId, input.roomId).roomFile,
+    }
   }
 
   /** The goal-writing actor for one call: a plugin bot session, or the user. */
