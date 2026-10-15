@@ -56,6 +56,16 @@ export interface CollaborationToolDeps {
     readonly path: string
   }>
 
+  /**
+   * A bot's display name.
+   *
+   * Needed because a model names members the way the room does ("fghj"), not by id — the removal
+   * path was unreachable until names could be resolved.
+   */
+  botName(botId: string): string
+  /** The room's member ids, in room order — the roster a name is resolved against. */
+  memberIds(roomId: string): readonly string[]
+
   /** Read THIS room's goal (never another room's). */
   roomGoal(input: { roomId: string }): {
     readonly text: string
@@ -188,6 +198,43 @@ function normaliseSchema(node: Record<string, unknown>): Record<string, unknown>
     out['items'] = normaliseSchema(items as Record<string, unknown>)
   }
   return out
+}
+
+/**
+ * Resolve what the model wrote (`name`, name with spaces, or an id) to member ids.
+ *
+ * A name is what the room shows and what the user says out loud, so it has to work; ids are
+ * accepted because a model that has been given one should be able to use it. Matching is
+ * case-insensitive and whitespace-trimmed, and an ambiguous name resolves to the first member in
+ * room order — the roster is small and the alternative (refusing) helps nobody.
+ */
+export function resolveMemberRefs(input: {
+  readonly refs: readonly string[]
+  readonly memberIds: readonly string[]
+  readonly nameOf: (id: string) => string
+  readonly selfId?: string | undefined
+}): { readonly ids: string[]; readonly unresolved: string[] } {
+  const ids: string[] = []
+  const unresolved: string[] = []
+  for (const raw of input.refs) {
+    const ref = raw.trim()
+    if (ref === '') continue
+    const byId = input.memberIds.find(id => id === ref)
+    if (byId !== undefined) {
+      if (!ids.includes(byId)) ids.push(byId)
+      continue
+    }
+    const lower = ref.toLowerCase()
+    const byName = input.memberIds.find(id => input.nameOf(id).trim().toLowerCase() === lower)
+      // A longer form ("fghj（你）") still contains the name the user typed.
+      ?? input.memberIds.find(id => input.nameOf(id).trim().toLowerCase().includes(lower))
+    if (byName !== undefined) {
+      if (!ids.includes(byName)) ids.push(byName)
+      continue
+    }
+    unresolved.push(raw)
+  }
+  return { ids, unresolved }
 }
 
 const strList = (args: Record<string, unknown>, key: string): string[] => {
@@ -552,12 +599,14 @@ export function registerCollaborationTools(
       'Take one or more bots OUT of this group — for example a member that went off track, '
       + 'duplicated work, or is no longer needed. Their running turn is stopped, their share '
       + 'of the task board goes back to the pool, and they forget this room. Only the group '
-      + 'leader may call this, at most four bots per call, and never yourself.',
+      + 'leader may call this, at most four bots per call. YOU MAY REMOVE YOURSELF: when the '
+      + 'user asks for the coordinator to be removed, that is the coordinator\'s call to '
+      + 'execute — leadership then passes to the first remaining member.',
     properties: {
       botIds: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Member ids to remove, from the room roster. One or several.',
+        description: 'Members to remove: their NAME or their id. One or several.',
       },
       reason: { type: 'string', description: 'One short sentence for the room log.' },
     },
@@ -574,8 +623,29 @@ export function registerCollaborationTools(
       if (leader !== undefined && leader !== who.botId) {
         return { value: { ok: false }, text: 'only the group leader may remove members' }
       }
-      const botIds = strList(args, 'botIds')
-      if (botIds.length === 0) return { value: { ok: false }, text: 'botIds is required' }
+      const refs = strList(args, 'botIds')
+      if (refs.length === 0) return { value: { ok: false }, text: 'botIds is required' }
+      // ── NAMES ARE THE NATURAL INPUT, SO RESOLVE THEM ─────────────────────────
+      //
+      // Measured on a live group: the user asked to remove a member, the model passed the
+      // member's NAME (what the room shows, and what the user typed), and the service answered
+      // "not a member of this group" — because this tool only ever accepted ids. The dispatch
+      // tool has resolved names from the start; this one must too, or the removal path is
+      // unreachable by the only wording a human would use.
+      const resolved = resolveMemberRefs({
+        refs,
+        memberIds: deps.memberIds(who.roomId),
+        nameOf: (id) => deps.botName(id),
+        selfId: who.botId,
+      })
+      if (resolved.unresolved.length > 0) {
+        const roster = deps.memberIds(who.roomId).map(id => deps.botName(id)).join('、')
+        return {
+          value: { ok: false, unresolved: resolved.unresolved },
+          text: `认不出这些成员：${resolved.unresolved.join('、')}。本群成员是：${roster}（用名字或 id 都行）。`,
+        }
+      }
+      const botIds = resolved.ids
       const result = await deps.removeBots({
         roomId: who.roomId,
         botIds,

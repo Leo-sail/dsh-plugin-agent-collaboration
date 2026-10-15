@@ -156,5 +156,53 @@ check(h2.state.rooms[0].pendingGroupProposal?.status === 'expired', '并且被�
 const fresh = await expiredFlow.propose({ roomId: DM, messageId: 'm1', name: '新群', memberIds: ['botB'], leaderId: 'botA', reason: 'r2' })
 check(fresh !== undefined && fresh.id !== dead?.id, '过期之后可以再提一个新的')
 
+
+// ── 9. 移除成员：队长可以移除自己（线上实测：用户要求移除队长时无路可走）────────
+//
+// The bot's own report from a live group: "用我的 bot id 再调 → you cannot remove yourself
+// from the group … 我这边已经没有任何可执行的路径了". The user asked for it explicitly, so the
+// coordinator executing it is not an accident — leadership passes to the next member.
+const h3 = makeHarness()
+h3.state.rooms = [...h3.state.rooms, {
+  id: 'grp', name: '群', memberIds: ['botA', 'botB'],
+  team: { leader: { kind: 'bot', botId: 'botA' } },
+  mentionOnly: false, sequence: 0, connection: 'disconnected', createdAt: T(0), updatedAt: T(0),
+}]
+const remover = new GroupFlowService(h3.port, { proposalTimeoutMs: 120_000 })
+
+const asLeaderRemovesOther = remover.remove({ roomId: 'grp', botIds: ['botB'], actorId: 'botA', reason: 'x' })
+check(asLeaderRemovesOther.ok === true && asLeaderRemovesOther.removed.join(',') === 'botB',
+  '队长移除别人 → 成功', JSON.stringify(asLeaderRemovesOther.removed))
+
+const h4 = makeHarness()
+h4.state.rooms = [...h4.state.rooms, {
+  id: 'grp', name: '群', memberIds: ['botA', 'botB'],
+  team: { leader: { kind: 'bot', botId: 'botA' } },
+  mentionOnly: false, sequence: 0, connection: 'disconnected', createdAt: T(0), updatedAt: T(0),
+}]
+const selfRemover = new GroupFlowService(h4.port, { proposalTimeoutMs: 120_000 })
+const selfRemoval = selfRemover.remove({ roomId: 'grp', botIds: ['botA'], actorId: 'botA', reason: '用户要求把队长移出' })
+check(selfRemoval.ok === true && selfRemoval.removed.join(',') === 'botA',
+  '队长移除自己 → 成功（用户明确要求时这是唯一出路）', JSON.stringify(selfRemoval.refused))
+const afterSelf = h4.port.getRoom('grp')
+check(afterSelf.memberIds.join(',') === 'botB', '移除后成员只剩另一个', afterSelf.memberIds.join(','))
+// 领导权是**显式交接**的（不是靠回退），所以移除队长之后房间依然有队长。
+check(selfRemover.leaderIdOf(afterSelf) === 'botB',
+  '移除队长后领导权交接给剩下的成员', String(selfRemover.leaderIdOf(afterSelf)))
+
+const h5 = makeHarness()
+h5.state.rooms = [...h5.state.rooms, {
+  id: 'grp', name: '群', memberIds: ['botA', 'botB'],
+  team: { leader: { kind: 'bot', botId: 'botA' } },
+  mentionOnly: false, sequence: 0, connection: 'disconnected', createdAt: T(0), updatedAt: T(0),
+}]
+const authority = new GroupFlowService(h5.port, { proposalTimeoutMs: 120_000 })
+const memberTries = authority.remove({ roomId: 'grp', botIds: ['botA'], actorId: 'botB', reason: 'x' })
+check(memberTries.ok === false && String(memberTries.error).includes('leader'),
+  '非队长（成员）移除别人 → 仍然拒绝', String(memberTries.error))
+const userRemoves = authority.remove({ roomId: 'grp', botIds: ['botA'], reason: '用户直接操作' })
+check(userRemoves.ok === true && userRemoves.removed.join(',') === 'botA',
+  '没有 actorId（用户/界面操作）→ 允许', JSON.stringify(userRemoves.removed))
+
 console.log(`\n[group-dedupe] ${pass}/${total} 通过`)
 process.exit(pass === total ? 0 : 1)

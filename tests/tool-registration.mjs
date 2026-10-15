@@ -151,5 +151,37 @@ check(itemSchema.type === 'object' && Array.isArray(itemSchema.required),
 check(itemSchema.properties.bot.type === 'string' && !('required' in itemSchema.properties.bot),
   '嵌套属性里同样没有 required 简写')
 
+
+// ── 7. remove_bot 必须接受"名字"（线上实测：模型传显示名 → not a member）─────────
+//
+// The user asked to remove a member by the name the room shows; the model passed that name and
+// the tool answered "not a member of this group", because the removal path only ever accepted
+// ids. dispatch resolved names from the start — the removal path is the one that must not be
+// unreachable by the only wording a human uses.
+const seen = []
+const removeDeps = makeDeps({
+  memberIds: () => ['botA', 'botB'],
+  botName: (id) => (id === 'botA' ? '小艾' : '小毕'),
+  removeBots: async (input) => { seen.push(input); return { ok: true, removed: input.botIds, refused: [] } },
+})
+const removeTools = makeTools()
+registerCollaborationTools({ tools: removeTools }, removeDeps)
+const removeDef = removeTools.defs.get('remove_bot')
+
+await removeDef.execute({ botIds: ['小毕'], reason: 'x' }, exec)
+check(seen[0]?.botIds.join(',') === 'botB', '按名字移除 → 解析成 bot id', JSON.stringify(seen[0]?.botIds))
+await removeDef.execute({ botIds: ['botB'], reason: 'x' }, exec)
+check(seen[1]?.botIds.join(',') === 'botB', '按 id 移除 → 原样传递')
+await removeDef.execute({ botIds: ['  小艾  '], reason: 'x' }, exec)
+check(seen[2]?.botIds.join(',') === 'botA', '名字带空格也能解析')
+const unknown = await removeDef.execute({ botIds: ['路人甲'], reason: 'x' }, exec)
+check(seen.length === 3 && String(unknown.message ?? '').includes('认不出'),
+  '认不出的名字 → 明确拒绝并列出成员', String(unknown.message ?? '').slice(0, 50))
+const selfRemoval = await removeDef.execute({ botIds: ['小艾'], reason: '用户要求' }, exec)
+check(seen[3]?.botIds.join(',') === 'botA' && seen[3]?.actorId === 'botA',
+  '队长可以要求移除自己（actorId 就是它）')
+const desc = removeDef.description
+check(desc.includes('REMOVE YOURSELF'), '工具描述写明可以移除自己')
+
 console.log(`\n[tool-registration] ${pass}/${total} 通过`)
 process.exit(pass === total ? 0 : 1)

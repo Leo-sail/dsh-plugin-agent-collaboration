@@ -467,8 +467,20 @@ export class GroupFlowService {
     for (const id of wanted) {
       const botId = id as BotId
       if (actorId !== undefined && botId === actorId) {
-        // Leaving is a different action; a self-kick would move leadership by accident.
-        refused.push({ botId: id, reason: 'you cannot remove yourself from the group' })
+        // ── THE COORDINATOR MAY REMOVE ITSELF ────────────────────────────────────
+        //
+        // This used to refuse self-removal, on the theory that "leaving is a different action".
+        // Measured on a live group: the user asked to remove the coordinator, the request was
+        // routed to the coordinator (correct — it is the only bot that may remove anybody), and
+        // the room then had NO path to carry it out. The user asked for it explicitly, so it is
+        // not an accident; leadership passes to the first remaining member.
+        //
+        // A non-leader never reaches this branch: the authority check above refuses it first.
+        if (leaderId !== undefined && leaderId !== actorId) {
+          refused.push({ botId: id, reason: 'only the group leader may remove members' })
+        } else {
+          removed.push(botId)
+        }
       } else if (!room.memberIds.includes(botId)) {
         refused.push({ botId: id, reason: 'not a member of this group' })
       } else {

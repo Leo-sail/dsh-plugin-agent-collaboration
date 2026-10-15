@@ -1086,6 +1086,7 @@ export class AgentCommunityService extends TypertRemoteService {
         return room.directBotId !== undefined ? 'direct' : 'group'
       },
       leaderOf: (id) => this.leaderOfRoom(id),
+      botName: (botId) => this.state.bots.find(b => b.id === botId)?.name ?? botId,
       memberIds: (id) => this.state.rooms.find(r => r.id === id)?.memberIds ?? [],
       liveBotIds: () => this.state.bots.map(b => b.id),
       proposeGroup: async (input) => {
