@@ -52,6 +52,30 @@ dsh plugin --profile <profile> add <插件包或本地路径>     # 用启动该
 
 ### 2b. 三行 patch 挂的组件名必须在 profile 的 node_modules 里解析得到
 
+### 2c. 宿主会自己提供给插件 DSH 包 —— 别在任何解析路径上放它们
+
+**证据**：2026-10-11 到 10-15 插件在本机稳定工作，而这段时间
+`@deepseek-ai/dsh-typert-protocol` / `dsh-llm` / `dsh-atomic-write` **在 profile 及其任何上级目录里都不存在**
+（`~/.dsh/profiles/node_modules` 的 APFS 创建时间是 10-15 13:19，是后来才出现的）。
+也就是说这些包是**宿主自己提供给插件的**，profile 里放了只会遮蔽它。
+
+所以下列位置都必须是"空的"：
+
+- `<profile>/node_modules/@deepseek-ai/`（必须 0 项，见校验脚本的断言）
+- `~/.dsh/profiles/node_modules/`（**profile 的上级目录**）：用 `npx @deepseek-ai/dsh` 启动过一次 profile 就会
+  生成这个 hoisted 树（223 个软链指向 npx 缓存里的那个版本），它会在解析顺序上抢先。实测 2026-10-15
+  它指向 **0.1.2-rc.1**，而 app 是 0.2.0-rc.2 —— 版本不匹配正是 typert 报
+  `parameter codec is not backed by a zod v4 schema` 的成因。清掉（或改名移出解析路径）：
+
+  ```bash
+  mv ~/.dsh/profiles/node_modules ~/.dsh/profiles/node_modules.shadow-backup-$(date +%s)
+  ```
+
+### 2d. 安装脚本会连 `package.json` 一起放
+
+只有 `lib/` 的目录 Node 解析不到包（字节数看起来完全正常）——`scripts/install-profile.sh` 现在同时拷
+`package.json`，所以它单独就能产出一个可加载的包，不需要中间跑 pnpm。
+
 ### 3. 出问题时的清理顺序
 
 1. 从 profile 的 `bundles` 里去掉 `dsh-plugin-agent-collaboration`，并删掉它的 dependency；

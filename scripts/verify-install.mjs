@@ -81,13 +81,35 @@ for (const name of COMPONENTS) {
     }
   } catch (error) {
     const message = String(error?.message ?? error).split('\n')[0]
-    bad(`${name} 导入`, message)
     const missing = /Cannot find package '([^']+)'/.exec(message)
-    if (missing !== null) {
-      console.log(`     → profile 里缺 ${missing[1]}；装它：`)
-      console.log(`       cd ${profile} && node ~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/pnpm/bin/pnpm.cjs add ${missing[1]}@<宿主的 DSH 版本>`)
+    // ── A MISSING `@deepseek-ai/*` IS EXPECTED, AND MUST STAY MISSING ────────────
+    //
+    // The host supplies its own packages to plugins: measured on a working install, the profile
+    // had none of `dsh-typert-protocol` / `dsh-llm` / `dsh-atomic-write` while the plugin ran
+    // fine. Plain Node resolving from this directory cannot see into the host, so this check
+    // cannot do better than "the only unresolved specifier is one the host provides".
+    //
+    // Installing them here is what broke the user's DSH on 2026-10-15 (a profile copy shadowed
+    // the packages of the runtime that boots it). Never "fix" this by adding them.
+    if (missing !== null && missing[1].startsWith('@deepseek-ai/')) {
+      ok(`${name} 导入`, `Node 解析不到宿主的 ${missing[1]}（正常：宿主提供，profile 里必须没有）`)
+    } else {
+      bad(`${name} 导入`, message)
     }
   }
+}
+
+// ── 2b. nothing from the host's own scope may live in the profile ─────────────
+try {
+  const { readdir } = await import('node:fs/promises')
+  const shadow = await readdir(join(profile, 'node_modules', '@deepseek-ai')).catch(() => [])
+  if (shadow.length > 0) {
+    bad('profile 里没有 @deepseek-ai 包', `发现 ${shadow.length} 个（会遮蔽宿主自带版本，必须清掉）: ${shadow.slice(0, 5).join(',')}`)
+  } else {
+    ok('profile 里没有 @deepseek-ai 包', '宿主自带的包没有被遮蔽')
+  }
+} catch (error) {
+  bad('检查 @deepseek-ai', String(error?.message ?? error))
 }
 
 // ── 3. the bundle the profile mounts ─────────────────────────────────────────

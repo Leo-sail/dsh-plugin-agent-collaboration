@@ -111,6 +111,13 @@ for pkg in core/agent-community tools/tool-agent-community ui/ui-agent-community
   name="$(basename "$pkg")"
   dst="$DEST/$name/lib"
   mkdir -p "$dst"
+  # ── THE MANIFEST IS PART OF THE INSTALL ─────────────────────────────────────
+  #
+  # A directory with only `lib/` resolves to NOTHING: Node needs `package.json` to turn the
+  # package NAME into `lib/index.js`, and every byte count in this script looked perfect while the
+  # host could not load the plugin at all. Copy it, so this script alone produces a loadable
+  # package with no pnpm step in between.
+  cp "$ROOT/packages/$pkg/package.json" "$DEST/$name/package.json"
   # Copy first, then prune: a failure mid-copy must not leave the package without its files.
   cp -R "$src/." "$dst/"
   # Remove anything the build no longer produces.
