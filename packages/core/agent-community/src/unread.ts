@@ -186,6 +186,54 @@ export function readWaterMarkFor(messages: RoomMessages, roomId: string): ReadMa
   return { id: newest.id, at: newest.createdAt }
 }
 
+/** What one "mark this room read" call should do. */
+export type ReadMarkDecision =
+  | { readonly write: false; readonly reason: 'empty' | 'same' | 'backwards' }
+  | { readonly write: true; readonly mark: ReadMark }
+
+/**
+ * Decide what a `markRoomRead` call does to one room's water mark.
+ *
+ * WHY `same` IS COMPARED BY VALUE: the guard used to be `stored === mark`, a REFERENCE comparison
+ * against a mark `readWaterMarkFor` had just built — it could never be true, so every call wrote
+ * the whole board. The panel then issued that call once per poll for a room whose unread replies
+ * arrived after it was opened (a mark the host correctly refuses as `backwards`), which is how a
+ * badge ends up flickering: full-state write per cycle, plus a local clear the panel painted as
+ * success. Both reasons now return `write: false`, and the caller is expected to treat that as
+ * "nothing changed" rather than as "cleared".
+ *
+ * @param input.messages - every message the host holds.
+ * @param input.roomId - the room being marked.
+ * @param input.upToId - the message the caller considered seen; absent means "the newest one now".
+ * @param input.stored - the room's current mark, in either shape.
+ * @returns `{ write: true, mark }`, or a refusal naming why (`empty` / `same` / `backwards`).
+ */
+export function decideReadMark(input: {
+  readonly messages: RoomMessages
+  readonly roomId: string
+  readonly upToId?: string | undefined
+  readonly stored: StoredReadMark | undefined
+}): ReadMarkDecision {
+  const newest = readWaterMarkFor(input.messages, input.roomId)
+  // An `upToId` that no longer exists (compaction replaced it) falls back to the newest message
+  // rather than writing a mark that points at nothing.
+  const upTo = input.upToId === undefined
+    ? undefined
+    : readWaterMarkFor(input.messages.filter(m => m.id === input.upToId), input.roomId)
+  const mark = upTo ?? newest
+  if (mark === undefined) return { write: false, reason: 'empty' }
+  const previous = resolveReadMark(input.stored, input.messages)
+  if (previous !== undefined && previous.id === mark.id && previous.at === mark.at) {
+    return { write: false, reason: 'same' }
+  }
+  // Never move the mark BACKWARDS: a slower `upTo` call must not make already-read messages
+  // unread again.
+  if (previous?.at !== undefined && mark.at !== undefined && mark.at < previous.at) {
+    return { write: false, reason: 'backwards' }
+  }
+  return { write: true, mark }
+}
+
 /**
  * Repair water marks that can no longer be interpreted, in place.
  *

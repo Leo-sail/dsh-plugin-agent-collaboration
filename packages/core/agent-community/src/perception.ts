@@ -171,7 +171,8 @@ function rosterBlock(projected: Projection): string {
     '[可协作的 bot]',
     lines,
     '你看不到他们的任何对话内容。',
-    '任务超出你能力时调 propose_group，由用户决定。',
+    '任务超出你能力时调 propose_group，由用户决定；不要自己用 create_room 建群——'
+      + '建群由用户确认，你自己建会多出一个群。',
   ].join('\n')
 }
 

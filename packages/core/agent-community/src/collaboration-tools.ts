@@ -41,14 +41,20 @@ export interface CollaborationToolDeps {
   memberIds(roomId: string): readonly string[]
   /** Every bot that exists, so a proposal can only name live bots. */
   liveBotIds(): readonly string[]
-  /** Record a proposal and surface it to the user. */
+  /**
+   * Record a proposal and surface it to the user.
+   *
+   * Resolves whether the proposal was accepted. The tool reports that answer back to the model
+   * instead of always claiming success: a proposal that cannot be recorded (no message to attach
+   * it to, one already pending) must not leave the bot waiting for a dialog that will not appear.
+   */
   proposeGroup(input: {
     roomId: string
     botId: string
     name: string
     memberIds: readonly string[]
     reason: string
-  }): void
+  }): Promise<{ readonly ok: boolean; readonly reason?: string | undefined }>
   /** Recruit a bot into a group. Resolves to an error string when refused. */
   inviteBot(input: { roomId: string; botId: string; reason: string }): Promise<string | undefined>
   /**
@@ -196,7 +202,7 @@ export function registerCollaborationTools(agentCtx: Context, deps: Collaboratio
       reason: { type: 'string', description: 'One sentence telling the user why.' },
     },
     required: ['name', 'memberIds', 'reason'],
-    run: (args, exec) => {
+    run: async (args, exec) => {
       const who = caller(exec)
       if (typeof who === 'string') return { value: { ok: false }, text: who }
       if (who.kind !== 'direct') {
@@ -212,13 +218,19 @@ export function registerCollaborationTools(agentCtx: Context, deps: Collaboratio
           text: 'a group needs at least one other bot; none of the named bots exist',
         }
       }
-      deps.proposeGroup({
+      const recorded = await deps.proposeGroup({
         roomId: who.roomId,
         botId: who.botId,
         name: str(args, 'name') || '协作群聊',
         memberIds: members,
         reason: str(args, 'reason'),
       })
+      if (!recorded.ok) {
+        return {
+          value: { ok: false, proposed: false },
+          text: recorded.reason ?? '这个房间现在不能记录建群提议，请直接回答用户。',
+        }
+      }
       return {
         value: { ok: true, proposed: true, members },
         text: '已提交给用户确认。不要再调用工具，等待用户决定。',

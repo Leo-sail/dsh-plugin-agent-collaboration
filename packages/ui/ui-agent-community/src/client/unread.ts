@@ -7,6 +7,100 @@
  * never say 3 while the entry says 0.
  */
 
+/**
+ * Advance a room's read water mark — the one decision behind the panel's mark-read effect.
+ *
+ * WHY THIS IS A PURE FUNCTION, AND WHY IT IS NOT "MARK THE ROOM READ"
+ *
+ * The panel used to call `markRoomRead` on every poll tick for as long as the open room showed a
+ * count, and every answer dropped the room's unread entry locally for one frame. A mark that
+ * cannot cover what is on screen (the replies arrived AFTER the room was opened — deliberately
+ * still unread, see README §17) is refused host-side, so the entry came back on the next poll and
+ * the badge flipped for ever: reported as 「bots团队入口处的未读消息和侧栏的群聊都会一直闪烁」.
+ * Measured on the real modules: ten poll cycles produced nineteen flips and ten local deletes,
+ * where the fixed version produces none.
+ *
+ * Three rules kill that, and all three live here so they can be tested without a DOM:
+ *   · the water mark is issued at most once per (room, target time) — a target that is not newer
+ *     than the last one issued for that room is `undefined`, not a plan;
+ *   · the caller may drop the room's unread entry locally ONLY when the target is at/after every
+ *     message the panel knows (`clearsRoom`) — otherwise the host is being asked to mark less
+ *     than the room holds, and painting that as success is exactly the flicker;
+ *   · the comparison is by TIME, never by array index. The send path's target is the message the
+ *     RPC just returned, which the panel's snapshot may not contain yet; `findIndex` would answer
+ *     -1 there and a "newer" mark would be discarded as "older".
+ */
+
+/** One message, as the planner needs it. */
+export interface MarkReadMessage {
+  readonly id: string
+  readonly roomId: string
+  readonly createdAt: string
+}
+
+/** A mark-read the panel should issue, and what it may do locally when the host confirms it. */
+export interface MarkReadPlan {
+  /** Message the water mark should land on. */
+  readonly upToId: string
+  /** When that message was written — the panel's bookkeeping key for this room. */
+  readonly at: string
+  /**
+   * True when `upToId` is at/after every message the panel knows about.
+   *
+   * Only then does the host's write clear the room, so only then may the panel delete the room's
+   * unread entry locally for same-frame feedback.
+   */
+  readonly clearsRoom: boolean
+}
+
+/**
+ * Decide whether to advance a room's water mark, and how far.
+ *
+ * @param input.messages - every message the panel holds, in stored order.
+ * @param input.roomId - the room on screen.
+ * @param input.openedAt - when the user opened that room (`undefined` = not opened by the user).
+ * @param input.upTo - the message the user demonstrably saw, passed as the object the RPC returned
+ *   (NOT looked up in the snapshot, which may not contain it yet); `null` means "everything up to
+ *   the moment the room was opened".
+ * @param input.lastMarkedAt - when this panel last asked the host to mark this room.
+ * @returns the mark to issue, or `undefined` when there is nothing new to ask for.
+ */
+export function planMarkRead(input: {
+  readonly messages: ReadonlyArray<MarkReadMessage>
+  readonly roomId: string
+  readonly openedAt: string | undefined
+  readonly upTo: { readonly id: string; readonly createdAt: string } | null
+  readonly lastMarkedAt: string | undefined
+}): MarkReadPlan | undefined {
+  const mine = input.messages.filter(m => m.roomId === input.roomId)
+  if (mine.length === 0 && input.upTo === null) return undefined
+  const newest = mine[mine.length - 1]
+
+  let target: { readonly id: string; readonly createdAt: string } | undefined
+  if (input.upTo !== null) {
+    target = input.upTo
+  } else if (input.openedAt !== undefined) {
+    // The newest message that existed when the room was opened: what the user has had on screen.
+    // Messages that arrive afterwards stay unread on purpose (README §17) — the count has to be
+    // right when they switch away.
+    for (const m of mine) if (m.createdAt <= input.openedAt) target = m
+  }
+  // NO ANCHOR, NO CALL. An empty room (or one opened before its first message) has nothing the
+  // user can be said to have seen, and the host reads a missing target as "mark the newest" —
+  // which would mark a reply the user never got to see as read.
+  if (target === undefined) return undefined
+
+  // Not newer than the last mark issued for this room: asking again is what made the badge blink,
+  // and a backwards mark can never clear anything anyway.
+  if (input.lastMarkedAt !== undefined && target.createdAt <= input.lastMarkedAt) return undefined
+
+  return {
+    upToId: target.id,
+    at: target.createdAt,
+    clearsRoom: newest === undefined || target.createdAt >= newest.createdAt,
+  }
+}
+
 /** Unread count for one room; 0 when the room has nothing unread (absent keys mean 0). */
 export function unreadFor(unread: Readonly<Record<string, number>> | undefined, roomId: string | undefined): number {
   if (unread === undefined || roomId === undefined) return 0

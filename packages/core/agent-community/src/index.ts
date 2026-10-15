@@ -42,10 +42,11 @@ import { SkillLifecycle, type LlmStream, type SkillEntry } from './skills-profil
 import { DEFAULT_MAX_ROUNDS, GroupFlowService, type GroupFlowPort } from './group-flow.ts'
 import { SessionRunner, optionalService } from './session-runner.ts'
 import { CURRENT_VERSION, emptyState, parsePersistedState, type PersistedState, type RoomAgentSession } from './persistence.ts'
-import { readWaterMarkFor, repairReadMarks, resolveReadMark, totalUnread, unreadByRoom } from './unread.ts'
+import { decideReadMark, repairReadMarks, totalUnread, unreadByRoom } from './unread.ts'
 import { LedgerProjection } from './ledger-projection.ts'
 import { GroupTaskDriver, type GroupTaskState } from './group-task.ts'
 import { registerCollaborationTools } from './collaboration-tools.ts'
+import { screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
 import { Maintenance, type MaintenanceHost } from './maintenance.ts'
 import { findBotByName, requireBot, requireRoom, NotFoundError } from './lookup.ts'
 import {
@@ -1036,29 +1037,38 @@ export class AgentCommunityService extends TypertRemoteService {
       leaderOf: (id) => this.leaderOfRoom(id),
       memberIds: (id) => this.state.rooms.find(r => r.id === id)?.memberIds ?? [],
       liveBotIds: () => this.state.bots.map(b => b.id),
-      proposeGroup: (input) => {
-        this.state = {
-          ...this.state,
-          rooms: this.state.rooms.map(r => (r.id === input.roomId
-            ? {
-                ...r,
-                pendingGroupProposal: {
-                  id: randomUUID(),
-                  roomId: brandId<BotRoomId>(input.roomId),
-                  name: input.name,
-                  // The user's original text travels with the proposal so the group can
-                  // be told what to do: members cannot see this 1:1 (§24.6).
-                  taskText: '',
-                  memberIds: input.memberIds.map(id => brandId<BotId>(id)),
-                  leaderId: brandId<BotId>(input.botId),
-                  reason: input.reason,
-                  status: 'pending' as const,
-                  createdAt: nowIso(),
-                },
-              }
-            : r)),
+      proposeGroup: async (input) => {
+        // ── ONE WRITER FOR PROPOSALS ────────────────────────────────────────────
+        //
+        // This used to write `pendingGroupProposal` straight into state with `taskText: ''` and
+        // no `sourceMessageId`, which broke three things at once: the panel's watcher requires a
+        // source message, so the dialog never appeared; confirming it replayed an EMPTY task into
+        // the group; and `expired()` could never fire because there was no deadline. Routing
+        // through the group flow gives a bot's proposal exactly the shape the panel's own
+        // analysis produces — same dialog, same task text, same expiry.
+        const message = [...this.state.messages]
+          .reverse()
+          .find(m => m.roomId === input.roomId && m.sender.kind === 'user')
+        if (message === undefined) {
+          return { ok: false, reason: '这个房间还没有用户消息，无法把建群提议交给用户确认。' }
         }
-        this.enqueueWrite()
+        const existing = this.groupFlow.pending(input.roomId)
+        if (existing !== undefined) {
+          // Not a failure: the user is already being asked. Saying so stops the model from
+          // proposing again (and from believing nothing happened).
+          return { ok: false, reason: `已经有一个待确认的建群提议（${existing.name}），等用户决定即可。` }
+        }
+        const proposal = await this.groupFlow.propose({
+          roomId: input.roomId,
+          messageId: message.id,
+          name: input.name,
+          memberIds: input.memberIds,
+          leaderId: input.botId,
+          reason: input.reason,
+        })
+        return proposal === undefined
+          ? { ok: false, reason: '现在还不适合建群（至少需要两个可用的 Bot）。' }
+          : { ok: true }
       },
       inviteBot: async (input) => {
         // The service owns the limits (≤4 per turn, ≤20 per group), the membership
@@ -1573,6 +1583,15 @@ export class AgentCommunityService extends TypertRemoteService {
     if (this.state.rooms.length >= this.cfg.maxRooms) {
       throw new Error(`Room limit ${this.cfg.maxRooms} reached`)
     }
+    // ── ONE REQUEST, ONE GROUP ──────────────────────────────────────────────────
+    //
+    // A Bot may not create a GROUP room, whichever room it is working in. Measured failure: the
+    // user asked a 1:1 bot to pull a group together, the panel's post-send analysis proposed one
+    // (the user confirmed it), and the bot — still inside its own turn — called this very method
+    // through `agent_community_create_room` and built a SECOND group. The bot's sanctioned path is
+    // `propose_group`, which reaches the user as a dialog; see room-guard.ts for the rule.
+    const decision = screenRoomCreation(input, this.roomCreationActor(input.actorSessionId))
+    if (!decision.allow) throw new Error(decision.reason)
     let team: BotTeam | undefined
     if (input.team !== undefined) {
       team = this.buildTeam(input.team)
@@ -1603,6 +1622,22 @@ export class AgentCommunityService extends TypertRemoteService {
     this.state = { ...this.state, rooms: [...this.state.rooms, room] }
     this.enqueueWrite()
     return room
+  }
+
+  /**
+   * Who is asking for a room, from the calling agent's session id.
+   *
+   * A session id this plugin owns (`ac:<roomId>:<botId>`) identifies a Bot and the room it is
+   * working in — which is what makes `screenRoomCreation` able to refuse a second group. Anything
+   * else (no session, the user's own agent session, a session of another plugin) is the user
+   * acting through the panel or the CLI, and is allowed.
+   */
+  private roomCreationActor(actorSessionId: string | undefined): RoomCreationActor {
+    if (actorSessionId === undefined) return { kind: 'user' }
+    const owner = SessionRunner.parseSessionId(actorSessionId)
+    if (owner === undefined) return { kind: 'user' }
+    const room = this.state.rooms.find(r => r.id === owner.roomId)
+    return { kind: 'bot', roomKind: room?.directBotId !== undefined ? 'direct' : 'group' }
   }
 
   private buildTeam(req: CreateTeamRequest): BotTeam {
@@ -1976,7 +2011,17 @@ export class AgentCommunityService extends TypertRemoteService {
         // `notices: []` is part of the same promise as dropping the messages: the ledger is cleared
         // here, and a durable notice left in state would come back as a row on the next reload —
         // a transcript the user cleared that is not actually empty.
-        ? { ...r, tasks: [] as BotTask[], taskState: undefined, notices: [] } as BotRoom & { tasks: BotTask[] }
+        //
+        // `pendingGroupProposal: undefined` belongs to the same promise, and was missing: a
+        // proposal recorded for a message the user then CLEARED stayed on the room, so the dialog
+        // came back and confirming it built a group whose task was the text of a deleted message.
+        ? {
+          ...r,
+          tasks: [] as BotTask[],
+          taskState: undefined,
+          notices: [],
+          pendingGroupProposal: undefined,
+        } as BotRoom & { tasks: BotTask[] }
         : r,
     )
     this.state = {
@@ -3344,24 +3389,18 @@ export class AgentCommunityService extends TypertRemoteService {
    */
   async markRoomRead(input: MarkRoomReadRequest): Promise<{ readonly roomId: string; readonly cleared: boolean }> {
     const readAt = this.state.roomReadAt ?? {}
-    const newest = readWaterMarkFor(this.state.messages, input.roomId)
-    // `upToId` lets the caller name the message it actually considered seen. Resolving it
-    // through the SAME helper keeps the mark's shape (id + time) consistent, and an id
-    // that no longer exists falls back to "newest now" rather than writing a dead mark.
-    const upTo = input.upToId === undefined
-      ? undefined
-      : readWaterMarkFor(this.state.messages.filter(m => m.id === input.upToId), input.roomId)
-    const mark = upTo ?? newest
-    if (mark === undefined || readAt[input.roomId] === mark) {
-      return { roomId: input.roomId, cleared: false }
-    }
-    // Never move the mark BACKWARDS: a slower `upTo` call must not make already-read
-    // messages unread again.
-    const previous = resolveReadMark(readAt[input.roomId], this.state.messages)
-    if (previous?.at !== undefined && mark.at !== undefined && mark.at < previous.at) {
-      return { roomId: input.roomId, cleared: false }
-    }
-    this.state = { ...this.state, roomReadAt: { ...readAt, [input.roomId]: mark } }
+    // The whole decision — including the two refusals that used to be wrong or missing — lives in
+    // `decideReadMark` so it can be tested without a Cordis runtime. `write: false` means NOTHING
+    // changed, and the caller must not paint it as a successful clear: the panel used to delete the
+    // room's unread entry for every answer it got, which is what made the badge blink.
+    const decision = decideReadMark({
+      messages: this.state.messages,
+      roomId: input.roomId,
+      ...(input.upToId !== undefined ? { upToId: input.upToId } : {}),
+      stored: readAt[input.roomId],
+    })
+    if (!decision.write) return { roomId: input.roomId, cleared: false }
+    this.state = { ...this.state, roomReadAt: { ...readAt, [input.roomId]: decision.mark } }
     this.enqueueWrite()
     return { roomId: input.roomId, cleared: true }
   }

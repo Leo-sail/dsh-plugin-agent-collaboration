@@ -6,6 +6,7 @@
   "description": "DSH Agent Community plugin workspace: host service, model tools, browser client and bundle",
   "packageManager": "pnpm@11.7.0",
   "scripts": {
+    "test": "node tests/unread-flash.mjs && node tests/group-dedupe.mjs",
     "typecheck": "pnpm -r exec tsc -p tsconfig.json --noEmit",
     "bundle": "pnpm -r run bundle && node scripts/check-build.mjs",
     "build": "pnpm run bundle",

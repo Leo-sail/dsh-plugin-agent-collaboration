@@ -17,7 +17,7 @@ import { BotFormDialog } from './community/BotFormDialog.tsx'
 import { ConfirmDeleteDialog } from './community/ConfirmDeleteDialog.tsx'
 import { RoomSettingsDialog } from './community/RoomSettingsDialog.tsx'
 import { css } from './styles.ts'
-import { sectionHasUnread, totalUnread, unreadFor } from './unread.ts'
+import { sectionHasUnread, totalUnread, unreadFor, planMarkRead } from './unread.ts'
 import { setNavBadgeCount, setPanelVisible } from './navBadge.ts'
 import { GroupProposalDialog } from './conversation/GroupProposalDialog.tsx'
 import type { LedgerEntry } from './conversation/types.ts'
@@ -151,38 +151,70 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
   /**
    * Advance a room's read water mark to a message the user has demonstrably seen.
    *
-   * A REF, NOT STATE, because its callers are event handlers (send, and the composer's own
-   * mutations) — a value captured in a handler's closure is one render behind. Passing `null`
-   * for `upToId` means "the instant this room was opened", which is what the effect below uses.
+   * A REF, NOT STATE, because its callers are event handlers (send, and the effect below) — a
+   * value captured in a handler's closure is one render behind. `upTo` is the message the caller
+   * knows the user saw (the one just sent, as the RPC returned it), or `null` for "everything up
+   * to the instant this room was opened".
+   *
+   * THE DECISION LIVES IN `planMarkRead` (./unread.ts), which also refuses a mark that is not
+   * newer than the last one issued for this room. Issuing it again on every poll is what made the
+   * entry badge and the group row blink: each answer deleted the room's unread entry locally for
+   * one frame, the next poll restored it, and the cycle repeated for as long as the room stayed
+   * open. Two details matter here:
+   *
+   *   · `lastMarkedRef` is per room and survives polls, so a room that cannot be marked any
+   *     further (its unread replies arrived after it was opened) is asked about exactly once;
+   *   · the local delete runs ONLY when the mark really covers the room (`clearsRoom`) and the
+   *     host says it wrote it. A refused mark must not be painted as success — that lie is the
+   *     flicker.
+   *
+   * Messages come from a ref, not from the effect's dependency list: `snapshot.messages` is a new
+   * array on every poll, so depending on it re-ran this effect (with its RPC) 0.7–2.5×/s for ever.
+   * No reload is issued here either — the snapshot poll reconciles within one interval, and the
+   * extra full-snapshot RPC per mark was the other half of the request storm.
    */
-  const markReadRef = useRef<((roomId: string, upToId: string | null) => void) | undefined>(undefined)
-  markReadRef.current = (roomId: string, upToId: string | null): void => {
-    const mine = (snapshot?.messages ?? []).filter(m => m.roomId === roomId)
-    const openedAt = selectedAtRef.current
-    const upTo = upToId !== null
-      ? mine.find(m => m.id === upToId)
-      : openedAt === undefined
-        ? mine[mine.length - 1]
-        : [...mine].reverse().find(m => m.createdAt <= openedAt)
-    void remote.markRoomRead({
+  const messagesRef = useRef<BotCommunitySnapshot['messages']>([])
+  messagesRef.current = snapshot?.messages ?? []
+  const lastMarkedRef = useRef(new Map<string, string>())
+  const markReadRef = useRef<((roomId: string, upTo: { id: string; createdAt: string } | null) => void) | undefined>(undefined)
+  markReadRef.current = (roomId: string, upTo: { id: string; createdAt: string } | null): void => {
+    const plan = planMarkRead({
+      messages: messagesRef.current,
       roomId,
-      ...(upTo !== undefined ? { upToId: upTo.id } : {}),
-    }).then(() => {
-      // Clear it HERE as well as on the host: the host's answer only reaches this panel on
-      // the next snapshot poll, and until then the room the user is sitting in keeps showing
-      // the unread dot it was opened to clear (「明明处在会话界面却依然显示未读」). Dropping
-      // the entry locally makes the mark visible in the same frame; the poll then confirms it.
-      setSnapshot((prev: BotCommunitySnapshot | undefined) => {
-        if (prev === undefined || prev.unread?.[roomId] === undefined) return prev
-        const nextUnread = { ...prev.unread }
-        delete nextUnread[roomId]
-        return { ...prev, unread: nextUnread }
+      openedAt: upTo === null ? selectedAtRef.current : undefined,
+      upTo,
+      lastMarkedAt: lastMarkedRef.current.get(roomId),
+    })
+    if (plan === undefined) return
+    lastMarkedRef.current.set(roomId, plan.at)
+    void remote.markRoomRead({ roomId, upToId: plan.upToId })
+      .then((result: { readonly cleared?: boolean }) => {
+        if (result?.cleared !== true || !plan.clearsRoom) return
+        // Clear it HERE as well as on the host: the host's answer only reaches this panel on the
+        // next snapshot poll, and until then the room the user is sitting in keeps showing the
+        // unread dot it was opened to clear (「明明处在会话界面却依然显示未读」). Dropping the
+        // entry locally makes the mark visible in the same frame; the poll then confirms it.
+        setSnapshot((prev: BotCommunitySnapshot | undefined) => {
+          if (prev === undefined || prev.unread?.[roomId] === undefined) return prev
+          const nextUnread = { ...prev.unread }
+          delete nextUnread[roomId]
+          return { ...prev, unread: nextUnread }
+        })
       })
-      return load()
-    }).catch(() => undefined)
+      .catch(() => undefined)
   }
 
   const selectedUnread = unreadFor(unread, selectedId)
+  /**
+   * Stable handle on {@link markReadRef} for the composer's send path.
+   *
+   * Sending marks the room read up to the message just sent, and that mark must be recorded in the
+   * SAME per-room bookkeeping as the effect's — otherwise the effect immediately asks for the older
+   * "opened at" mark again, which is the request the host can only refuse.
+   */
+  const onMarkRead = useCallback((roomId: string, upTo: { id: string; createdAt: string } | null) => {
+    markReadRef.current?.(roomId, upTo)
+  }, [])
   /**
    * The room on screen is READ — selected means read, whichever way it got selected.
    *
@@ -191,9 +223,10 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
    * conversation the dot stayed until the user switched away and back. The entry badge still tells
    * the "something happened elsewhere" story, and it only clears once every room has been seen.
    *
-   * DEPENDENCY IS THE NUMBER, NOT THE MAP: the snapshot is re-parsed on every poll, so `unread` is a
-   * fresh object each time — depending on it fired this effect on every poll, and each run issues an
-   * RPC plus a reload, which is a request loop that freezes the panel.
+   * DEPENDENCIES ARE THE SELECTION AND THE NUMBER. `snapshot?.messages` used to be in this list,
+   * and since every poll parses a fresh snapshot it re-ran the effect (and its RPC) for ever —
+   * the request storm behind the blinking badges. Messages now reach `markReadRef` through a ref,
+   * which is what the planner needs and nothing more.
    */
   useEffect(() => {
     // Only a room the user actually opened counts as read. An auto-selected room is on
@@ -202,7 +235,7 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
     if (selectedId === undefined || selectedId !== userSelectedId) return
     if (selectedUnread === 0) return
     markReadRef.current?.(selectedId, null)
-  }, [selectedId, userSelectedId, selectedUnread, remote, load, snapshot?.messages])
+  }, [selectedId, userSelectedId, selectedUnread])
 
   /**
    * Load the provider/model catalog for the SLASH MENU, not only for the form.
@@ -390,6 +423,7 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
             onListSkillFiles={listSkillFiles}
             listLedger={ledgerFetcher}
             onNotice={onNotice}
+            onMarkRead={onMarkRead}
             onDetectProposal={proposalFlow.detectProposal}
             onReload={load}
             onOpenBotRoom={(id) => { setTab('bots'); selectedAtRef.current = new Date().toISOString(); setUserSelectedId(id); setSelectedId(id) }}

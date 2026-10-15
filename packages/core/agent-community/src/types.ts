@@ -454,6 +454,13 @@ export interface CreateRoomRequest {
   readonly mentionOnly?: boolean | undefined
   readonly paused?: boolean | undefined
   readonly team?: CreateTeamRequest | undefined
+  /**
+   * The calling agent's session, when a Bot is asking.
+   *
+   * Absent means the user (the panel, the CLI, or the group flow's own confirm step). Present and
+   * owned by this plugin means a Bot, which may NOT create a group room — see `room-guard.ts`.
+   */
+  readonly actorSessionId?: string | undefined
 }
 
 /**

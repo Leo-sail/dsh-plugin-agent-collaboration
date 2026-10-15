@@ -48,6 +48,16 @@ export interface ConversationAreaProps {
   onNotice: (text: string) => void
   /** §5.4: after a DM send, ask the host whether the task should become a group. */
   onDetectProposal: (roomId: string, messageId: string) => void
+  /**
+   * Advance the open room's read water mark. `upTo` is the message the user demonstrably saw — for
+   * a send, the object `sendMessage` just returned (the panel's snapshot may not contain it yet);
+   * `null` means "everything up to the moment the room was opened".
+   *
+   * Routed through the shell rather than calling the RPC here: the shell keeps one per-room record
+   * of the last mark it asked for, and the send path has to share it. Bypassing it made the shell
+   * ask for the older "opened at" mark on the next tick — a request the host can only refuse.
+   */
+  onMarkRead: (roomId: string, upTo: { id: string; createdAt: string } | null) => void
   /** Reload the snapshot, optionally keeping `preferId` selected (the fork path). */
   onReload: (preferId?: string) => Promise<void>
   /** Land in a freshly forked bot's room: switch to the bots tab and select it. */
@@ -56,8 +66,8 @@ export interface ConversationAreaProps {
 
 export function ConversationArea({
   room, roomId, bots, runs, modelGroups, tasks, skills, skillsError, error, isBotMode,
-  remote, onLoadSkill, onListSkillFiles, listLedger, onNotice, onDetectProposal, onReload,
-  onOpenBotRoom,
+  remote, onLoadSkill, onListSkillFiles, listLedger, onNotice, onMarkRead, onDetectProposal,
+  onReload, onOpenBotRoom,
 }: ConversationAreaProps) {
   /**
    * Bumped after a compaction to REMOUNT the transcript.
@@ -135,10 +145,10 @@ export function ConversationArea({
             // 识别为未读」.
             //
             // The id comes from the send's own answer, so the mark is exact rather than a
-            // timestamp compared against the client's clock.
-            void remote.markRoomRead({ roomId, upToId: sent.id })
-              .then(() => onReload(roomId))
-              .catch(() => undefined)
+            // timestamp compared against the client's clock — and the whole message object is
+            // handed over, because the panel's snapshot does not contain it yet.
+            onMarkRead(roomId, { id: sent.id, createdAt: sent.createdAt })
+            void onReload(roomId)
             // §5.4: only a DM can escalate into a group — a group already has
             // its members — and the check runs AFTER the send resolved so the
             // message the proposal is about is already in the room.

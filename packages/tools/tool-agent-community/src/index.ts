@@ -110,7 +110,13 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'agent_community_create_room',
-    description: 'Create a new chat room. Set direct_bot_id for a direct chat, or member_ids for a group chat.',
+    description: [
+      'Create a new chat room. Set direct_bot_id for a direct chat, or member_ids for a group chat.',
+      'A BOT MUST NOT USE THIS TO START A GROUP: in a one-to-one chat call propose_group instead —',
+      'the user confirms it and the group is created for you (measured failure: a bot that built its',
+      'own room left the user with two groups for one request). Inside a group, ask the user to create',
+      'a new one in the Bots团队 panel. Creating a direct chat room is fine.',
+    ].join(' '),
     parameters: {
       name: { type: 'string', required: true, description: 'Room name.' },
       direct_bot_id: { type: 'string', description: 'Bot id for a direct chat room.' },
@@ -125,6 +131,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...(args.direct_bot_id !== undefined ? { directBotId: args.direct_bot_id } : {}),
         ...(args.member_ids !== undefined ? { memberIds: args.member_ids } : {}),
         ...(args.mention_only !== undefined ? { mentionOnly: args.mention_only } : {}),
+        // Which agent is asking, so the host can refuse a Bot-created GROUP (room-guard.ts).
+        // Absent for a caller with no agent session — that is the user.
+        ...(exec.agent?.session?.id !== undefined ? { actorSessionId: exec.agent.session.id } : {}),
       })))
     },
   }))

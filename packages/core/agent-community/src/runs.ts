@@ -993,7 +993,15 @@ export class RunExecutor {
           ? '这条消息点名了你，请回答。'
           : mentionsOnlyOthers
             ? `这条消息点名的是其他成员，不是你。只回复「${RunExecutor.SILENT}」这一行，不要有其他内容。`
-            : '这条消息没有点名任何人。请正常回答。'),
+            : '这条消息没有点名任何人。请正常回答。') +
+        // ── SAY IT WHERE THE MODEL LOOKS ────────────────────────────────────────
+        //
+        // `create_room` was the tool a bot reached for when the user asked for a group, and
+        // nothing told it that group creation is the USER's call. Measured: one sentence in a
+        // direct chat produced two groups — the confirmed proposal, plus the bot's own room.
+        // The rule is enforced host-side (room-guard.ts); this is why the model rarely hits it.
+        '\n本群已经是协作群：需要更多人手用 invite_bot，需要分工用 assign_task；'
+          + '不要再自己建群（需要新群请让用户在界面上新建）。',
       )
     } else {
       // A 1:1 (or a room this bot is alone in) has no group rules to state, but the

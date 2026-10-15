@@ -180,9 +180,17 @@ export class GroupFlowService {
     const message = this.port.getMessage(input.messageId)
     if (message === undefined) return undefined
 
+    // ── A PENDING PROPOSAL IS NEVER OVERWRITTEN ─────────────────────────────────
+    //
+    // Two writers can reach this method for the same room: the panel's post-send analysis and the
+    // bot's own `propose_group` tool. Overwriting while the user is reading the dialog is not a
+    // refresh — the dialog holds the OLD proposal id, and confirming it then failed with
+    // "Group proposal … not found". An expired proposal is resolved first (that is the same
+    // "refused" the user would get by ignoring it), then a fresh one may be recorded.
     const existing = room.pendingGroupProposal
-    if (existing !== undefined && existing.status === 'pending' && existing.sourceMessageId === message.id) {
-      return this.toProposal(existing)
+    if (existing !== undefined && existing.status === 'pending') {
+      if (!this.expired(existing)) return this.toProposal(existing)
+      this.resolveExpired(room, existing)
     }
 
     const alive = this.port.listBots()
