@@ -100,6 +100,19 @@ for (const m of ["agent-community","tool-agent-community","ui-agent-community"])
 它必须报三个入口都 `ok`，并且 `agent-community` 导出 `AgentCommunityService`、`tool-agent-community` 导出
 `apply`/`inject`、`ui-agent-community` 导出 `apply`。
 
+## ⚠️ 改了「客户端半边」必须重启宿主，**只刷新页面会让入口消失**
+
+实测（2026-10-15）：app 于 14:35:52 启动，我在 14:44:35 覆盖了
+`ui-agent-community/lib/client.js`，随后只刷新页面 —— **侧边栏的「Bots团队」入口直接消失**。
+原因：宿主在**启动时**登记客户端模块（带内容哈希），页面刷新时按旧哈希去取新文件，客户端半边
+加载失败，插件 UI 就整体不注册了。热重挂也救不回来（插件管理器直接以 `ambiguous-install` 拒绝）。
+
+规则：
+
+- 只改 **Node 半边**（core / tools）→ 重启宿主即可；
+- 改了 **UI 半边**（`ui-agent-community`）→ 也**必须重启宿主**，重启后再刷新页面；
+- 顺序永远是：`install-profile.sh` → **退出并重开 DSH** → 刷新页面。
+
 ## 恢复
 
 安装前的 profile 备份：`/tmp/ac-profile-backup-*.tar.gz`（含 `package.json`、`cordis.patch.yml`、
