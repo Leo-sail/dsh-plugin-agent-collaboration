@@ -30,7 +30,7 @@ import type {
   BotRoomNotice,
   BotMemoryEntry,
 } from './types.ts'
-import { routeMessage, namedBotIdsIn } from './routing.ts'
+import { routeMessage, namedBotIdsIn, mentionsEveryone } from './routing.ts'
 import { renderAttachmentReference, storeAttachments, type StoredAttachment } from './attachments.ts'
 import { RunExecutor } from './runs.ts'
 import { LedgerProjector, type SeedRoomItem } from './ledger.ts'
@@ -1861,11 +1861,11 @@ export class AgentCommunityService extends TypertRemoteService {
     // @mention means — and never merely because a message arrived.
     // ── WHO ANSWERS, DECIDED BY THE MESSAGE ─────────────────────────────────────
     //
-    // Routed on content: an @mention is explicit, a direct room has one recipient, and
-    // otherwise every member whose own role terms appear in the message runs. When
-    // nothing matches, the leader does — a message with no answer at all is worse than
-    // one extra model call. See `routing.ts` for why neither "everyone" (the pile-up)
-    // nor "leader only" (a group behaving like a 1:1) is right.
+    // THE ROOM'S RUN STRATEGY: a direct room has one recipient; `@all` wakes the room on
+    // purpose; `@mention`/a written name wakes exactly those members; a management
+    // instruction goes to the leader; the best role match wins (ties keep everyone); and
+    // when NOTHING matched the leader takes it and decides — "你好" must not wake four
+    // bots. See `routing.ts`, whose table is the single source of truth for who runs.
     const decision = routeMessage({
       members: room.memberIds
         .map(id => this.state.bots.find(b => b.id === id))
@@ -1877,6 +1877,9 @@ export class AgentCommunityService extends TypertRemoteService {
           ...(b.systemPrompt !== undefined ? { systemPrompt: b.systemPrompt } : {}),
         })),
       message: { text: message.text, mentions: message.mentions, mentionedIds: message.mentions },
+      // `@all` / `@所有人`: the one way to ask the whole room, and the only path that
+      // wakes every member. Plain words like 大家 are not tokens — see `mentionsEveryone`.
+      allMentioned: mentionsEveryone(message.text),
       // A coordination request may name a bot that is NOT in the room ("把 X 拉进群"), so
       // the router is told about every live bot the text names, not just the members.
       namedBotIds: namedBotIdsIn(message.text, this.state.bots.map(b => ({ id: b.id, name: b.name }))),

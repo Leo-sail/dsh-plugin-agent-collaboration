@@ -19,10 +19,25 @@ interface Props {
   onClose: () => void
 }
 
+/**
+ * The room-wide option.
+ *
+ * `@所有人` is the ONLY way to ask every member to answer (see the routing table in
+ * `routing.ts`): an unaddressed message goes to the leader, who decides. Offering the row
+ * here is what makes that path reachable without the user typing the token by hand —
+ * selecting it inserts `@所有人`, which the host recognises.
+ */
+const EVERYONE: BotOption = { id: '__everyone__', name: '所有人', avatarSeed: '👥' }
+/** `@all` is the latin spelling the host also accepts; both are matched here for filtering. */
+const EVERYONE_ALIASES = ['所有人', '全体', 'all']
+
 export function MentionMenu({ query, bots, onSelect, onClose }: Props) {
+  const needle = query.toLowerCase()
+  const everyone = EVERYONE_ALIASES.some(alias => alias.includes(needle))
   const filtered = bots.filter(b =>
-    query === '' || b.name.toLowerCase().includes(query.toLowerCase())
+    query === '' || b.name.toLowerCase().includes(needle)
   )
+  if (everyone) filtered.unshift(EVERYONE)
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -47,7 +62,7 @@ export function MentionMenu({ query, bots, onSelect, onClose }: Props) {
       overflow: 'hidden',
     }}>
       <div style={{ padding: '6px 12px 2px', fontSize: 10, fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-        提及 Bot
+        提及 Bot · 或整个房间
       </div>
       {filtered.map(bot => (
         <button
@@ -61,6 +76,11 @@ export function MentionMenu({ query, bots, onSelect, onClose }: Props) {
         >
           <span style={{ fontSize: 14 }}>{bot.avatarSeed ?? botEmoji(bot.id)}</span>
           <span style={{ fontSize: 13, color: 'var(--dsw-alias-label-primary)' }}>{bot.name}</span>
+          {bot.id === EVERYONE.id && (
+            <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
+              全员各自回答
+            </span>
+          )}
         </button>
       ))}
     </div>

@@ -863,8 +863,7 @@ export class RunExecutor {
       let settled = false
       try {
         const bot = this.svc.getBot(run.botId)
-        const explicit = this.explicitMentionsOf(run)
-        const prompt = this.buildPrompt(run, bot, explicit, run.botId)
+        const prompt = this.buildPrompt(run, bot, run.botId)
         const reply = await this.callModel(run, bot, prompt)
 
         // P0-2: push bot-text ledger entry — but never an empty one. A bot that
@@ -931,17 +930,6 @@ export class RunExecutor {
     }
   }
 
-  /** Bot ids this run's triggering message explicitly @mentioned. */
-  private explicitMentionsOf(run: RunSnapshot): string[] {
-    const messages = this.svc.listMessages(run.roomId)
-    const latest = messages[messages.length - 1]
-    if (latest === undefined) return []
-    const found: string[] = []
-    for (const bot of this.svc.listBots()) {
-      if (latest.text.includes(`@${bot.name}`)) found.push(bot.id)
-    }
-    return found
-  }
 
   /**
    * Build the single prompt for one bot turn.
@@ -955,7 +943,6 @@ export class RunExecutor {
   private buildPrompt(
     run: RunSnapshot,
     bot: BotSnapshot | undefined,
-    explicitMentions: readonly string[],
     botId: string,
   ): string {
     const messages = this.svc.listMessages(run.roomId)
@@ -981,10 +968,6 @@ export class RunExecutor {
       .map(id => this.svc.getBot(id))
       .filter((b): b is NonNullable<typeof b> => b !== undefined)
     const others = members.filter(b => b.id !== botId)
-    const mentionedMe = explicitMentions.includes(botId)
-    const mentionsOnlyOthers =
-      explicitMentions.length > 0 && !mentionedMe &&
-      explicitMentions.every(id => id !== botId)
 
     const parts: string[] = []
     if (bot !== undefined) {
@@ -1012,11 +995,12 @@ export class RunExecutor {
       parts.push(
         `[群聊规则]\n` +
         `房间成员：${members.map(b => b.name).join('、')}。\n` +
-        (mentionedMe
-          ? '这条消息点名了你，请回答。'
-          : mentionsOnlyOthers
-            ? `这条消息点名的是其他成员，不是你。只回复「${RunExecutor.SILENT}」这一行，不要有其他内容。`
-            : '这条消息没有点名任何人。请正常回答。') +
+        // ONLY ADDRESSED BOTS RUN (see `routing.ts`), so a turn that exists at all is a
+        // turn this bot is meant to answer. The old "reply with the silent sentinel"
+        // instruction existed to muzzle a bot that had been woken by mistake — that wake
+        // is gone, and with it the whole class of "bot ran a full round just to say
+        // nothing" (which the user paid for in tokens).
+        '本轮的收件人包含你，请正常回答。' +
         // ── SAY IT WHERE THE MODEL LOOKS ────────────────────────────────────────
         //
         // `create_room` was the tool a bot reached for when the user asked for a group, and
@@ -1599,12 +1583,6 @@ export class RunExecutor {
     // A bot that declined to speak produces no message at all, so a group room
     // does not fill up with "no comment" replies. Match tolerantly: the model may
     // wrap the marker in punctuation or restate it as "无需补充".
-    if (RunExecutor.isSilent(answer)) {
-      this.ctx.logger?.info?.(
-        `agent-community: bot ${bot?.name ?? run.botId} stayed silent on run ${run.id}`,
-      )
-      return { text: '', sessionSeq: 0 as SessionSeq }
-    }
     return {
       text: answer,
       sessionSeq: 0 as SessionSeq,
@@ -1614,20 +1592,4 @@ export class RunExecutor {
     }
   }
 
-  /** Reply text that means "this bot chose not to speak". */
-  private static readonly SILENT = '（无需补充）'
-
-  /**
-   * Whether a reply is the "declined to speak" marker rather than content.
-   * Tolerant of surrounding punctuation/whitespace and of the model dropping the
-   * parentheses, but never matches a reply that carries real text alongside it.
-   */
-  private static isSilent(text: string): boolean {
-    const bare = text
-      .trim()
-      .replace(/^[（(【\[]+|[）)】\]]+$/g, '')
-      .replace(/[。.!！~～\s]+$/g, '')
-      .trim()
-    return bare === '无需补充' || bare === '無需補充' || bare === 'no comment'
-  }
 }

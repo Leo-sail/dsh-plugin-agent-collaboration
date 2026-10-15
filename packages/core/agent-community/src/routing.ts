@@ -55,13 +55,37 @@ export interface RouteInput {
    * message that mentioned nobody and fanned it out to the whole group.
    */
   readonly namedBotIds?: readonly string[] | undefined
+  /**
+   * The message says `@all` / `@所有人` — the user addressing the whole room on purpose.
+   *
+   * WHY THIS IS EXPLICIT AND NOT INFERRED: "everybody answers" used to be the fallback for
+   * a message that matched nothing (a bare 「你好」 woke a four-bot room, four full model
+   * calls). The user's rule is the opposite: only the bots that were actually addressed
+   * run, and "everyone" has to be ASKED for. A token in the text is that ask; plain words
+   * like 大家/所有人 are deliberately NOT tokens, because they appear inside ordinary
+   * sentences ("大家看一下这个设计" addresses the designer, not the room).
+   */
+  readonly allMentioned?: boolean | undefined
+}
+
+/**
+ * Whether a message literally says `@all` / `@所有人`.
+ *
+ * The `@` is required. These are the only two spellings the UI can insert (the mention menu
+ * offers a 所有人 row) and the only ones a user can type by hand, so the set stays closed.
+ */
+export function mentionsEveryone(text: string): boolean {
+  // `@all` must not be a prefix of a longer latin word (`@allow` is not a broadcast).
+  if (/@all(?![\p{L}\p{N}])/iu.test(text)) return true
+  // Chinese has no word boundaries, so the two room-wide spellings are matched literally.
+  return text.includes('@所有人') || text.includes('@全体')
 }
 
 export interface RouteDecision {
   /** Bots that should run, in member order. */
   readonly targets: readonly string[]
   /** Why, for the transcript and for debugging a surprising result. */
-  readonly reason: 'direct' | 'mention' | 'matched' | 'coordinator' | 'general'
+  readonly reason: 'direct' | 'all' | 'mention' | 'matched' | 'coordinator' | 'leader'
   /** Terms that caused each bot to be picked, for the log. */
   readonly matched: Readonly<Record<string, readonly string[]>>
 }
@@ -156,27 +180,30 @@ function haystackOf(text: string): string {
 /**
  * Decide who answers.
  *
- * Order of precedence, each step existing because the one below it is worse for that
- * case:
- *   1. `@mention` — an explicit directive outranks any inference.
- *   2. direct room — exactly one intended recipient by construction.
- *   3. role match — the content names a subject some bots own.
- *   4. leader — nothing matched, but a message with no answer at all is a bug.
+ * THE ROOM'S RUN STRATEGY, IN ONE PLACE. The user's rules, in precedence order:
+ *
+ *   1. A direct room has exactly one intended recipient by construction.
+ *   2. `@all` / `@所有人` — the user asking the WHOLE ROOM, explicitly.
+ *   3. `@mention` — an explicit directive outranks any inference; only the mentioned run.
+ *   4. A management instruction ("把 A 踢出去") belongs to whoever can execute it — the
+ *      leader — never to the bot it names. Checked BEFORE name matching, because the name
+ *      there is the object of the action, not the addressee.
+ *   5. A member's NAME written out in the text ("让 A 看一下") addresses that member.
+ *   6. A role/domain match: the member whose role matches MOST wins; a tie keeps them all.
+ *      A single incidental shared word must not wake a second bot.
+ *   7. Nothing matched — a message with no answer at all is a bug, so the LEADER takes it
+ *      and decides. It does NOT fan out to every member: "你好" used to wake a four-bot
+ *      room (four full model calls) and the user reported exactly that as wrong.
+ *
+ * "Who runs" has this single decision point. Nothing else in the plugin may enqueue a run
+ * for a user message — two wake-up paths is how the same message ends up answered twice.
  */
 export function routeMessage(input: RouteInput): RouteDecision {
   const byId = new Map(input.members.map(m => [m.id, m]))
+  const ordered = (ids: readonly string[]): string[] =>
+    input.members.filter(m => ids.includes(m.id)).map(m => m.id)
 
-  // 1. Explicit mentions. Only members can be mentioned into running.
-  const mentioned = (input.message.mentionedIds ?? [])
-    .filter(id => byId.has(id))
-  if (mentioned.length > 0) {
-    return { targets: mentioned, reason: 'mention', matched: {} }
-  }
-  // A mention that resolved to nobody is not a directive to stay silent — it usually
-  // means the name was mis-typed or the bot has since left. Fall through so the message
-  // is still routed on its content rather than being answered by no one.
-
-  // 2. A direct room has exactly one bot by construction.
+  // 1. Direct room.
   if (input.directBotId !== undefined) {
     return {
       targets: byId.has(input.directBotId) ? [input.directBotId] : [],
@@ -185,18 +212,33 @@ export function routeMessage(input: RouteInput): RouteDecision {
     }
   }
 
-  // 2.5 An instruction that ACTS ON a member belongs to whoever can execute it.
+  // 2. The whole room, asked for on purpose.
+  if (input.allMentioned === true) {
+    return { targets: input.members.map(m => m.id), reason: 'all', matched: {} }
+  }
+
+  // 3. Explicit `@` mentions. Only members can be mentioned into running.
+  const mentioned = (input.message.mentionedIds ?? []).filter(id => byId.has(id))
+  if (mentioned.length > 0) {
+    return { targets: ordered(mentioned), reason: 'mention', matched: {} }
+  }
+  // A mention that resolved to nobody is not a directive to stay silent — it usually
+  // means the name was mis-typed or the bot has since left. Fall through so the message
+  // is still routed rather than being answered by no one.
+
+  const hay = haystackOf(input.message.text)
+
+  // 4. An instruction that ACTS ON a member belongs to whoever can execute it.
   //
   // This is the difference between talking TO somebody and doing something ABOUT them.
-  // "把 htsrgds 从这个群里踢出去" names htsrgds, so content routing woke htsrgds — which
+  // "把 htsrgds 从这个群里踢出去" names htsrgds, so name matching would wake htsrgds — which
   // cannot remove anybody: `remove_bot` is leader-only, so the one bot guaranteed to be
   // unable to comply was the one that answered, and the leader never ran. Measured on the
   // real host: the target replied "我做不到", then the user had to @ the leader by hand.
   //
-  // The rule is deliberately narrow: a removal verb AND a member's name, in a
-  // leader-driven room, with no explicit `@`. A coding request that merely contains the
-  // word ("移除这个字段") names no member and keeps normal content routing.
-  const hay = haystackOf(input.message.text)
+  // The rule is deliberately narrow: a management verb AND a member's name, with no
+  // explicit `@`. A coding request that merely contains the word ("移除这个字段") names no
+  // member and keeps normal content routing.
   const act = managementIntent(hay)
   if (act !== undefined) {
     const named = new Set<string>([
@@ -204,59 +246,64 @@ export function routeMessage(input: RouteInput): RouteDecision {
       ...(input.namedBotIds ?? []),
     ])
     if (named.size > 0) {
-      if (input.leaderId !== undefined && byId.has(input.leaderId)) {
+      const leader = input.leaderId !== undefined && byId.has(input.leaderId)
+        ? input.leaderId
+        : input.members.find(m => !named.has(m.id))?.id
+      if (leader !== undefined) {
         return {
-          targets: [input.leaderId],
+          targets: [leader],
           reason: 'coordinator',
-          matched: { [input.leaderId]: [`${act} request: the coordinator acts`] },
-        }
-      }
-      // No leader. Exactly ONE member answers — the room's first in join order, which is
-      // the same member leadership would be handed to — and never the bot being acted on.
-      // Waking everyone here is how "把 htsrgds 拉进这个群" got four replies.
-      const candidate = input.members.find(m => !named.has(m.id))
-      if (candidate !== undefined) {
-        return {
-          targets: [candidate.id],
-          reason: 'coordinator',
-          matched: { [candidate.id]: [`${act} request, no leader: first member acts`] },
+          matched: { [leader]: [`${act} request: the coordinator acts`] },
         }
       }
     }
   }
 
-  // 3. Role match: every member whose own terms appear in the message.
-  const matched: Record<string, readonly string[]> = {}
-  const targets: string[] = []
+  // 5. A member's NAME written out in the text: that member is being addressed.
+  //    ("让 fgchb 看一下" addresses it without the `@`.)
+  const namedMembers = input.members.filter(member =>
+    termsOf(member.name).some(term => term !== '' && hay.includes(term.toLowerCase())))
+  if (namedMembers.length > 0) {
+    return {
+      targets: ordered(namedMembers.map(m => m.id)),
+      reason: 'matched',
+      matched: Object.fromEntries(namedMembers.map(m => [m.id, [`name:${m.name}`]])),
+    }
+  }
+
+  // 6. Role match: the BEST match wins, ties keep everyone.
+  //
+  // Picking every member with ANY hit woke a second bot on one shared word (two bots whose
+  // roles both mention 设计). Ranking by hit count keeps "让画师画一张" → the artist while
+  // still waking both when the message genuinely fits both equally.
+  const scored: Array<{ id: string; hits: string[] }> = []
   for (const member of input.members) {
     const terms = [
       ...termsOf(member.description),
       ...termsOf(member.systemPrompt),
-      // The name is part of a bot's identity in practice: "让 fgchb 看一下" addresses it
-      // without the `@`, and dropping that would make the router ignore a direct ask.
-      ...termsOf(member.name),
     ]
-    const hits = terms.filter(term => hay.includes(term.toLowerCase()))
-    if (hits.length === 0) continue
-    targets.push(member.id)
-    matched[member.id] = hits
+    const hits = terms.filter(term => term !== '' && hay.includes(term.toLowerCase()))
+    if (hits.length > 0) scored.push({ id: member.id, hits })
   }
-  if (targets.length > 0) return { targets, reason: 'matched', matched }
+  if (scored.length > 0) {
+    const best = Math.max(...scored.map(s => s.hits.length))
+    const winners = scored.filter(s => s.hits.length === best)
+    return {
+      targets: ordered(winners.map(w => w.id)),
+      reason: 'matched',
+      matched: Object.fromEntries(winners.map(w => [w.id, w.hits])),
+    }
+  }
 
-  // 4. Nothing matched — the message is GENERAL, so it concerns everyone.
-  //
-  // "你好" is the case that settled this. Routing it to one bot made a four-member group
-  // answer a greeting once, which reads as broken: a greeting is addressed to the room,
-  // not to a role. A message that names no subject and no one is by definition for all of
-  // them, so all of them answer — that IS the content-based decision, not a fallback
-  // away from one.
-  //
-  // This is only safe because bot messages no longer fan out (`postBotMessage` starts a
-  // run solely for an explicitly addressed bot). Fanning out here fans out ONCE per user
-  // message; the pile-up came from replies triggering replies, which is fixed.
+  // 7. Nothing matched: the LEADER takes it (and decides how many bots the job needs).
+  //    A room with no leader falls back to its first member in join order — the same
+  //    member leadership would be handed to.
+  const leader = input.leaderId !== undefined && byId.has(input.leaderId)
+    ? input.leaderId
+    : input.members[0]?.id
   return {
-    targets: input.members.map(m => m.id),
-    reason: 'general',
+    targets: leader !== undefined ? [leader] : [],
+    reason: 'leader',
     matched: {},
   }
 }

@@ -94,54 +94,13 @@ export class GroupTaskDriver {
     this.accessor = accessor
   }
 
-  /**
-   * A user spoke in a group.
-   *
-   * An explicit `@mention` runs that member DIRECTLY and lets the leader integrate on
-   * its next turn. Going through a dispatch turn first would make the leader assign
-   * the same work again, so the member would do it twice.
-   */
-  async onUserMessage(input: {
-    roomId: string
-    text: string
-    mentionedBotIds: readonly string[]
-  }): Promise<{ dispatchedTo: readonly string[]; leaderRuns: boolean }> {
-    const state = this.ensure(input.roomId)
-    state.round += 1
-    state.finished = undefined
-
-    const room = this.accessor.roomById(input.roomId)
-    if (room === undefined || room.directBotId !== undefined) {
-      return { dispatchedTo: [], leaderRuns: false }
-    }
-
-    // Direct mention: run only the mentioned members, then let the leader整合.
-    const mentioned = input.mentionedBotIds.filter((id) => room.memberIds.includes(id))
-    if (mentioned.length > 0) {
-      const dispatched: string[] = []
-      for (const botId of mentioned) {
-        const prompt = this.memberPrompt(input.text, '用户直接点名')
-        if (this.accessor.enqueueRun(input.roomId, botId, prompt)) {
-          state.runningBotIds.add(botId)
-          state.assignments.push({
-            botId, task: input.text, at: new Date().toISOString(), status: 'running',
-          })
-          dispatched.push(botId)
-        }
-      }
-      this.save(input.roomId, state)
-      // The leader still runs, but only to整合 — it is told the work is already out.
-      return { dispatchedTo: dispatched, leaderRuns: true }
-    }
-
-    // No mention: the LEADER decides how many bots answer, and who.
-    const leader = this.accessor.leaderOf(input.roomId)
-    if (leader === undefined) return { dispatchedTo: [], leaderRuns: false }
-    const ok = this.accessor.enqueueRun(input.roomId, leader, this.leaderPrompt(input.roomId, input.text))
-    if (ok) state.runningBotIds.add(leader)
-    this.save(input.roomId, state)
-    return { dispatchedTo: [], leaderRuns: ok }
-  }
+  // NOTE: `onUserMessage` used to live here. It enqueued runs for a user message — the
+  // same thing `routeMessage` does — and NOTHING ever called it (measured: zero call sites
+  // outside this file). Two wake-up paths for one message is exactly how a room ends up
+  // answering twice, so the dead one is gone rather than left as a trap; `routing.ts` is
+  // the single decision point for who runs. `onMemberFinished`/`onLeaderIdle` below stay:
+  // they are the "members are done → the leader continues" half, which the async dispatch
+  // flow needs.
 
   /**
    * A member's run settled.
