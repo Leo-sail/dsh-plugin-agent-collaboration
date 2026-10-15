@@ -17,7 +17,7 @@
 
 - insert:
     - id: plugin-agent-community
-      name: "@dsh-plugin/agent-community"
+      name: "@dsh-plugin-agent-community/agent-community"
       config:
         maxBots: 32
         maxRooms: 64
@@ -38,10 +38,10 @@
         a2aMinIntervalMs: 3000
 
     - id: plugin-tool-agent-community
-      name: "@dsh-plugin/tool-agent-community"
+      name: "@dsh-plugin-agent-community/tool-agent-community"
 
     - id: plugin-ui-agent-community
-      name: "@dsh-plugin/ui-agent-community"
+      name: "@dsh-plugin-agent-community/ui-agent-community"
 
     # NOTE: a fourth row used to mount a second @deepseek-ai/dsh-permission-presets
     # instance here to add a read-only preset. It can never activate: this DSH's own

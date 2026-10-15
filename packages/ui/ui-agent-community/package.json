@@ -1,7 +1,7 @@
 {
-  "name": "@dsh-plugin/ui-agent-community",
+  "name": "@dsh-plugin-agent-community/ui-agent-community",
   "description": "Agent Community UI — Bot list, room list, chat panel, run status",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -20,7 +20,7 @@
   ],
   "license": "MIT",
   "scripts": {
-    "bundle": "tsdown && node ../../../scripts/wrap-client.mjs lib/client.js @dsh-plugin/ui-agent-community"
+    "bundle": "tsdown && node ../../../scripts/wrap-client.mjs lib/client.js @dsh-plugin-agent-community/ui-agent-community"
   },
   "dsh": {
     "client": {
@@ -32,7 +32,7 @@
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-session",
         "@deepseek-ai/dsh-api-session-controller",
-        "@dsh-plugin/agent-community"
+        "@dsh-plugin-agent-community/agent-community"
       ],
       "platform": "web"
     }
@@ -40,12 +40,12 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0 <5.0.0",
     "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.0-rc.1 <0.3.0",
-    "@dsh-plugin/agent-community": "workspace:*"
+    "@dsh-plugin-agent-community/agent-community": "workspace:*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0 <5.0.0",
     "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.0-rc.1 <0.3.0",
-    "@dsh-plugin/agent-community": "workspace:*",
+    "@dsh-plugin-agent-community/agent-community": "workspace:*",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.0",

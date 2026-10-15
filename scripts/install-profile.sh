@@ -75,7 +75,7 @@ fi
 # The browser half must BE wrapped. The inverse check below (Node half carries no loader) has
 # existed all along, which is why a bare-ESM client bundle passed every gate twice.
 UI_CLIENT="$ROOT/packages/ui/ui-agent-community/lib/client.js"
-if ! head -c 80 "$UI_CLIENT" | grep -q 'window.__ModuleLoader__.load({ id: "@dsh-plugin/ui-agent-community"'; then
+if ! head -c 80 "$UI_CLIENT" | grep -q 'window.__ModuleLoader__.load({ id: "@dsh-plugin-agent-community/ui-agent-community"'; then
   echo "install-profile: lib/client.js is not the wrapped browser bundle — the DSH loader" >&2
   echo "                 evaluates it as a classic script and the plugin will not activate." >&2
   exit 1

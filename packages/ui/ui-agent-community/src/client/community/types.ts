@@ -23,7 +23,7 @@ import type {
   RetryBotRunRequest,
   SendRoomMessageRequest,
   UpdateRoomRequest,
-} from '@dsh-plugin/agent-community'
+} from '@dsh-plugin-agent-community/agent-community'
 
 /** The two lists the sidebar's tab strip switches between. */
 export type ActiveTab = 'bots' | 'rooms'

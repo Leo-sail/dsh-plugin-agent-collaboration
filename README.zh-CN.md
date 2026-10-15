@@ -50,15 +50,20 @@
 
 ## 安装
 
-安装已发布的 tarball —— 不需要 npm 账号，也不需要本机构建：
+```bash
+dsh plugin --profile <你的profile> add dsh-plugin-agent-collaboration
+```
+
+包里已经带了三个**预构建**的包，本机不会编译任何东西。装完重启 DSH 并刷新页面，侧栏会出现 **Bots团队**。
+
+### 改用 release tarball 安装
 
 ```bash
 dsh plugin --profile <你的profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.0/dsh-plugin-agent-collaboration-0.1.0.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
 ```
 
-这个压缩包里已经带了三个**预构建**的包，本机不会编译任何东西，也不会去 registry 拉取。装完重启 DSH 并刷新页面，
-侧栏会出现 **Bots团队**。
+同一份产物，附在 release 上——不想经过 npm 就直接用它。
 
 ### 改用本地源码目录安装
 
@@ -67,18 +72,18 @@ dsh plugin --profile <你的profile> add "file:/path/to/this/repo/packages/bundl
 ```
 
 **`file:` 前缀不要去掉。** pnpm 会把裸绝对路径记成 `link:` 符号链接，于是 bundle 自己的 `file:` 依赖一个都不会被安装：
-profile 里只有 bundle、没有 `@dsh-plugin/*` 那几行，结果每一行都 import 失败。DSH 自带的插件管理器同样如此，它会把绝对路径原样透传。
+profile 里只有 bundle、没有 `@dsh-plugin-agent-community/*` 那几行，结果每一行都 import 失败。DSH 自带的插件管理器同样如此，它会把绝对路径原样透传。
 
 确认安装结果——三行都必须是**真实目录**而不是符号链接：
 
 ```bash
-ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin/*
+ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/*
 ```
 
 ### 让 Agent 帮你装
 
 ```text
-把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.0/dsh-plugin-agent-collaboration-0.1.0.tgz
+把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
 这个 DSH 插件装进我的 DSH profile，重启 DSH，并确认侧栏出现「Bots团队」。
 ```
 
@@ -143,7 +148,7 @@ $DSH_HOME/agent-community/workspaces/<bot>  每个 Bot 的工作区，附件也�
 本仓库只发布 **Community** 这一半。DSH 内置的 Agent Teams bundle 负责队友、共享任务板与点对点消息，
 所以本 bundle 只挂载**内置版没有对应物**的部分。两者可以并存，不需要关掉任何一个。
 
-仓库里曾经有一个未挂载、也无法构建的 `@dsh-plugin/agent-team` 分支（连同它的 `tool-`、`ui-` 包），已于 2026-10-14 删除。
+仓库里曾经有一个未挂载、也无法构建的 `@dsh-plugin-agent-community/agent-team` 分支（连同它的 `tool-`、`ui-` 包），已于 2026-10-14 删除。
 
 ## 截图
 

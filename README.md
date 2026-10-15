@@ -65,15 +65,21 @@ the plugin is meant to be installed *into* a DSH profile, where those packages a
 
 ## Installation
 
-Install the released tarball — no npm account and no local build:
+```bash
+dsh plugin --profile <your-profile> add dsh-plugin-agent-collaboration
+```
+
+The published package carries all three packages prebuilt, so nothing is compiled on your machine.
+Restart DSH and refresh the page — **Bots团队** appears in the sidebar.
+
+### Installing the release tarball instead
 
 ```bash
 dsh plugin --profile <your-profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.0/dsh-plugin-agent-collaboration-0.1.0.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
 ```
 
-That archive carries all three packages prebuilt, so nothing is compiled on your machine and nothing is
-fetched from a registry. Restart DSH and refresh the page — **Bots团队** appears in the sidebar.
+The same archive, attached to the release for anyone who would rather not go through npm.
 
 ### Installing from a checkout instead
 
@@ -82,21 +88,21 @@ dsh plugin --profile <your-profile> add "file:/path/to/this/repo/packages/bundle
 ```
 
 Keep the `file:` prefix. pnpm records a bare absolute path as a `link:` symlink and then installs none of
-the bundle's own `file:` dependencies; the profile ends up with the bundle and no `@dsh-plugin/*` rows,
+the bundle's own `file:` dependencies; the profile ends up with the bundle and no `@dsh-plugin-agent-community/*` rows,
 and every row fails to import. The same applies to DSH's own plugin manager, which passes an absolute
 path through unchanged.
 
 Verify the install — all three must be real directories, not symlinks:
 
 ```bash
-ls -ld ~/.dsh/profiles/<your-profile>/node_modules/@dsh-plugin/*
+ls -ld ~/.dsh/profiles/<your-profile>/node_modules/@dsh-plugin-agent-community/*
 ```
 
 ### Ask an agent to do it
 
 ```text
 Install the DSH plugin at
-https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.0/dsh-plugin-agent-collaboration-0.1.0.tgz
+https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
 into my DSH profile, restart DSH, and confirm the "Bots团队" entry appears in the sidebar.
 ```
 
@@ -165,7 +171,7 @@ This repo ships the **Community** half only. DSH's built-in Agent Teams bundle o
 task board and peer messaging, so this bundle mounts only what has no in-box equivalent. The two can run
 side by side without either disabling the other.
 
-An older `@dsh-plugin/agent-team` fork (with its `tool-` and `ui-` packages) used to live in this repo
+An older `@dsh-plugin-agent-community/agent-team` fork (with its `tool-` and `ui-` packages) used to live in this repo
 unmounted and unbuildable; it was removed on 2026-10-14.
 
 ## Screenshots

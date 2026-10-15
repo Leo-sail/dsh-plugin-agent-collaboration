@@ -23,7 +23,7 @@ dsh plugin add dsh-plugin-agent-collaboration
 Or install the release tarball, which carries the same three packages prebuilt:
 
 ```bash
-dsh plugin add https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.0/dsh-plugin-agent-collaboration-0.1.0.tgz
+dsh plugin add https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
 ```
 
 Restart DSH and refresh the page — **Bots团队** appears in the sidebar.
@@ -44,8 +44,8 @@ plugin peers on are part of the DSH installation and are on no public registry.
 - **13 model-facing tools**, so a Bot can create rooms, hand work to another Bot, and decompose a
   request into tasks.
 
-This package is the installable entry: it mounts `@dsh-plugin/agent-community`,
-`@dsh-plugin/tool-agent-community` and `@dsh-plugin/ui-agent-community`, which it carries prebuilt. Each
+This package is the installable entry: it mounts `@dsh-plugin-agent-community/agent-community`,
+`@dsh-plugin-agent-community/tool-agent-community` and `@dsh-plugin-agent-community/ui-agent-community`, which it carries prebuilt. Each
 of the three is also installable on its own from the repository.
 
 ## Requirements

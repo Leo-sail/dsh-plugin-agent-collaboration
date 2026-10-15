@@ -1,7 +1,7 @@
 {
-  "name": "@dsh-plugin/tool-agent-community",
+  "name": "@dsh-plugin-agent-community/tool-agent-community",
   "description": "Model-facing tools for Agent Community — Bot and room management via ctx.agentCommunity",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -25,7 +25,7 @@
     "@deepseek-ai/dsh-agent": ">=0.2.0-rc.1 <0.3.0",
     "@deepseek-ai/dsh-session": ">=0.2.0-rc.1 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1 <0.3.0",
-    "@dsh-plugin/agent-community": "workspace:*",
+    "@dsh-plugin-agent-community/agent-community": "workspace:*",
     "@deepseek-ai/schemastery": "~3.18.4"
   },
   "devDependencies": {
@@ -33,7 +33,7 @@
     "@deepseek-ai/dsh-agent": ">=0.2.0-rc.1 <0.3.0",
     "@deepseek-ai/dsh-session": ">=0.2.0-rc.1 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1 <0.3.0",
-    "@dsh-plugin/agent-community": "workspace:*",
+    "@dsh-plugin-agent-community/agent-community": "workspace:*",
     "@types/node": "^22.20.0",
     "tsdown": "^0.22.2",
     "typescript": "^6.0.3"

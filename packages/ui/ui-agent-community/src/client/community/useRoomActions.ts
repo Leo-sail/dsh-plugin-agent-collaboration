@@ -13,7 +13,7 @@
  * stays whole rather than being half-deleted.
  */
 import { useState } from 'react'
-import type { BotMessage, BotRoom, BotRun } from '@dsh-plugin/agent-community'
+import type { BotMessage, BotRoom, BotRun } from '@dsh-plugin-agent-community/agent-community'
 import type { ConfirmDeleteTarget } from './ConfirmDeleteDialog.tsx'
 import type { CommunityRemote } from './types.ts'
 import { describe } from './types.ts'

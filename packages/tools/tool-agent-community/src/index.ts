@@ -6,7 +6,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 // Type-only: pulls in the `ctx.agentCommunity` declaration merge without
 // creating a runtime edge (the Service itself is provided by the core package).
-import type {} from '@dsh-plugin/agent-community'
+import type {} from '@dsh-plugin-agent-community/agent-community'
 
 export const name = 'plugin-tool-agent-community'
 export const inject = ['agents', 'agentCommunity', 'tools'] as const

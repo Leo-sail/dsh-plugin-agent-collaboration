@@ -19,7 +19,7 @@
  * re-rendering on them would be pointless work on every poll.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { BotCommunitySnapshot, BotRoom, ConfirmGroupRequest, GroupProposal } from '@dsh-plugin/agent-community'
+import type { BotCommunitySnapshot, BotRoom, ConfirmGroupRequest, GroupProposal } from '@dsh-plugin-agent-community/agent-community'
 import { proposalNavigation, shouldPromptProposal } from '../conversation/GroupProposalDialog.tsx'
 import { PROPOSAL_TIMED_OUT_NOTICE } from '../conversation/nativeStrings.ts'
 import type { ActiveTab, CommunityRemote } from './types.ts'

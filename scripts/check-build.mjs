@@ -60,7 +60,7 @@ const ui = 'packages/ui/ui-agent-community'
 const clientPath = join(ROOT, ui, 'lib/client.js')
 if (existsSync(clientPath)) {
   const code = readFileSync(clientPath, 'utf8')
-  const expected = `window.__ModuleLoader__.load({ id: "@dsh-plugin/ui-agent-community"`
+  const expected = `window.__ModuleLoader__.load({ id: "@dsh-plugin-agent-community/ui-agent-community"`
   if (!code.startsWith(expected)) {
     problems.push(`${ui}/lib/client.js is not the wrapped browser bundle (the DSH loader evaluates it as a classic script)`)
   }

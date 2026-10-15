@@ -34,7 +34,7 @@ export default defineConfig([
       '@deepseek-ai/dsh-api-remotes',
       '@deepseek-ai/dsh-client-locale',
       '@deepseek-ai/dsh-client-ui-workspace',
-      '@dsh-plugin/agent-community',
+      '@dsh-plugin-agent-community/agent-community',
     ],
   },
 ])

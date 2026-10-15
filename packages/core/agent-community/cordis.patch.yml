@@ -1,8 +1,8 @@
-# @dsh-plugin/agent-community — the Bot Community service.
+# @dsh-plugin-agent-community/agent-community — the Bot Community service.
 #
 # This patch is what makes THIS package installable on its own:
 #
-#   dsh plugin --profile <profile> add @dsh-plugin/agent-community
+#   dsh plugin --profile <profile> add @dsh-plugin-agent-community/agent-community
 #
 # The host half is the whole plugin — Bots, rooms, runs, the ledger the panel draws.
 # `packages/bundle/agent-collaboration` mounts the same row and adds the two halves
@@ -15,7 +15,7 @@
 
 - insert:
     - id: plugin-agent-community
-      name: "@dsh-plugin/agent-community"
+      name: "@dsh-plugin-agent-community/agent-community"
       config:
         maxBots: 32
         maxRooms: 64

@@ -16,7 +16,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
-import type { BotCommunitySnapshot } from '@dsh-plugin/agent-community'
+import type { BotCommunitySnapshot } from '@dsh-plugin-agent-community/agent-community'
 import type { ActiveTab, CommunityRemote } from './types.ts'
 import { describe } from './types.ts'
 

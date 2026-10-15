@@ -107,7 +107,7 @@ function obj(typeSymbol: string) {
 
 function descriptor(method: string, parameters: { name: string; wire: string; source: string; codec: ReturnType<typeof str> }[]) {
   return {
-    id: `@dsh-plugin/ui-agent-community#agentCommunity/${method}`,
+    id: `@dsh-plugin-agent-community/ui-agent-community#agentCommunity/${method}`,
     service: 'agentCommunity',
     namespace: 'agentCommunity',
     method,
@@ -122,7 +122,7 @@ function param(name: string, codec: ReturnType<typeof str>) {
 }
 
 const contribution = {
-  package: '@dsh-plugin/ui-agent-community',
+  package: '@dsh-plugin-agent-community/ui-agent-community',
   descriptors: [
     descriptor('snapshot', []),
     descriptor('listBots', []),
