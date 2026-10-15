@@ -29,6 +29,7 @@ import type {
   NoticeRoomRequest,
   BotRoomNotice,
   BotMemoryEntry,
+  RoomGoal,
 } from './types.ts'
 import { routeMessage, namedBotIdsIn, mentionsEveryone } from './routing.ts'
 import { renderAttachmentReference, storeAttachments, type StoredAttachment } from './attachments.ts'
@@ -48,6 +49,8 @@ import { LedgerProjection } from './ledger-projection.ts'
 import { GroupTaskDriver, type GroupTaskState } from './group-task.ts'
 import { registerCollaborationTools } from './collaboration-tools.ts'
 import { crossRoomError, screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
+import { canEditGoal, canReadGoal, describeGoal, goalPromptBlock, shouldContinueGoal, GOAL_STALL_LIMIT, type GoalActor } from './room-goal.ts'
+import { planDispatch, handoffReport, MAX_DISPATCH_TASKS, type DispatchTask } from './dispatch.ts'
 import { appendEntry, dropBot, dropBotFromRoom, dropRoom, entriesFor, taskMemoryText } from './bot-memory.ts'
 import { Maintenance, type MaintenanceHost } from './maintenance.ts'
 import { findBotByName, requireBot, requireRoom, NotFoundError } from './lookup.ts'
@@ -1144,6 +1147,37 @@ export class AgentCommunityService extends TypertRemoteService {
       finishTask: (input) => {
         void this.groupTask?.finish({ roomId: input.roomId, report: input.report })
       },
+      roomGoal: (input) => {
+        const goal = this.roomGoal(input.roomId)
+        return goal === undefined
+          ? undefined
+          : { text: goal.text, status: goal.status, updatedAt: goal.updatedAt }
+      },
+      setRoomGoal: async (input) => {
+        // The room comes from the SESSION, never from the model: `ownerOf` resolved it, and
+        // the actor is that session — so a bot cannot name another room's goal, and the
+        // authority check runs against the room it is actually in.
+        const result = await this.setRoomGoal({
+          roomId: input.roomId,
+          ...(input.text !== undefined ? { text: input.text } : {}),
+          ...(input.status !== undefined ? { status: input.status } : {}),
+          actorSessionId: this.sessionIdFor(input.roomId, input.botId),
+        })
+        return result.ok ? { ok: true } : { ok: false, ...(result.reason !== undefined ? { reason: result.reason } : {}) }
+      },
+      dispatch: (input) => {
+        const result = this.dispatchToMembers({
+          roomId: input.roomId,
+          tasks: input.tasks,
+          actorSessionId: this.sessionIdFor(input.roomId, input.botId),
+        })
+        return {
+          ok: result.ok,
+          queued: result.queued.map(id => ({ botId: id, name: this.state.bots.find(b => b.id === id)?.name ?? id })),
+          refused: result.refused,
+          ...(result.reason !== undefined ? { reason: result.reason } : {}),
+        }
+      },
     })
   }
 
@@ -1833,6 +1867,14 @@ export class AgentCommunityService extends TypertRemoteService {
     const kept = [...mine, message].slice(-perRoomCap)
     const messages = [...others, ...kept]
 
+    // A user message restarts the room goal's continuation budget: the room is back under
+    // human direction, so "N automatic rounds" is measured from here rather than from the
+    // goal's creation. Only touched when something is left to clear.
+    const goalRoom = this.state.rooms.find(r => r.id === input.roomId)
+    if (goalRoom?.goal !== undefined && (goalRoom.goal.continuations ?? 0) > 0) {
+      this.patchRoom(input.roomId, r => ({ ...r, goal: { ...r.goal!, continuations: 0, stalledRounds: 0 } }))
+    }
+
     // Create a queued run for each member bot so they can observe and reply.
     // Bots marked mentionOnly only run when they appear in message.mentions;
     // room.mentionOnly applies the same restriction to all members at once.
@@ -2421,6 +2463,16 @@ export class AgentCommunityService extends TypertRemoteService {
     }
     this.state = { ...this.state, runs, messages, ...(botMemories !== undefined ? { botMemories } : {}) }
     this.enqueueWrite()
+    // ── THE ROOM REACTS TO A SETTLED RUN ────────────────────────────────────────
+    //
+    // Two things follow a finished turn, and both belong to the ROOM rather than to the run:
+    // a member that was handed work may let the leader continue (`onMemberFinished`), and an
+    // active room goal decides whether to keep going or to stall out. A retry (`queued`) is
+    // not a finished turn, so it is not passed on.
+    if (updated.status === 'completed' || updated.status === 'failed'
+      || updated.status === 'interrupted' || updated.status === 'cancelled') {
+      this.afterRunSettled(prev, updated.status, replyText, input.reply?.toolActivity?.length ?? 0)
+    }
     // NOTE: deliberately NO re-seed here.
     //
     // `settleRunEntries` above already stamped the duration onto the live rows, so a
@@ -3468,6 +3520,7 @@ export class AgentCommunityService extends TypertRemoteService {
     return entriesFor(this.state.botMemories, roomId, botId)
   }
 
+
   /**
    * Record one deliberate note for the calling Bot, in the room its SESSION belongs to.
    *
@@ -3525,6 +3578,198 @@ export class AgentCommunityService extends TypertRemoteService {
     this.state = { ...this.state, roomReadAt: { ...readAt, [input.roomId]: decision.mark } }
     this.enqueueWrite()
     return { roomId: input.roomId, cleared: true }
+  }
+
+  // ── The room's goal and the leader's hand-offs (§4.2 / §4.1) ────────────────
+
+  /**
+   * This room's goal, or undefined.
+   *
+   * The ONLY read path, keyed by the room it is given: there is no "all goals" accessor, so no
+   * caller can mix two rooms' objectives — the same structural rule the memory partitions use.
+   */
+  roomGoal(roomId: string): RoomGoal | undefined {
+    return this.state.rooms.find(r => r.id === roomId)?.goal
+  }
+
+  /** The `[本房间目标]` block for a turn, or undefined when the room has no goal. */
+  roomGoalBlock(roomId: string): string | undefined {
+    const room = this.state.rooms.find(r => r.id === roomId)
+    if (room === undefined) return undefined
+    return goalPromptBlock(room.goal, room.name)
+  }
+
+  /**
+   * Create, edit, pause, resume or finish THIS room's goal.
+   *
+   * Authority is decided here, not by the caller: in a group only the leader (or the user) may
+   * change the objective; in a 1:1 the room's bot may. The room itself comes from the calling
+   * session when a Bot asks, so a model cannot name another room's goal at all.
+   */
+  async setRoomGoal(input: {
+    readonly roomId: string
+    readonly text?: string | undefined
+    readonly status?: 'active' | 'paused' | 'done' | undefined
+    readonly actorSessionId?: string | undefined
+  }): Promise<{ readonly ok: boolean; readonly goal?: RoomGoal | undefined; readonly reason?: string | undefined }> {
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room === undefined) return { ok: false, reason: '房间不存在。' }
+    const actor = this.goalActor(input.actorSessionId)
+    const leaderId = this.leaderOfRoom(input.roomId)
+    if (!canEditGoal(actor, leaderId)) {
+      return { ok: false, reason: '只有 leader（或用户本人）可以修改本房间的目标。' }
+    }
+    const previous = room.goal
+    const text = (input.text ?? previous?.text ?? '').replace(/\s+/gu, ' ').trim()
+    if (text === '') return { ok: false, reason: '目标内容不能为空。' }
+    const now = nowIso()
+    const status = input.status ?? (previous?.status === 'done' ? 'active' : previous?.status ?? 'active')
+    const goal: RoomGoal = {
+      text,
+      status,
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+      ...(actor.kind === 'bot' ? { ownerBotId: brandId<BotId>(actor.botId) } : (previous?.ownerBotId !== undefined ? { ownerBotId: previous.ownerBotId } : {})),
+      // A new or re-armed goal starts its continuation budget fresh.
+      continuations: 0,
+      stalledRounds: 0,
+    }
+    this.patchRoom(input.roomId, r => ({ ...r, goal }))
+    return { ok: true, goal }
+  }
+
+  /**
+   * Queue work for several members and return IMMEDIATELY (§4.1).
+   *
+   * Nothing waits here: the leader's own answer this turn is the progress report, and the
+   * plugin wakes it again through `onMemberFinished` when the members settle. An earlier
+   * design blocked the leader's run for up to ten minutes, which raced the run timeout —
+   * also ten minutes — and dropped the reports whenever the timeout won.
+   */
+  dispatchToMembers(input: {
+    readonly roomId: string
+    readonly actorSessionId?: string | undefined
+    readonly tasks: readonly DispatchTask[]
+    readonly waitMs?: number | undefined
+  }): {
+    readonly ok: boolean
+    readonly queued: readonly string[]
+    readonly refused: ReadonlyArray<{ readonly bot: string; readonly reason: string }>
+    readonly reason?: string | undefined
+  } {
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room === undefined) return { ok: false, queued: [], refused: [], reason: '房间不存在。' }
+    const actor = this.goalActor(input.actorSessionId)
+    const leaderId = this.leaderOfRoom(input.roomId)
+    const plan = planDispatch({
+      roomKind: room.directBotId !== undefined ? 'direct' : 'group',
+      callerId: actor.kind === 'bot' ? actor.botId : '',
+      ...(leaderId !== undefined ? { leaderId } : {}),
+      memberIds: room.memberIds,
+      roster: room.memberIds
+        .map(id => this.state.bots.find(b => b.id === id))
+        .filter((b): b is NonNullable<typeof b> => b !== undefined)
+        .map(b => ({ id: b.id, name: b.name })),
+      tasks: input.tasks,
+    })
+    if (plan.accepted.length === 0) {
+      return { ok: false, queued: [], refused: plan.refused, ...(plan.refusal !== undefined ? { reason: plan.refusal } : {}) }
+    }
+    const result = this.groupTask?.assignEach({ roomId: input.roomId, tasks: plan.accepted })
+      ?? { assigned: [], refused: plan.accepted.map(t => t.botId) }
+    this.recordNotice(
+      input.roomId,
+      `已派工：${result.assigned.length} 位成员（${result.assigned.map(id => this.state.bots.find(b => b.id === id)?.name ?? id).join('、')}），等待回报。`,
+    )
+    return {
+      ok: result.assigned.length > 0,
+      queued: result.assigned,
+      refused: plan.refused,
+      ...(result.assigned.length === 0 ? { reason: '派工失败：成员当前无法运行。' } : {}),
+    }
+  }
+
+  /** The goal-writing actor for one call: a plugin bot session, or the user. */
+  private goalActor(actorSessionId: string | undefined): GoalActor {
+    if (actorSessionId === undefined) return { kind: 'user' }
+    const owner = SessionRunner.parseSessionId(actorSessionId)
+    if (owner === undefined) return { kind: 'user' }
+    const room = this.state.rooms.find(r => r.id === owner.roomId)
+    return { kind: 'bot', botId: owner.botId, roomKind: room?.directBotId !== undefined ? 'direct' : 'group' }
+  }
+
+  /** Replace one room immutably and persist. No-op when the room is gone. */
+  private patchRoom(roomId: string, patch: (room: BotRoom) => BotRoom): void {
+    const idx = this.state.rooms.findIndex(r => r.id === roomId)
+    if (idx < 0) return
+    const rooms = [...this.state.rooms]
+    rooms[idx] = patch(rooms[idx]!)
+    this.state = { ...this.state, rooms }
+    this.enqueueWrite()
+  }
+
+  /**
+   * Everything that follows a settled run: the leader's hand-off integration, and the room
+   * goal's progress/stall bookkeeping.
+   *
+   * Deliberately NOT async and never awaited by `settleRun`: a settle must not depend on an
+   * enqueue that itself may fail, and the run's own state is already durable at this point.
+   */
+  private afterRunSettled(run: BotRun, status: string, replyText: string, toolCalls: number): void {
+    const room = this.state.rooms.find(r => r.id === run.roomId)
+    if (room === undefined) return
+
+    // 1. A member that was handed work: let the driver decide whether to wake the leader.
+    if (room.directBotId === undefined) {
+      const leader = this.leaderOfRoom(run.roomId)
+      if (leader !== undefined && leader !== run.botId) {
+        void this.groupTask?.onMemberFinished({
+          roomId: run.roomId,
+          botId: run.botId,
+          text: replyText,
+          ok: status === 'completed',
+        })
+      }
+    }
+
+    // 2. The room's goal: continue while there is progress, stall out when there is not.
+    const goal = room.goal
+    if (goal === undefined || goal.status !== 'active') return
+    const leader = room.directBotId !== undefined ? room.directBotId : this.leaderOfRoom(run.roomId)
+    if (leader !== run.botId) return
+
+    if (toolCalls > 0 && shouldContinueGoal({
+      goal,
+      goalDriven: true,
+      hadToolActivity: true,
+      continuations: goal.continuations ?? 0,
+    })) {
+      this.patchRoom(run.roomId, r => ({
+        ...r,
+        goal: { ...goal, continuations: (goal.continuations ?? 0) + 1, stalledRounds: 0, updatedAt: nowIso() },
+      }))
+      this.queueRoomRun(
+        run.roomId,
+        run.botId,
+        `[继续目标] ${goal.text}\n上一轮有实际进展，请继续推进；已经完成就调用 finish_task 收尾，不要为了继续而继续。`,
+        'routine',
+      )
+      this.executor?.nudge()
+      return
+    }
+
+    const stalled = (goal.stalledRounds ?? 0) + 1
+    if (stalled >= GOAL_STALL_LIMIT) {
+      // THREE ROUNDS WITHOUT PROGRESS: stop spending the user's tokens and say so in the room.
+      // `paused` rather than `done` — the work may still be wanted, it just needs a human.
+      this.patchRoom(run.roomId, r => ({
+        ...r,
+        goal: { ...goal, status: 'paused', stalledRounds: stalled, updatedAt: nowIso() },
+      }))
+      this.recordNotice(run.roomId, `目标已暂停：连续 ${GOAL_STALL_LIMIT} 轮没有实际进展，等用户确认后再继续。`)
+    } else {
+      this.patchRoom(run.roomId, r => ({ ...r, goal: { ...goal, stalledRounds: stalled, updatedAt: nowIso() } }))
+    }
   }
 
   snapshot(): BotCommunitySnapshot {

@@ -116,12 +116,17 @@ export class GroupTaskDriver {
     ok: boolean
   }): Promise<{ leaderRuns: boolean }> {
     const state = this.ensure(input.roomId)
-    state.runningBotIds.delete(input.botId)
+    // ── NO HAND-OFF, NO INTEGRATION ─────────────────────────────────────────────
+    //
+    // Only a member that was GIVEN work needs the leader to pick the thread back up. A member
+    // woken by `@mention` answers on its own, and the user's rule for that case is "the
+    // mentioned bot replies" — waking the leader afterwards would add a model call per
+    // mention and produce a second answer to the same message.
     const assignment = [...state.assignments].reverse().find((a) => a.botId === input.botId && a.status === 'running')
-    if (assignment !== undefined) {
-      assignment.status = input.ok ? 'done' : 'failed'
-      assignment.result = input.text
-    }
+    if (assignment === undefined) return { leaderRuns: false }
+    state.runningBotIds.delete(input.botId)
+    assignment.status = input.ok ? 'done' : 'failed'
+    assignment.result = input.text
     state.pendingReports.push({ botId: input.botId, text: input.text, ok: input.ok })
     state.stalledRounds = 0
     this.save(input.roomId, state)
@@ -229,6 +234,44 @@ export class GroupTaskDriver {
   private save(roomId: string, state: GroupTaskState): void {
     this.states.set(roomId, state)
     this.accessor.saveTaskState(roomId, state)
+  }
+
+  /**
+   * Hand one specific task to each of several members — `dispatch`'s worker.
+   *
+   * Unlike `assign` (one task, many members), each member gets its own brief. Both end up in
+   * the same bookkeeping, so one completion path (`onMemberFinished`) integrates either way.
+   *
+   * @param input.tasks - member id plus the brief for that member; already validated.
+   * @returns which members were queued and which could not be.
+   */
+  assignEach(input: {
+    readonly roomId: string
+    readonly tasks: ReadonlyArray<{ readonly botId: string; readonly task: string }>
+  }): { assigned: readonly string[]; refused: readonly string[] } {
+    const state = this.ensure(input.roomId)
+    const room = this.accessor.roomById(input.roomId)
+    if (room === undefined) return { assigned: [], refused: input.tasks.map(t => t.botId) }
+    const assigned: string[] = []
+    const refused: string[] = []
+    for (const item of input.tasks) {
+      if (!room.memberIds.includes(item.botId) || item.botId === this.accessor.leaderOf(input.roomId)) {
+        refused.push(item.botId)
+        continue
+      }
+      const prompt = this.memberPrompt(item.task, 'leader 派工')
+      if (!this.accessor.enqueueRun(input.roomId, item.botId, prompt)) {
+        refused.push(item.botId)
+        continue
+      }
+      state.runningBotIds.add(item.botId)
+      state.assignments.push({
+        botId: item.botId, task: item.task, at: new Date().toISOString(), status: 'running',
+      })
+      assigned.push(item.botId)
+    }
+    this.save(input.roomId, state)
+    return { assigned, refused }
   }
 
   /**

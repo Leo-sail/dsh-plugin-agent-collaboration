@@ -203,6 +203,13 @@ export interface CommunityStateAccessor {
    * a turn finishes (`settleRun`) and by the bot's own `agent_community_remember` tool.
    */
   botMemoryFor(roomId: string, botId: string): ReadonlyArray<{ readonly kind: string; readonly text: string; readonly at: string }>
+  /**
+   * The `[本房间目标]` block for THIS room, or undefined when it has no goal.
+   *
+   * Room-keyed like the memory accessor above, and for the same reason: a caller cannot ask
+   * for another room's goal, so one room's objective can never appear in another's prompt.
+   */
+  roomGoalBlock(roomId: string): string | undefined
   /** Every bot in the community (id + name are what the prompt needs). */
   /** Every bot, with the role text a 1:1 needs to decide who to propose. */
   listBots(): Array<{
@@ -1010,6 +1017,13 @@ export class RunExecutor {
     // while the window is the immediate context. `renderMemoryBlock` receives only this pair's
     // entries, so the block cannot name another room's work — the isolation rule is structural
     // here, not a request written into the prompt.
+    // ── THE ROOM'S GOAL ─────────────────────────────────────────────────────────
+    //
+    // First, because it is the shortest and most stable part of the dynamic context, and the
+    // one the model should read before its memory: "what are we doing here" outranks "what
+    // have I done here".
+    const goal = this.svc.roomGoalBlock(run.roomId)
+    if (goal !== undefined) parts.push(goal)
     if (bot !== undefined) {
       const memory = this.memoryPromptEntries === 0
         ? undefined

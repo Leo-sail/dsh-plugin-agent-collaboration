@@ -149,6 +149,8 @@ export interface BotRoom {
    * it would create does not exist until the user confirms.
    */
   readonly pendingGroupProposal?: PendingGroupProposal | undefined
+  /** This room's objective, if any — see `RoomGoal`. */
+  readonly goal?: RoomGoal | undefined
   /**
    * The room's background task board (§5.4/§6). There is no task-board UI; the
    * leader's assignments and the members' reports live here so progress survives
@@ -698,6 +700,26 @@ export interface RoomTaskState {
   readonly finished?: { readonly report: string; readonly at: string } | undefined
   /** The user's original task, kept verbatim so a member hand-off can restate it (§24.6). */
   readonly objective?: string | undefined
+}
+
+/**
+ * One room's objective — the thing the bots in THAT room are working toward.
+ *
+ * Keyed by the room and nothing else, which is what keeps the user's four isolation rules
+ * true: a DM's goal cannot touch a group's, one group's cannot touch another's, and one bot's
+ * DM goal cannot touch another bot's. Read `room-goal.ts` for why it is not DSH's `create_goal`.
+ */
+export interface RoomGoal {
+  readonly text: string
+  readonly status: 'active' | 'paused' | 'done'
+  readonly createdAt: string
+  readonly updatedAt: string
+  /** The bot that set it; absent means the user did. */
+  readonly ownerBotId?: BotId | undefined
+  /** Goal-driven runs queued since the last user message (bounds the auto-continuation). */
+  readonly continuations?: number | undefined
+  /** Consecutive goal-driven rounds that produced nothing — the stall guard. */
+  readonly stalledRounds?: number | undefined
 }
 
 /**

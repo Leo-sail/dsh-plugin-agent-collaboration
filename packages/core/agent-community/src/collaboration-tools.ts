@@ -41,6 +41,31 @@ export interface CollaborationToolDeps {
   memberIds(roomId: string): readonly string[]
   /** Every bot that exists, so a proposal can only name live bots. */
   liveBotIds(): readonly string[]
+  /** Read THIS room's goal (never another room's). */
+  roomGoal(input: { roomId: string }): {
+    readonly text: string
+    readonly status: 'active' | 'paused' | 'done'
+    readonly updatedAt: string
+  } | undefined
+  /** Create / edit / pause / resume / finish THIS room's goal. */
+  setRoomGoal(input: {
+    roomId: string
+    botId: string
+    text?: string | undefined
+    status?: 'active' | 'paused' | 'done' | undefined
+  }): Promise<{ readonly ok: boolean; readonly reason?: string | undefined }>
+  /** Queue work for several members and return immediately (§4.1). */
+  dispatch(input: {
+    roomId: string
+    botId: string
+    tasks: ReadonlyArray<{ readonly bot: string; readonly task: string }>
+  }): {
+    readonly ok: boolean
+    readonly queued: ReadonlyArray<{ readonly botId: string; readonly name: string }>
+    readonly refused: ReadonlyArray<{ readonly bot: string; readonly reason: string }>
+    readonly reason?: string | undefined
+  }
+
   /**
    * Record a proposal and surface it to the user.
    *
@@ -183,6 +208,123 @@ export function registerCollaborationTools(agentCtx: Context, deps: Collaboratio
     if (kind === undefined) return 'the room no longer exists'
     return { ...owner, kind }
   }
+
+  // ── get_goal (room-scoped, shadows the host tool of the same name) ──────────
+  //
+  // DSH ships `get_goal` for session goals. A Bot's goal is the ROOM's, so this scoped
+  // registration replaces it: the room comes from the caller's session and there is no room
+  // argument, which is the structural half of "one room's goal never affects another".
+  add({
+    name: 'get_goal',
+    description:
+      'Read the goal of the room you are working in right now (its text, status and when it '
+      + 'changed). Goals belong to one room: you cannot see or affect another room\'s goal.',
+    properties: {},
+    required: [],
+    run: (_args, exec) => {
+      const who = caller(exec)
+      if (typeof who === 'string') return { value: { ok: false }, text: who }
+      const goal = deps.roomGoal({ roomId: who.roomId })
+      if (goal === undefined) {
+        return { value: { ok: true, goal: null }, text: '本房间目前没有设定目标。' }
+      }
+      const label = goal.status === 'active' ? '进行中' : goal.status === 'paused' ? '已暂停' : '已完成'
+      return {
+        value: { ok: true, goal },
+        text: `本房间目标（${label}）：${goal.text}（最后更新 ${goal.updatedAt}）`,
+      }
+    },
+  })
+
+  // ── agent_community_goal (room-scoped) ──────────────────────────────────────
+  add({
+    name: 'agent_community_goal',
+    description:
+      'Set, change, pause, resume or finish the goal of the room you are in. Only the room\'s '
+      + 'leader (or the user) may change it in a group; in a 1:1 the bot may. One room only: '
+      + 'the room is taken from your own session, and another room\'s goal is unreachable.',
+    properties: {
+      action: {
+        type: 'string',
+        enum: ['set', 'pause', 'resume', 'done'],
+        description: 'set = 设定/改写目标；pause/resume/done = 暂停/继续/完成当前目标。',
+      },
+      text: { type: 'string', description: 'action=set 时的目标内容（一句话）。' },
+    },
+    required: ['action'],
+    run: async (args, exec) => {
+      const who = caller(exec)
+      if (typeof who === 'string') return { value: { ok: false }, text: who }
+      const action = str(args, 'action')
+      const text = str(args, 'text').trim()
+      if (action === 'set' && text === '') {
+        return { value: { ok: false }, text: 'action=set 需要给出 text（一句话的目标）。' }
+      }
+      const status = action === 'set' ? 'active' : action === 'resume' ? 'active' : action === 'pause' ? 'paused' : 'done'
+      const result = await deps.setRoomGoal({
+        roomId: who.roomId,
+        botId: who.botId,
+        ...(action === 'set' ? { text } : {}),
+        status,
+      })
+      if (!result.ok) {
+        return { value: { ok: false }, text: result.reason ?? '目标没有改动。' }
+      }
+      const verb = action === 'set' ? '已设定本房间目标' : action === 'pause' ? '已暂停本房间目标'
+        : action === 'resume' ? '已继续本房间目标' : '已把本房间目标标记为完成'
+      return { value: { ok: true, status }, text: `${verb}。它只对这个房间生效。` }
+    },
+  })
+
+  // ── agent_community_dispatch (group, leader only) ───────────────────────────
+  add({
+    name: 'agent_community_dispatch',
+    description:
+      'Hand work to OTHER BOTS IN THIS ROOM — the way to parallelise, instead of opening your '
+      + 'own sub-agents (their work is invisible to the room and unaccounted). Queues each '
+      + 'member immediately and returns at once: report progress in your own answer this turn, '
+      + 'and you will be woken with their reports when they finish. One to four members.',
+    properties: {
+      tasks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            bot: { type: 'string', description: 'Member name or id (from the room roster).' },
+            task: { type: 'string', description: 'What they should do, and what to produce.' },
+          },
+          required: ['bot', 'task'],
+        },
+        description: 'One entry per member: who does what.',
+      },
+    },
+    required: ['tasks'],
+    run: (args, exec) => {
+      const who = caller(exec)
+      if (typeof who === 'string') return { value: { ok: false }, text: who }
+      const raw = Array.isArray(args['tasks']) ? args['tasks'] : []
+      const tasks = raw
+        .map((t) => {
+          const item = (t ?? {}) as Record<string, unknown>
+          return { bot: typeof item['bot'] === 'string' ? item['bot'] : '', task: typeof item['task'] === 'string' ? item['task'] : '' }
+        })
+        .filter(t => t.bot !== '' || t.task !== '')
+      if (tasks.length === 0) {
+        return { value: { ok: false }, text: 'tasks 不能为空：请给出要交给谁、做什么。' }
+      }
+      const result = deps.dispatch({ roomId: who.roomId, botId: who.botId, tasks })
+      if (!result.ok) {
+        const why = result.refused.map(r => `${r.bot}：${r.reason}`).join('；')
+        return { value: { ok: false, refused: result.refused }, text: `${result.reason ?? '派工失败。'}${why === '' ? '' : ` ${why}`}` }
+      }
+      const names = result.queued.map(q => q.name).join('、')
+      const why = result.refused.length === 0 ? '' : `；未派出的：${result.refused.map(r => `${r.bot}（${r.reason}）`).join('、')}`
+      return {
+        value: { ok: true, queued: result.queued.map(q => q.botId), refused: result.refused },
+        text: `已把 ${result.queued.length} 件活交给：${names}。它们完成后系统会唤醒你，本轮请先向用户说明已分派什么${why}。`,
+      }
+    },
+  })
 
   // ── propose_group (1:1 only) ────────────────────────────────────────────────
   add({
