@@ -446,6 +446,15 @@ export class RunExecutor {
     // runner already tried to convert it; if that failed we say so, because the
     // alternative — publishing the model's internal analysis as the answer — hides
     // the problem from the reader and from the logs.
+    // A bot that left the room (removed itself, or was kicked) has nothing to answer with, and
+    // its session is being recycled: neither "retry" nor "the model failed" describes that. The
+    // room already got its note from the removal, so the run simply ends.
+    if (outcome.leftRoom === true) {
+      this.ledger?.settleRunText(run.roomId, run.id)
+      this.ledger?.releaseLiveRow(run.roomId, bot.id)
+      return { ...outcome, text: '', sessionSeq: outcome.sessionSeq ?? (0 as SessionSeq) }
+    }
+
     if (outcome.textChannelFailed) {
       throw new Error(
         'agent-community: model produced no visible answer text '

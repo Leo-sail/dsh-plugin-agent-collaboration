@@ -649,6 +649,8 @@ export class AgentCommunityService extends TypertRemoteService {
       const runner = new SessionRunner(ctx, {
         // WHO IS IN CHARGE, told to each bot: the coordinator may invite/remove/dispatch/finish.
         leaderOf: (roomId) => this.leaderOfRoom(roomId),
+        isMember: (roomId, botId) =>
+          this.state.rooms.find(r => r.id === roomId)?.memberIds.includes(botId as BotId) ?? false,
         botName: (botId) => this.state.bots.find(b => b.id === botId)?.name ?? botId,
         botById: (botId) => {
           const bot = this.state.bots.find(b => b.id === botId)

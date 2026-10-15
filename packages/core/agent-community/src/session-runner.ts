@@ -34,7 +34,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from './dsh-compat.ts'
 import type { BotId, BotRoomId } from './types.ts'
 import { installBotPrompt } from './bot-prompt.ts'
@@ -61,6 +61,14 @@ export interface SessionRunnerAccessor {
   leaderOf(roomId: string): string | undefined
   /** A bot's display name, for naming the leader in a member's prompt. */
   botName(botId: string): string
+  /**
+   * Whether this bot is still a member of this room.
+   *
+   * A bot can LEAVE mid-turn: the coordinator executes `remove_bot`, and when the target is the
+   * coordinator itself the service stops that very run and retires its session. Repairing a turn
+   * whose bot is gone is pointless, and reporting it as a model failure is simply wrong.
+   */
+  isMember(roomId: string, botId: string): boolean
   /** Bot identity + model route, or undefined when the bot is gone. */
   botById(botId: string): {
     readonly id: string
@@ -111,6 +119,15 @@ export interface TurnOutcome {
   readonly repairs: number
   /** True when even the repair turns produced no visible text. */
   readonly textChannelFailed: boolean
+  /**
+   * The bot left the room during this turn (it executed its own removal, or was kicked).
+   *
+   * Not a model failure and not something to repair: the turn ended because the bot's membership
+   * did. The service has already told the room what happened.
+   */
+  readonly leftRoom?: boolean | undefined
+  /** Where this turn ended in the session log; absent only when the session is already gone. */
+  readonly sessionSeq?: SessionSeq | undefined
 }
 
 /** Tunables the service passes in; defaults live here so tests can override. */
@@ -515,6 +532,26 @@ export class SessionRunner {
       let repairs = 0
 
       for (let attempt = 0; attempt <= turns; attempt++) {
+        // ── IT MAY HAVE LEFT THE ROOM DURING THE PREVIOUS ATTEMPT ────────────────
+        //
+        // Measured on a live group: the user asked to remove the coordinator, the coordinator
+        // executed it (the fix that made that possible), the service stopped this run and retired
+        // the session — and the loop then spent THREE repair attempts talking to a session being
+        // torn down, ending in "model produced no visible answer text". The bot had done exactly
+        // what it was told; the run must end as that, not as a model failure.
+        if (!this.accessor.isMember(roomId, botId)) {
+          return {
+            text: '',
+            // No turn to point at any more: the session was retired with the membership.
+            // The session was retired with the membership; there is no turn to point at.
+            sessionSeq: 0 as SessionSeq,
+            reasoning,
+            stopReason: 'completed',
+            repairs,
+            textChannelFailed: false,
+            leftRoom: true,
+          }
+        }
         const text = attempt === 0 ? prompt : this.repairPrompt()
         // The final attempt disables the reasoning channel for its ONE request via
         // an `agent/request` override, so the model has only the text channel left.
