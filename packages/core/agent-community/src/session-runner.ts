@@ -37,6 +37,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { BotId, BotRoomId } from './types.ts'
+import { installBotPrompt } from './bot-prompt.ts'
 
 /** What the runner needs from the community service. Narrow on purpose. */
 export interface SessionRunnerAccessor {
@@ -833,6 +834,24 @@ export class SessionRunner {
       // registrations, and DSH keeps those visible through a global deny — which is what
       // makes the plugin's own `ask_user_question`/`skill` work while the host's stay hidden.
       this.opts.setupAgent?.(agentCtx, roomId, botId)
+
+      // ── THE PROMPT THIS BOT ACTUALLY NEEDS ───────────────────────────────────
+      //
+      // The preset's prompt describes a coding agent in a workspace: Agent Teams, hidden
+      // subagent fleets, a deliverables panel, a Web GUI. A room Bot answers in a room. The
+      // plugin's eight sections are registered in THIS agent scope (scoped sections shadow
+      // global ones) and five inapplicable global sections are blanked by name — see
+      // bot-prompt.ts for which and why.
+      const bot = this.accessor.botById(botId)
+      const prompt = installBotPrompt(agentCtx, {
+        botName: bot?.name ?? 'Bot',
+        botDescription: bot?.description ?? '',
+      })
+      this.ctx.logger?.info?.(
+        `agent-community: bot prompt room=${roomId} bot=${botId} `
+        + `applied=[${prompt.applied.join(',')}] shadowed=[${prompt.shadowed.join(',')}] `
+        + `skipped=[${prompt.skipped.join(',')}]`,
+      )
     }
     // ── THE VISIBILITY SOLUTION ────────────────────────────────────────────────
     //

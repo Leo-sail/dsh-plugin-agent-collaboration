@@ -967,7 +967,9 @@ export class RunExecutor {
     const members = memberIds
       .map(id => this.svc.getBot(id))
       .filter((b): b is NonNullable<typeof b> => b !== undefined)
-    const others = members.filter(b => b.id !== botId)
+    // Kept for the roster-independent parts of the prompt (skill selection uses botId, and
+    // `members` still documents who the room holds); the group rule text itself moved to the
+    // system prompt.
 
     const parts: string[] = []
     if (bot !== undefined) {
@@ -984,38 +986,19 @@ export class RunExecutor {
     // question (or a bare greeting) as permission to start building produces work nobody asked for.
     // Measured live: the user said only 你好, left the question card alone, and the bot wrote a whole
     // brand package. Asking is encouraged; acting without an answer is not.
-    parts.push(
-      '[工作边界]\n' +
-      '只做用户明确要求你做的事。需要用户拍板时，用 ask_user_question 提问并等待回答；' +
-      '用户没有回答就不要自行开工——说明你在等什么、你准备怎么做，然后结束这一轮。\n' +
-      '你有能力（技能、工具、文件读写、命令执行）不等于用户要你用它们开工：' +
-      '能做的事很多，本轮只做被要求的那一件。',
-    )
-    if (others.length > 0) {
-      parts.push(
-        `[群聊规则]\n` +
-        `房间成员：${members.map(b => b.name).join('、')}。\n` +
-        // ONLY ADDRESSED BOTS RUN (see `routing.ts`), so a turn that exists at all is a
-        // turn this bot is meant to answer. The old "reply with the silent sentinel"
-        // instruction existed to muzzle a bot that had been woken by mistake — that wake
-        // is gone, and with it the whole class of "bot ran a full round just to say
-        // nothing" (which the user paid for in tokens).
-        '本轮的收件人包含你，请正常回答。' +
-        // ── SAY IT WHERE THE MODEL LOOKS ────────────────────────────────────────
-        //
-        // `create_room` was the tool a bot reached for when the user asked for a group, and
-        // nothing told it that group creation is the USER's call. Measured: one sentence in a
-        // direct chat produced two groups — the confirmed proposal, plus the bot's own room.
-        // The rule is enforced host-side (room-guard.ts); this is why the model rarely hits it.
-        '\n本群已经是协作群：需要更多人手用 invite_bot，需要分工用 assign_task；'
-          + '不要再自己建群（需要新群请让用户在界面上新建）。',
-      )
-    } else {
-      // A 1:1 (or a room this bot is alone in) has no group rules to state, but the
-      // turn must still be answered — silence is only ever allowed when an @mention
-      // points at somebody else in the SAME room.
-      parts.push('[对话]\n这是一对一会话，请正常回答。')
-    }
+    // ── THE PER-TURN BLOCKS ARE DYNAMIC ONLY ────────────────────────────────────
+    //
+    // `[工作边界]`, `[群聊规则]`/`[对话]` and the group-membership line used to be rebuilt
+    // here on EVERY turn, byte for byte identical — pure prompt cost, and it also meant the
+    // room's rules lived in two places. They now belong to the Bot's SYSTEM PROMPT
+    // (`bot-prompt.ts`: bots:boundary, bots:room, bots:collaboration), which is assembled
+    // once per session and is the place a model actually looks for standing rules.
+    //
+    // What stays here is what genuinely changes per turn: the room's goal, this room's
+    // memory, the recent window, and the input. (`[本房间记忆]` and `[本房间目标]` are added
+    // by the memory/goal work; the roster already reaches the model through the perception
+    // layer, which is the only source of truth for who is in the room.)
+
     // Skills are rendered by the skill lifecycle, which pre-selects the ones that fit
     // THIS bot and still lists the full name universe so nothing is unreachable. The
     // builder used to render its own names-only list, which ignored the profile.
