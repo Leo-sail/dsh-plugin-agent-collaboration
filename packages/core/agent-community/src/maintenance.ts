@@ -14,7 +14,6 @@ import type { BotId, BotRoom, BotRoomId, BotTask, RoomTaskState } from './types.
 import type { LedgerProjector, SeedRoomItem } from './ledger.ts'
 import type { PersistedState } from './persistence.ts'
 import { SessionRunner, optionalService } from './session-runner.ts'
-import { dropBotFromRoom } from './bot-memory.ts'
 
 /**
  * What `Maintenance` needs from `AgentCommunityService`.
@@ -487,9 +486,9 @@ export class Maintenance {
       ...this.host.state,
       rooms,
       roomAgentSessions: this.host.state.roomAgentSessions.filter(s => !(s.roomId === roomId && gone.has(s.botId))),
-      // Same residue class as the session log above: a removed member re-invited later must not
-      // resume what it knew before it was kicked out of THIS room.
-      botMemories: dropBotFromRoom(this.host.state.botMemories, roomId, gone),
+      // MEMORY IS KEPT: the user's rule is that removing a member does not delete what it
+      // learned here (only deleting the BOT does, and then only its own partitions). The
+      // session log below is still purged, so a re-invite does not resume the old conversation.
     }
     this.host.enqueueWrite()
     await this.host.flushNow()

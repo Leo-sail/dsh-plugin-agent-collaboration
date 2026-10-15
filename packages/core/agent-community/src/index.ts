@@ -51,7 +51,9 @@ import { registerCollaborationTools } from './collaboration-tools.ts'
 import { crossRoomError, screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
 import { canEditGoal, canReadGoal, describeGoal, goalPromptBlock, shouldContinueGoal, GOAL_STALL_LIMIT, type GoalActor } from './room-goal.ts'
 import { planDispatch, handoffReport, MAX_DISPATCH_TASKS, type DispatchTask } from './dispatch.ts'
-import { appendEntry, dropBot, dropBotFromRoom, dropRoom, entriesFor, taskMemoryText } from './bot-memory.ts'
+import { taskMemoryText } from './bot-memory.ts'
+import { MemoryStore, type RoomMemoryMeta } from './memory-store.ts'
+import { scanPromotions } from './memory-promote.ts'
 import { Maintenance, type MaintenanceHost } from './maintenance.ts'
 import { findBotByName, requireBot, requireRoom, NotFoundError } from './lookup.ts'
 import {
@@ -181,6 +183,11 @@ export interface Config {
   readonly memoryEntriesPerRoom?: number
   /** How many of those entries are rendered into a turn's prompt (default 8). */
   readonly memoryPromptEntries?: number
+}
+
+/** The mirror's key for one (room, bot) pair. Room first, so a room prefix is a valid filter. */
+function memoryKey(roomId: string, botId: string): string {
+  return `${roomId}\u0000${botId}`
 }
 
 export const Config: z<Config> = z.object({
@@ -498,6 +505,15 @@ export class AgentCommunityService extends TypertRemoteService {
   private writeRevision = 0
   private writtenRevision = 0
   private readonly cfg: Required<Omit<Config, 'homeDir' | 'sessionsDir'>>
+  /**
+   * File-backed memory, one Markdown file per (room, bot).
+   *
+   * The PROMPT path needs memory synchronously (`buildPrompt` runs inside a turn), so the
+   * service keeps an in-memory mirror that is loaded once at startup and updated on every
+   * write. The files stay the source of truth: the mirror is a cache of them, not a second one.
+   */
+  private memoryStore: MemoryStore | undefined
+  private readonly memoryMirror = new Map<string, BotMemoryEntry[]>()
   private readonly ready: Promise<void>
   /** Rooms whose ledger has already been hydrated from state. */
   private readonly ledgerHydrated = new Set<string>()
@@ -563,6 +579,9 @@ export class AgentCommunityService extends TypertRemoteService {
       warn: (message) => { this.ctx.logger?.warn?.(message) },
     })
     this.statePath = join(this.home, 'agent-community', 'state.json')
+    // The memory root sits beside the board, for the same reason: everything the plugin owns
+    // lives under one directory, so a user can find (or remove) all of it in one place.
+    this.memoryStore = new MemoryStore(join(this.home, 'agent-community', 'memory'))
     this.sessionsDir = config.sessionsDir !== undefined
       ? resolve(config.sessionsDir.replace(/^~(?=[/\\]|$)/u, homedir()))
       : join(this.home, 'sessions')
@@ -1282,6 +1301,12 @@ export class AgentCommunityService extends TypertRemoteService {
     // that room's unread dot off for ever. Measured on a real board: a group with three bot
     // replies reported no unread because its mark pointed at a compacted-away message. New
     // marks carry their time; this repairs the ones that cannot, at load time.
+    // ── MEMORY FILES: load the mirror, migrate a board that still inlines it ────
+    //
+    // Runs before anything can serve a prompt, and before the first write, so no turn ever
+    // sees a half-loaded memory.
+    await this.loadMemory()
+
     const marks = this.state.roomReadAt ?? {}
     const repaired = repairReadMarks(this.state.messages, marks)
     if (repaired > 0) {
@@ -1578,6 +1603,16 @@ export class AgentCommunityService extends TypertRemoteService {
     // The bot's own session logs, per room, read BEFORE the state rewrite drops the
     // bookkeeping that points at them (§23.3: an orphaned log is a memory leak the
     // user cannot see, and a deleted bot's memory must not outlive it).
+    // ── DELETE THE BOT'S MEMORY, KEEPING ITS GROUP PARTITIONS ───────────────────
+    //
+    // The user's rule: deleting a bot erases its memory from the device, EXCEPT what it wrote
+    // in groups — those partitions belong to the group and are archived first. Order matters:
+    // archive, then remove the bot directory, so the archive can never be caught by the
+    // deletion it is meant to survive.
+    await this.archiveBotGroupMemory(botId)
+    await this.memoryStore?.deleteBot(botId)
+    for (const key of [...this.memoryMirror.keys()]) if (key.endsWith(`\u0000${botId}`)) this.memoryMirror.delete(key)
+
     const botSessions = [
       ...[...orphanRoomIds].flatMap(id => this.maintenance.sessionIdsOfRoom(id)),
       ...touchedGroupIds.flatMap(id => [
@@ -1599,7 +1634,6 @@ export class AgentCommunityService extends TypertRemoteService {
       runs: this.state.runs.filter(r => r.botId !== botId && !orphanRoomIds.has(r.roomId)),
       roomAgentSessions: this.state.roomAgentSessions.filter(s => s.botId !== botId),
       mailbox: this.state.mailbox.filter(m => m.botId !== botId),
-      botMemories: dropBot(this.state.botMemories, botId),
     }
     // Collect the soon-to-be-deleted session ids BEFORE dropping the state that
     // records them, then clear the in-memory ledger and the on-disk artifacts.
@@ -1759,6 +1793,10 @@ export class AgentCommunityService extends TypertRemoteService {
     }
     const roomId = brandId<BotRoomId>(input.id)
     const sessions = this.maintenance.sessionIdsOfRoom(input.id)
+    // ARCHIVE, DO NOT DELETE: the user's rule is that deleting a room keeps what the bots
+    // learned in it. Read the members BEFORE the room record goes away — that list is what
+    // says whose partitions to move.
+    const memberIds = this.state.rooms.find(r => r.id === roomId)?.memberIds ?? []
     // Stop the work first: dropping the rows while a run is streaming leaves the
     // model writing into a room that no longer exists.
     this.disposeRoomAgents(input.id)
@@ -1771,13 +1809,15 @@ export class AgentCommunityService extends TypertRemoteService {
       runs: this.state.runs.filter(r => r.roomId !== roomId),
       mailbox: this.state.mailbox.filter(m => m.roomId !== roomId),
       roomAgentSessions: this.state.roomAgentSessions.filter(s => s.roomId !== roomId),
-      // A deleted room's memory is unreachable and would otherwise linger on the board for ever.
-      botMemories: dropRoom(this.state.botMemories, input.id),
+      // NOTE: memory is NOT dropped here — a deleted room's partitions are ARCHIVED by
+      // `archiveRoomMemory` (below), because the user's rule is that deleting a room keeps
+      // what the bots learned there.
     }
     // The ledger is the panel's only render source; without this the deleted
     // room's transcript stays in memory and can reappear.
     this.ledger.clearRoom(roomId)
     this.ledgerHydrated.delete(roomId)
+    await this.archiveRoomMemory(roomId, memberIds)
     await this.flushNow()
     await this.maintenance.purgeRoomArtifacts(roomId, sessions)
     await this.maintenance.purgeProjectionCache(sessions)
@@ -2100,9 +2140,10 @@ export class AgentCommunityService extends TypertRemoteService {
       runs,
       rooms,
       roomAgentSessions: this.state.roomAgentSessions.filter(s => s.roomId !== roomId),
-      // "Clear the room" has to mean the memory too: a bot that still answers "we already agreed
-      // X here" after the user emptied the room is reporting a conversation that no longer exists.
-      botMemories: dropRoom(this.state.botMemories, roomId),
+      // MEMORY IS DELIBERATELY UNTOUCHED. Clearing the transcript clears the WINDOW's context,
+      // and nothing else: the user's rule is 「清空消息时 bot 的记忆不能被删除，只是清空对话
+      // 窗口的上下文」. An earlier version dropped it here, which silently destroyed the very
+      // thing this feature exists to keep.
     }
     this.enqueueWrite()
     await this.flushNow()
@@ -2404,8 +2445,6 @@ export class AgentCommunityService extends TypertRemoteService {
     // model emitted only reasoning) must not persist an empty bot message: the
     // panel renders it as a bot with no content, which reads as a hung reply.
     const replyText = input.reply?.text ?? ''
-    // Undefined means "no memory written this time", which keeps the array reference stable.
-    let botMemories = this.state.botMemories
     if (input.reply !== undefined && replyText.trim() !== '') {
       // B-2: use the real session id from roomAgentSessions rather than
       // prev.sessionId, which is often a stale UUID that has no session directory.
@@ -2435,34 +2474,21 @@ export class AgentCommunityService extends TypertRemoteService {
         sequence: this.state.messages.filter(m => m.roomId === prev.roomId).length,
       }
       messages = [...messages, reply]
-      // ── WHAT THIS BOT DID, IN THIS ROOM ─────────────────────────────────────
-      //
-      // One line per finished turn, keyed by (room, bot) — the pair the user's isolation rule is
-      // about. Written in the SAME state update as the reply, so the memory and the message it
-      // describes can never disagree. A turn that produced nothing visible records nothing: the
-      // silent sentinel arrives here as `text: ''` and is already excluded above.
-      //
-      // `updated.status === 'completed'` excludes a retry (the run goes back to `queued`), a user
-      // stop (`interrupted`) and a failure — none of those is something the bot accomplished.
-      if (updated.status === 'completed') {
-        botMemories = appendEntry({
-          records: botMemories,
-          roomId: prev.roomId,
-          botId: prev.botId,
-          now: nowIso(),
-          maxEntries: this.cfg.memoryEntriesPerRoom,
-          entry: {
-            id: randomUUID(),
-            kind: 'task',
-            text: taskMemoryText(prev.prompt, replyText),
-            at: nowIso(),
-            runId: String(prev.id),
-          },
-        })
-      }
     }
-    this.state = { ...this.state, runs, messages, ...(botMemories !== undefined ? { botMemories } : {}) }
+    this.state = { ...this.state, runs, messages }
     this.enqueueWrite()
+    // ── WHAT THIS BOT DID, IN THIS ROOM ─────────────────────────────────────────
+    //
+    // One line per finished turn, keyed by (room, bot) — the pair the user's isolation rule is
+    // about. A turn that produced nothing visible records nothing (the silent path arrives here
+    // as `text: ''`), and `completed` excludes a retry, a stop and a failure: none of those is
+    // something the bot accomplished.
+    //
+    // File-backed, and it says so: `rememberTask` reports a write failure rather than swallowing
+    // it, because a memory that silently did not get written is worse than no memory at all.
+    if (updated.status === 'completed' && input.reply !== undefined && replyText.trim() !== '') {
+      void this.rememberTask(prev, replyText)
+    }
     // ── THE ROOM REACTS TO A SETTLED RUN ────────────────────────────────────────
     //
     // Two things follow a finished turn, and both belong to the ROOM rather than to the run:
@@ -3517,7 +3543,9 @@ export class AgentCommunityService extends TypertRemoteService {
    * The prompt builder is the only consumer.
    */
   botMemoryFor(roomId: string, botId: string): readonly BotMemoryEntry[] {
-    return entriesFor(this.state.botMemories, roomId, botId)
+    // The mirror, not the disk: this runs inside a turn and must be synchronous. It is a cache
+    // of the files, refreshed on every write and loaded at startup.
+    return this.memoryMirror.get(memoryKey(roomId, botId)) ?? []
   }
 
 
@@ -3529,10 +3557,10 @@ export class AgentCommunityService extends TypertRemoteService {
    * makes that impossible rather than merely refused. Same rule as the read path, from the other
    * side.
    */
-  rememberForSession(input: { readonly sessionId: string; readonly text: string }): {
+  async rememberForSession(input: { readonly sessionId: string; readonly text: string }): Promise<{
     readonly ok: boolean
     readonly reason?: string | undefined
-  } {
+  }> {
     const owner = SessionRunner.parseSessionId(input.sessionId)
     if (owner === undefined) {
       return { ok: false, reason: '只有插件自己创建的 Bot 会话才能写记忆。' }
@@ -3540,20 +3568,19 @@ export class AgentCommunityService extends TypertRemoteService {
     const text = input.text.trim()
     if (text === '') return { ok: false, reason: '要记住的内容不能为空。' }
     const now = nowIso()
-    this.state = {
-      ...this.state,
-      botMemories: appendEntry({
-        records: this.state.botMemories,
-        roomId: owner.roomId,
-        botId: owner.botId,
-        now,
-        // An explicit note is not subject to the automatic-task cap being 0: the bot asked for it.
-        maxEntries: Math.max(1, this.cfg.memoryEntriesPerRoom),
-        entry: { id: randomUUID(), kind: 'note', text, at: now },
-      }),
-    }
-    this.enqueueWrite()
-    return { ok: true }
+    const meta = this.memoryMetaFor(owner.roomId, owner.botId)
+    if (meta === undefined) return { ok: false, reason: '房间或 Bot 不存在。' }
+    const result = await this.memoryWrite({
+      meta,
+      // An explicit note is not subject to the automatic-task cap being 0: the bot asked for it.
+      maxEntries: Math.max(1, this.cfg.memoryEntriesPerRoom),
+      entry: { id: randomUUID(), kind: 'note', text, at: now },
+    })
+    // `ok: true` must mean the file is really there — writing and reporting success regardless
+    // is how a bot ends up confidently "remembering" something that was never stored.
+    return result.stored
+      ? { ok: true }
+      : { ok: false, reason: `写记忆失败：${result.error ?? '未知错误'}` }
   }
 
   /**
@@ -3687,6 +3714,186 @@ export class AgentCommunityService extends TypertRemoteService {
       refused: plan.refused,
       ...(result.assigned.length === 0 ? { reason: '派工失败：成员当前无法运行。' } : {}),
     }
+  }
+
+  // ── Memory: the file store, its mirror, and promotion ───────────────────────
+
+  /** The meta a partition file records about itself; undefined when room or bot is gone. */
+  private memoryMetaFor(roomId: string, botId: string): RoomMemoryMeta | undefined {
+    const room = this.state.rooms.find(r => r.id === roomId)
+    const bot = this.state.bots.find(b => b.id === botId)
+    if (room === undefined || bot === undefined) return undefined
+    return {
+      roomId,
+      roomName: room.name,
+      botId,
+      kind: room.directBotId !== undefined ? 'direct' : 'group',
+    }
+  }
+
+  /**
+   * One write, through the store, updating the mirror only when the file really changed.
+   *
+   * THE MIRROR AFTER THE FILE, never before: a failed write must not leave the prompt believing
+   * something was remembered.
+   */
+  private async memoryWrite(input: {
+    readonly meta: RoomMemoryMeta
+    readonly entry: BotMemoryEntry
+    readonly maxEntries: number
+  }): Promise<{ readonly stored: boolean; readonly error?: string | undefined }> {
+    const store = this.memoryStore
+    if (store === undefined) return { stored: false, error: 'memory store unavailable' }
+    const result = await store.append({ ...input, now: input.entry.at })
+    if (!result.stored) return { stored: false, ...(result.error !== undefined ? { error: result.error } : {}) }
+    const key = memoryKey(input.meta.roomId, input.meta.botId)
+    const entries = await store.read(input.meta.roomId, input.meta.botId)
+    this.memoryMirror.set(key, [...entries])
+    return { stored: true }
+  }
+
+  /**
+   * Record what a finished turn did, then look for something worth learning (§3.3).
+   *
+   * Promotion runs here — after the task line exists — because both of its channels need the
+   * run-backed history this line completes.
+   */
+  private async rememberTask(run: BotRun, replyText: string): Promise<void> {
+    const meta = this.memoryMetaFor(run.roomId, run.botId)
+    if (meta === undefined) return
+    if (this.cfg.memoryEntriesPerRoom === 0) return
+    const now = nowIso()
+    const written = await this.memoryWrite({
+      meta,
+      maxEntries: this.cfg.memoryEntriesPerRoom,
+      entry: {
+        id: randomUUID(),
+        kind: 'task',
+        text: taskMemoryText(run.prompt, replyText),
+        at: now,
+        runId: String(run.id),
+      },
+    })
+    if (!written.stored) {
+      this.ctx.logger?.warn?.(`agent-community: memory write failed for room=${run.roomId} bot=${run.botId}: ${written.error ?? 'unknown'}`)
+      return
+    }
+    await this.promoteIfEarned(run.roomId, run.botId)
+  }
+
+  /**
+   * Move what this pair has LEARNED into the bot's own instruction file.
+   *
+   * Only run-backed candidates get here (the scanner decides), and the block is inside a file
+   * the user owns: everything outside the markers is preserved, human-edited lines are never
+   * rewritten, and an identical line is never added twice.
+   */
+  private async promoteIfEarned(roomId: string, botId: string): Promise<void> {
+    const store = this.memoryStore
+    const bot = this.state.bots.find(b => b.id === botId)
+    if (store === undefined || bot === undefined) return
+    const workspace = bot.workspace !== undefined && bot.workspace !== ''
+      ? bot.workspace
+      : await this.defaultBotWorkspace()
+    const learned = await store.readLearned(workspace)
+    const candidates = scanPromotions({
+      entries: this.botMemoryFor(roomId, botId),
+      messages: this.state.messages.filter(m => m.roomId === roomId),
+      alreadyLearned: learned.lines,
+    })
+    if (candidates.length === 0) return
+    const result = await store.appendLearned(workspace, candidates.map(c => c.line))
+    if (!result.stored) {
+      this.ctx.logger?.warn?.(`agent-community: could not write the learned block for bot ${botId}`)
+      return
+    }
+    if (result.added.length > 0) {
+      this.ctx.logger?.info?.(
+        `agent-community: promoted ${result.added.length} learned line(s) for bot ${botId} into ${result.path}`,
+      )
+    }
+  }
+
+  /**
+   * Startup: load the mirror, and migrate a board that still carries the old inline field.
+   *
+   * The migration is idempotent: it writes files only for entries the store does not already
+   * have, then clears the field, so a crash halfway through leaves a board that migrates again
+   * on the next boot instead of losing the entries.
+   */
+  private async loadMemory(): Promise<void> {
+    const store = this.memoryStore
+    if (store === undefined) return
+    for (const room of this.state.rooms) {
+      for (const botId of room.memberIds) {
+        const entries = await store.read(room.id, botId)
+        if (entries.length > 0) this.memoryMirror.set(memoryKey(room.id, botId), [...entries])
+      }
+    }
+    const legacy = this.state.botMemories ?? []
+    if (legacy.length === 0) return
+    let migrated = 0
+    for (const record of legacy) {
+      const meta = this.memoryMetaFor(record.roomId, record.botId)
+      if (meta === undefined) continue
+      const existing = this.memoryMirror.get(memoryKey(record.roomId, record.botId)) ?? []
+      if (existing.length > 0) continue
+      await store.writePartition(meta, record.entries)
+      this.memoryMirror.set(memoryKey(record.roomId, record.botId), [...record.entries])
+      migrated += record.entries.length
+    }
+    this.state = { ...this.state, botMemories: [] }
+    this.enqueueWrite()
+    if (migrated > 0) {
+      this.ctx.logger?.info?.(`agent-community: migrated ${migrated} memor(ies) from the board into memory files`)
+    }
+  }
+
+  /**
+   * Archive a room's memory instead of deleting it (the room is gone, the knowledge is not).
+   *
+   * Called BEFORE the room record disappears, because the member list is what says whose
+   * partitions to move.
+   */
+  private async archiveRoomMemory(roomId: string, botIds: readonly string[]): Promise<void> {
+    const store = this.memoryStore
+    if (store === undefined) return
+    const moved = await store.archiveRoom(roomId, botIds)
+    // The archived files are no longer live partitions: drop every mirror row for this room.
+    for (const key of [...this.memoryMirror.keys()]) {
+      if (key.startsWith(`${roomId}\u0000`)) this.memoryMirror.delete(key)
+    }
+    for (const botId of botIds) await store.rebuildIndex(botId)
+    if (moved.length > 0) {
+      this.ctx.logger?.info?.(`agent-community: archived ${moved.length} room memor(ies) for room ${roomId}`)
+    }
+  }
+
+  /**
+   * Archive a bot's GROUP partitions before it is deleted.
+   *
+   * The user's rule for deleting a bot is "erase it from the device", with one exception: what
+   * it wrote inside a group belongs to that group. Those files move to `_archive/<roomId>/`,
+   * which is OUTSIDE the bot's directory — so the deletion that follows cannot take them with
+   * it. Direct-chat partitions are not archived: a DM is the bot's own memory.
+   */
+  private async archiveBotGroupMemory(botId: string): Promise<void> {
+    const store = this.memoryStore
+    if (store === undefined) return
+    const groupRooms = this.state.rooms.filter(r => r.directBotId === undefined && r.memberIds.includes(brandId<BotId>(botId)))
+    for (const room of groupRooms) {
+      await store.archiveRoom(room.id, [botId])
+    }
+    if (groupRooms.length > 0) {
+      this.ctx.logger?.info?.(
+        `agent-community: archived group memor(ies) of bot ${botId} from ${groupRooms.length} room(s) before deletion`,
+      )
+    }
+  }
+
+  /** The bot's own workspace, used when a bot record has none. */
+  private async defaultBotWorkspace(): Promise<string> {
+    return join(this.home, 'agent-community', 'workspaces')
   }
 
   /** The goal-writing actor for one call: a plugin bot session, or the user. */

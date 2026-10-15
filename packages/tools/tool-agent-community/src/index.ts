@@ -196,12 +196,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       text: { type: 'string', required: true, description: 'One short sentence to remember.' },
     },
     output: jsonOutput(),
-    execute(args, exec) {
+    async execute(args, exec) {
       const agent = caller(exec.agent, 'agent_community_remember')
-      const result = ctx.agentCommunity.rememberForSession({ sessionId: agent.session.id, text: args.text })
-      return Promise.resolve(result.ok
+      // Awaited: `stored: true` must mean the file is on disk (see memory-store). Reporting
+      // success before the write lands is how a bot confidently "remembers" nothing.
+      const result = await ctx.agentCommunity.rememberForSession({ sessionId: agent.session.id, text: args.text })
+      return result.ok
         ? { stored: true, note: '已记住（仅本房间可见）。' }
-        : { stored: false, error: result.reason ?? '无法写入记忆' })
+        : { stored: false, error: result.reason ?? '无法写入记忆' }
     },
   }))
 
