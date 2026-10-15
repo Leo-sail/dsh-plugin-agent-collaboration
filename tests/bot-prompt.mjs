@@ -19,7 +19,7 @@ const check = (ok, label, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${label}${detail === '' ? '' : ` — ${detail}`}`)
 }
 
-const sections = botPromptSections({ botName: '小艾', botDescription: '前端工程师' })
+const sections = botPromptSections({ botName: '小艾', botDescription: '前端工程师', isLeader: true })
 const all = sections.map(s => s.text).join('\n')
 const named = (name) => sections.find(s => s.name === name)
 
@@ -34,7 +34,7 @@ check(sections.every(s => Number.isFinite(s.order) && s.order >= 0 && s.order < 
 // ── 2. 身份与房间规则 ────────────────────────────────────────────────────────
 check(named('bots:identity').text.includes('小艾'), '身份段带上 Bot 名字')
 check(named('bots:identity').text.includes('前端工程师'), '身份段带上用户填写的描述')
-const empty = botPromptSections({ botName: 'X', botDescription: '   ' })
+const empty = botPromptSections({ botName: 'X', botDescription: '   ', isLeader: false, leaderName: '小艾' })
 check(!empty[0].text.includes('\n\n'), '描述为空时不留下空行')
 
 check(named('bots:room').text.includes('自动发布'), 'room 段说明答复会自动发布')
@@ -57,11 +57,18 @@ check(named('bots:workflow').text.includes('而不是自己开子代理'), 'work
 
 // ── 4. 不该出现的东西 ────────────────────────────────────────────────────────
 for (const forbidden of [
-  'Agent Teams', 'spawn_teammate', 'subagent', 'subagent_fork', 'workflow tool',
+  'spawn_teammate', 'subagent_fork', 'workflow tool',
   'exit_plan_mode', 'plan mode', 'deliverable', 'DeepSeek Harness implementation checkout',
   'Web GUI', '无需补充',
 ]) {
   check(!all.toLowerCase().includes(forbidden.toLowerCase()), `不得出现「${forbidden}」`)
+}
+// Agent Teams / subagent 只允许出现在「别用它们」的警告里，绝不能出现在指导性文字中。
+// (实测：`list_agents` 让本群 leader 以为自己不是队长，所以这句警告是必须的。)
+for (const term of ['Agent Teams', 'subagent', 'list_agents', 'send_message']) {
+  const where = sections.filter(s => s.text.includes(term)).map(s => s.name)
+  check(where.length === 0 || (where.length === 1 && where[0] === 'bots:tools'),
+    `「${term}」只出现在警告段里`, where.join(','))
 }
 
 // ── 5. 遮蔽清单 ──────────────────────────────────────────────────────────────
@@ -101,6 +108,30 @@ check(r2.skipped.includes('bots:memory') && r2.applied.length === 7,
 
 const none = installBotPrompt({}, { botName: 'A', botDescription: '' })
 check(none.applied.length === 0 && none.skipped.length === 1, '没有 systemPrompt 服务时不抛异常')
+
+
+// ── 7. 谁说了算：必须明确告诉每个 bot ─────────────────────────────────────────
+//
+// Measured on a live group (2026-10-15): the user asked to remove a member, the leader was that
+// very bot, and it answered "我自己做不到，只有队长能执行" — nothing in its prompt said it WAS the
+// 队长. It then consulted `list_agents` (an Agent Teams tool, unrelated to the room) and concluded
+// from that roster that it was not in charge.
+const asLeader = botPromptSections({ botName: '小艾', botDescription: '', isLeader: true })
+const leaderText = asLeader.find(s => s.name === 'bots:collaboration').text
+check(leaderText.includes('你是本群的 leader'), 'leader 知道自己说了算')
+check(leaderText.includes('remove_bot') && leaderText.includes('即使要移除的是你自己'),
+  'leader 知道能用 remove_bot（含移除自己）')
+check(leaderText.includes('dispatch') && leaderText.includes('finish_task'), 'leader 知道分派与收尾')
+const asMember = botPromptSections({ botName: '小毕', botDescription: '', isLeader: false, leaderName: '小艾' })
+const memberText = asMember.find(s => s.name === 'bots:collaboration').text
+check(memberText.includes('本群的 leader（队长）是「小艾」'), '成员知道队长是谁', memberText.slice(0, 40))
+check(!memberText.includes('你是本群的 leader'), '成员不会误以为自己是队长')
+check(memberText.includes('task_report'), '成员知道做完要汇报')
+
+// Agent Teams 的工具会误导（实测：list_agents 让 leader 以为自己不是）
+const toolsText = asLeader.find(s => s.name === 'bots:tools').text
+check(toolsText.includes('list_agents') && toolsText.includes('Agent Teams'),
+  '明确警告不要用 Agent Teams 工具判断房间成员')
 
 console.log(`\n[bot-prompt] ${pass}/${total} 通过`)
 process.exit(pass === total ? 0 : 1)

@@ -52,6 +52,15 @@ export interface SessionRunnerAccessor {
    * just deleted, which is precisely the "it replied with the content I cleared" bug.
    */
   sessionIdFor(roomId: string, botId: string): SessionId
+  /**
+   * The room's coordinator (its leader), or undefined for a 1:1 / a room with no members.
+   *
+   * Needed to TELL each bot who is in charge: the coordinator may invite, remove, dispatch and
+   * finish, and a bot that cannot see whether that is itself refuses work it owns.
+   */
+  leaderOf(roomId: string): string | undefined
+  /** A bot's display name, for naming the leader in a member's prompt. */
+  botName(botId: string): string
   /** Bot identity + model route, or undefined when the bot is gone. */
   botById(botId: string): {
     readonly id: string
@@ -843,9 +852,18 @@ export class SessionRunner {
       // global ones) and five inapplicable global sections are blanked by name — see
       // bot-prompt.ts for which and why.
       const bot = this.accessor.botById(botId)
+      // WHO IS IN CHARGE HERE, stated per bot. The room's coordinator decides who may invite,
+      // remove, dispatch and finish; a bot that cannot see whether that is IT will refuse work it
+      // actually owns (measured: the leader told the user "我自己做不到" when asked to remove a
+      // member — the removal it alone could perform).
+      const leaderId = this.accessor.leaderOf(roomId)
       const prompt = installBotPrompt(agentCtx, {
         botName: bot?.name ?? 'Bot',
         botDescription: bot?.description ?? '',
+        isLeader: leaderId !== undefined && leaderId === botId,
+        ...(leaderId !== undefined && leaderId !== botId
+          ? { leaderName: this.accessor.botName(leaderId) }
+          : {}),
       })
       this.ctx.logger?.info?.(
         `agent-community: bot prompt room=${roomId} bot=${botId} `

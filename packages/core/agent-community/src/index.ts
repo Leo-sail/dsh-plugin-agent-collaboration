@@ -647,6 +647,9 @@ export class AgentCommunityService extends TypertRemoteService {
       // handed a runner that is fully wired — an executor that starts runs against a
       // half-initialised runner would materialise agents with no tools registered.
       const runner = new SessionRunner(ctx, {
+        // WHO IS IN CHARGE, told to each bot: the coordinator may invite/remove/dispatch/finish.
+        leaderOf: (roomId) => this.leaderOfRoom(roomId),
+        botName: (botId) => this.state.bots.find(b => b.id === botId)?.name ?? botId,
         botById: (botId) => {
           const bot = this.state.bots.find(b => b.id === botId)
           return bot === undefined
