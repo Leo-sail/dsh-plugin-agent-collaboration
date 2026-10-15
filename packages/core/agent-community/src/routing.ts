@@ -94,7 +94,9 @@ export function mentionsEveryone(text: string): boolean {
  */
 const COLLECTIVE_STRONG = [
   '大家', '各位', '所有人', '全体', '全员', '每个bot', '每个 bot', '每个机器人',
-  'everyone', 'everybody', 'all of you', 'all bots',
+  // 第二人称复数也是对房间说的 —— 实测漏了这一类：用户发「你们介绍下自己」时只有队长被唤醒。
+  '你们', '你俩', '你们俩', '你们两', '两位', '诸位', '大伙', '各位同学',
+  'everyone', 'everybody', 'all of you', 'all bots', 'you two', 'you all', 'both of you',
 ]
 const COLLECTIVE_INVITATIONS = ['一起', '各自', '分别', '逐个', '一一', 'each of you']
 /** Verbs several bots can do, so `都` in front of one of them is an invitation to all. */
@@ -308,7 +310,11 @@ export function routeMessage(input: RouteInput): RouteDecision {
       ...membersNamedForRemoval(hay, input.members),
       ...(input.namedBotIds ?? []),
     ])
-    if (named.size > 0) {
+    // A removal described by ROLE rather than by name also belongs to the coordinator:
+    // 「我不想在群里看到后端开发工程师」 names no member, so name matching found nothing and the
+    // request reached the very bot the user wanted gone (which can only answer "我移不了自己").
+    // The room context in `asksForRemoval` keeps ordinary engineering requests out of this branch.
+    if (named.size > 0 || asksForRemoval(hay)) {
       const leader = input.leaderId !== undefined && byId.has(input.leaderId)
         ? input.leaderId
         : input.members.find(m => !named.has(m.id))?.id
@@ -435,8 +441,32 @@ const INVITE_VERBS: readonly string[] = [
  */
 const REMOVAL_VERBS: readonly string[] = [
   '踢', '移出', '移除群', '移出群', '赶出', '清出', '开除', '不要他了', '别让他',
+  // 用户实际会怎么说（实测漏了第一类，于是请求被路由给"被移除的那个人"）：
+  '不想在群里看到', '不想看到', '别在群里', '不要在群里', '别再出现', '不需要他', '不需要她',
+  '让他离开', '请离开', '可以走了', '拿走', '去掉', '移除',
   'kick', 'remove from the group', 'remove from this group', 'drop from the group',
+  'do not want to see', 'get rid of',
 ]
+
+/**
+ * Whether the message asks for somebody to be taken OUT of this room.
+ *
+ * TWO SHAPES, and the second is what a human actually types:
+ *
+ *   · a removal verb plus a member's NAME — handled by {@link membersNamedForRemoval};
+ *   · a removal PHRASE plus room context — 「我不想在群里看到后端开发工程师」. The target here is
+ *     described by ROLE, not by name, so name matching found nothing and the request fell through
+ *     to role matching, which delivered it to the very bot the user wanted gone. It then answered
+ *     "我移不了自己" — true for a member, and useless to the user. Only the leader can act, so the
+ *     leader must be the one woken.
+ *
+ * The room context is required so an ordinary coding request ("移除这个函数") is untouched.
+ */
+function asksForRemoval(hay: string): boolean {
+  const hasRemoveWord = REMOVAL_VERBS.some(verb => hay.includes(verb.toLowerCase()))
+  if (!hasRemoveWord) return false
+  return /群|房间|成员|group|room|member/u.test(hay)
+}
 
 /**
  * The members a removal instruction names, or an empty list when this is not one.

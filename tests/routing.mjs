@@ -106,9 +106,30 @@ for (const text of ['大家看一下这个设计', '各位给点意见', '你们
   const d = route(text)
   check(ids(d) === 'a,b,c' && d.reason === 'all', `「${text}」→ 全员`, `${ids(d)}/${d.reason}`)
 }
+// 第二人称复数也是对房间说的（实测漏了：用户发「你们介绍下自己」只有队长被唤醒）
+const youAll = route('你们介绍下自己')
+check(ids(youAll) === 'a,b,c' && youAll.reason === 'all', '「你们介绍下自己」→ 全员', `${ids(youAll)}/${youAll.reason}`)
+check(ids(route('你俩说说')) === 'a,b,c', '「你俩说说」→ 全员')
+check(ids(route('你们好')) === 'a,b,c', '「你们好」→ 全员（同时是打招呼）')
 // 但显式点名优先于集体语气
 const namedBeatsAll = route('让 小毕 给大家说一下')
 check(ids(namedBeatsAll) === 'b', '点名 + 集体语气 → 听点名的（只叫 b）', ids(namedBeatsAll))
+
+// ── 7b. 移除请求：按角色描述的目标也要交给 leader ───────────────────────────
+//
+// 实测：用户发「我不想在群里看到后端开发工程师」→ 角色匹配把请求交给了**那个工程师本人**，
+// 它只能回答"我移不了自己"。只有 leader 能移除人，所以必须唤醒 leader。
+const byRole = route('我不想在群里看到后端开发工程师', { leaderId: 'a' })
+check(ids(byRole) === 'a' && byRole.reason === 'coordinator',
+  '按角色描述的移除请求 → leader（不是那个 bot 本人）', `${ids(byRole)}/${byRole.reason}`)
+const byRole2 = route('我不想要这个测试了，把他移出群', { leaderId: 'a' })
+check(ids(byRole2) === 'a', '「移出群」+ 角色描述 → leader', ids(byRole2))
+// 普通工程请求不能被误判：没有房间语境就不算移除
+const codeRequest = route('移除这个没用的函数')
+check(codeRequest.reason === 'matched',
+  '「移除这个函数」是工程请求 → 照常走角色匹配（不是管理指令）', `${ids(codeRequest)}/${codeRequest.reason}`)
+const codeRequest2 = route('把这段代码里的死函数去掉')
+check(codeRequest2.reason === 'matched', '没有房间语境的"去掉"也不是管理指令', codeRequest2.reason)
 
 // ── 8. 兜底：内容不指向任何人时，leader 接管 ────────────────────────────────
 const unclear = route('那个事怎么样了', { leaderId: 'a' })
