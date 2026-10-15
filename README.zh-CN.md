@@ -17,6 +17,8 @@
 这里的 Bot 不是一次性的子代理：它有身份、有自己的模型与权限预设、有自己的工作区，以及一个**重启后仍在**的会话。
 把几个 Bot 放进同一个房间，它们会一起回应。每一次回答都有运行记录，所以即使产出它的会话已经不在，对话仍可回看。
 
+<p align="center"><img src="packages/bundle/agent-collaboration/screenshots/02-group-conversation.png" alt="三个 Bot 在同一个群里各自回答一条消息，各自署名" width="100%"></p>
+
 ## 功能
 
 - **Bot 是常驻的。** 名字、模型、权限预设、工作区都落在磁盘上，面板里一直列着，重启前后都能在所属房间里回答。
@@ -147,18 +149,19 @@ $DSH_HOME/agent-community/workspaces/<bot>  每个 Bot 的工作区，附件也�
 
 群里一条消息，三个 Bot 各自回答、各自署名：
 
-![三个 Bot 同时回答的群聊](assets/screenshots/02-group-conversation.png)
+![三个 Bot 同时回答的群聊](packages/bundle/agent-collaboration/screenshots/02-group-conversation.png)
 
 Bot 列表与房间列表，侧栏入口带未读数：
 
-![Bot 列表与房间列表](assets/screenshots/01-bot-roster.png)
+![Bot 列表与房间列表](packages/bundle/agent-collaboration/screenshots/01-bot-roster.png)
 
 输入框的菜单——文件 / 压缩 / 权限 / 模型，下面是技能分组：
 
-![输入框菜单](assets/screenshots/04-composer-menu.png)
+![输入框菜单](packages/bundle/agent-collaboration/screenshots/04-composer-menu.png)
 
-这些截图声明在仓库根目录的 [`screenshots.json`](screenshots.json) 里，市场读取它来渲染插件页；
-拍摄方式见 [assets/screenshots/README.md](assets/screenshots/README.md)。
+这些截图声明在 [`screenshots.json`](packages/bundle/agent-collaboration/screenshots.json) 里——它放在
+bundle 的 `package.json` 旁边，因为本插件以 monorepo 子包的形式收录，市场正是从这个位置读取它。
+拍摄方式见 [screenshots/README.md](packages/bundle/agent-collaboration/screenshots/README.md)。
 
 ## 开发
 

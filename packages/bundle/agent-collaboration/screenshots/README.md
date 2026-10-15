@@ -1,8 +1,13 @@
 # Screenshots
 
-`screenshots.json` (repo root) is read by plugin storefronts — the marketplace site and `dsh-market` —
-which render these as the plugin's page. It lists **1–8** paths, relative to the repo root, in display
-order.
+[`screenshots.json`](../screenshots.json) — one level up, beside the bundle's `package.json` — is read by
+plugin storefronts (the marketplace site and `dsh-market`), which render these as the plugin's page. It
+lists **1–8** paths, relative to that file, in display order.
+
+It sits next to the bundle rather than at the repo root because this plugin is listed as a monorepo
+subpackage: storefronts read `screenshots.json` from beside the `package.json` of the directory the entry
+points at, and a root-level file would never be read. Relative paths are deliberate: rename one of these
+files and the break is right here to see, where an absolute URL to the same image would rot silently.
 
 | File | Shows |
 | --- | --- |
@@ -22,8 +27,8 @@ storefront to scale down — and the whole DSH window is kept so the sidebar ent
 
 ## Adding more
 
-Drop the file in this directory, add its path to `screenshots.json`, and it appears after the next
-storefront build. Update this table too — a screenshot nobody can identify is a screenshot nobody trusts.
+Drop the file in this directory, add its path (`screenshots/<file>`) to `screenshots.json`, and it appears
+after the next storefront build. Update this table too — a screenshot nobody can identify is a screenshot nobody trusts.
 
 Worth capturing next: the 排队 (queued) → 进行中 (running) → 完成 states side by side, an attachment as it
 appears in a transcript, and the 压缩 (compact) summary row.

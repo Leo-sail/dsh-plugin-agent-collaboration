@@ -19,9 +19,7 @@ workspace, and its own session that survives a restart. Put several of them in a
 together. Every run is recorded, so a conversation can be read back later even after the session that
 produced it is gone.
 
-<!-- SCREENSHOT: replace this block with a real capture before publishing; see "Screenshots" below.
-<p align="center"><img src="assets/screenshots/roster.png" alt="Bot roster and room list" width="100%"></p>
--->
+<p align="center"><img src="packages/bundle/agent-collaboration/screenshots/02-group-conversation.png" alt="A group room where three Bots answered one message, each attributed to its own Bot" width="100%"></p>
 
 ## Features
 
@@ -174,18 +172,20 @@ unmounted and unbuildable; it was removed on 2026-10-14.
 
 A group room where three Bots answered one message, each attributed to its own Bot:
 
-![A group conversation with three Bots answering](assets/screenshots/02-group-conversation.png)
+![A group conversation with three Bots answering](packages/bundle/agent-collaboration/screenshots/02-group-conversation.png)
 
 The roster and the room list, with the sidebar entry carrying an unread count:
 
-![Bot roster and room list](assets/screenshots/01-bot-roster.png)
+![Bot roster and room list](packages/bundle/agent-collaboration/screenshots/01-bot-roster.png)
 
 The composer's menu — 文件 / 压缩 / 权限 / 模型, then the skills group:
 
-![Composer menu](assets/screenshots/04-composer-menu.png)
+![Composer menu](packages/bundle/agent-collaboration/screenshots/04-composer-menu.png)
 
-These are declared in [`screenshots.json`](screenshots.json), which storefronts read to render a plugin
-page; see [assets/screenshots/README.md](assets/screenshots/README.md) for how they were taken.
+These are declared in [`screenshots.json`](packages/bundle/agent-collaboration/screenshots.json) — beside
+the bundle's `package.json`, because this plugin is listed as a monorepo subpackage and that is where
+storefronts read it from. See
+[screenshots/README.md](packages/bundle/agent-collaboration/screenshots/README.md) for how they were taken.
 
 ## Development
 
