@@ -158,6 +158,38 @@ const obj = (args: unknown): Record<string, unknown> =>
 const str = (args: Record<string, unknown>, key: string): string =>
   typeof args[key] === 'string' ? args[key] : ''
 
+/**
+ * Strip the `required: true` shorthand out of a property schema, recursively.
+ *
+ * JSON Schema does not allow a boolean `required` inside a property — it is an array on the
+ * OBJECT that owns the properties. The shorthand is convenient at call sites (and is exactly what
+ * `defineTool` in the tools package accepts), so it is translated here instead of being passed
+ * through: a strict provider rejects the whole request otherwise, which was measured on a live
+ * bot — `Invalid schema for function 'agent_community_recall': true is not of type "array"`, one
+ * failed request in 200ms, and NO reply in the room at all.
+ *
+ * Recursive because `items` can carry an object schema of its own (dispatch's task list does).
+ */
+function normaliseSchema(node: Record<string, unknown>): Record<string, unknown> {
+  const { required: flag, properties, items, ...rest } = node
+  const out: Record<string, unknown> = { ...rest }
+  if (properties !== undefined && typeof properties === 'object' && properties !== null) {
+    const requiredNames = Array.isArray(flag) ? flag.filter((name): name is string => typeof name === 'string') : []
+    const normalised: Record<string, unknown> = {}
+    for (const [key, raw] of Object.entries(properties as Record<string, unknown>)) {
+      const child = (raw ?? {}) as Record<string, unknown>
+      if (child['required'] === true && !requiredNames.includes(key)) requiredNames.push(key)
+      normalised[key] = normaliseSchema(child)
+    }
+    out['properties'] = normalised
+    out['required'] = requiredNames
+  }
+  if (items !== undefined && typeof items === 'object' && items !== null) {
+    out['items'] = normaliseSchema(items as Record<string, unknown>)
+  }
+  return out
+}
+
 const strList = (args: Record<string, unknown>, key: string): string[] => {
   const raw = args[key]
   return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : []
@@ -226,11 +258,33 @@ export function registerCollaborationTools(
     tools.register({
       name: spec.name,
       description: spec.description,
+      // ── THE SCHEMA MUST BE VALID JSON SCHEMA, NOT JUST LOOK LIKE IT ───────────
+      //
+      // Two shorthands are in use at the call sites, and only one of them is JSON Schema:
+      // the top-level `required: [...]` list, and a per-property `required: true` (the shape
+      // `defineTool` accepts in the tools package). Passing the second one through put
+      // `"required": true` INSIDE a property schema, which a strict provider rejects before the
+      // model ever sees the turn:
+      //
+      //   Invalid schema for function 'agent_community_recall': true is not of type "array"
+      //
+      // Measured on a live bot: the request failed in 200ms and the room showed NO reply at all —
+      // every tool is sent with every request, so ONE malformed tool silences the bot completely.
+      // Normalise here, at the single place every tool goes through.
       parameters: {
         type: 'object',
         additionalProperties: false,
-        properties: spec.properties,
-        required: [...spec.required],
+        properties: Object.fromEntries(
+          Object.entries(spec.properties).map(([key, raw]) => [key, normaliseSchema((raw ?? {}) as Record<string, unknown>)]),
+        ),
+        // A property marked `required: true` counts as required even when the caller forgot the
+        // list; the union keeps both spellings working.
+        required: [...new Set([
+          ...spec.required,
+          ...Object.entries(spec.properties)
+            .filter(([, raw]) => (raw as { required?: unknown } | undefined)?.required === true)
+            .map(([key]) => key),
+        ])],
       },
       output: {
         schema: OPEN_OBJECT,

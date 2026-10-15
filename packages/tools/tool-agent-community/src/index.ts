@@ -301,7 +301,11 @@ export function apply(ctx: Context, config: Config = {}): void {
       tasks: {
         type: 'array',
         required: true,
-        items: { type: 'json' as const },
+        // `type: 'json'` is NOT a JSON Schema type: the model-facing parameters must use a real
+        // one, or the provider rejects the whole request (measured on the core package's tools:
+        // one malformed schema silenced every bot reply). `object` with open properties is what
+        // this always meant — each item is `{ subject, detail?, assignee? }`.
+        items: { type: 'object' as const, additionalProperties: true },
         description: 'Task list. Each item: { subject: string, detail?: string, assignee?: string }',
       },
     },
