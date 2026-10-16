@@ -3119,34 +3119,22 @@ export class AgentCommunityService extends TypertRemoteService {
     const instructionAt = [...this.state.messages]
       .filter(m => m.roomId === input.roomId && m.sender.kind === 'user')
       .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
+    let suppressMessage = false
     if (senderBot !== undefined && instructionAt !== '') {
       const said = this.state.messages.some(m => m.roomId === input.roomId
         && m.sender.kind === 'bot' && m.sender.botId === senderBot.id
         && m.createdAt > instructionAt)
       if (said) {
-        const last = [...this.state.messages].reverse().find(m => m.roomId === input.roomId
-          && m.sender.kind === 'bot' && m.sender.botId === senderBot.id)
-        return last as BotMessage
+        // SUPPRESS THE MESSAGE, NEVER THE WAKE. Returning here once swallowed the delegation that
+        // follows: the leader had spoken, so its message_member call returned early and the member
+        // was never woken — the room then showed one reply and the leader waited for ever.
+        suppressMessage = true
       }
     }
-    if (input.internal === true) {
-      // Handed to the target below; never rendered in the room. Returning a shaped message keeps
-      // every caller's contract unchanged. Coordination between bots is not conversation with the
-      // user, and rendering it is what filled a room with five messages for one instruction.
-      return {
-        id: brandId<BotMessageId>(randomUUID()),
-        roomId: brandId<BotRoomId>(input.roomId),
-        sender: {
-          kind: 'bot',
-          ...(senderBot?.id !== undefined ? { botId: senderBot.id } : {}),
-          name: senderName,
-        },
-        text: input.text,
-        mentions: [],
-        createdAt: nowIso(),
-        sequence: this.state.messages.filter(m => m.roomId === input.roomId).length,
-      } as BotMessage
-    }
+    // Internal coordination is delivered to the target below and never rendered in the room — but
+    // the delivery and the wake must still happen, which is why this is a flag and not an early
+    // return.
+    if (input.internal === true) suppressMessage = true
     const msg: BotMessage = {
       id: brandId<BotMessageId>(randomUUID()),
       roomId: brandId<BotRoomId>(input.roomId),
@@ -3160,9 +3148,14 @@ export class AgentCommunityService extends TypertRemoteService {
       createdAt: nowIso(),
       sequence: this.state.messages.filter(m => m.roomId === input.roomId).length,
     }
-    this.state = { ...this.state, messages: [...this.state.messages, msg] }
-    this.enqueueWrite()
+    if (!suppressMessage) {
+      this.state = { ...this.state, messages: [...this.state.messages, msg] }
+      this.enqueueWrite()
+    }
     // If directed to a specific Bot, nudge executor to wake that Bot.
+    //
+    // NOTE: this runs even when the room message was suppressed. A suppressed message is one the
+    // room should not show; the wake is the whole point of the hand-off.
     //
     // ── ONE HOP, NEVER A LOOP ───────────────────────────────────────────────────
     //
