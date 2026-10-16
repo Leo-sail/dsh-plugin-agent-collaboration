@@ -146,15 +146,6 @@ export interface BotConversationPanelProps {
   onCommand: (roomId: string, cmdId: string, subId?: string) => void
   /** Clear this room's transcript. Must reset the panel's own ledger view. */
   onClear: (roomId: string) => void | Promise<void>
-  /**
-   * Download this room's transcript.
-   *
-   * WHY THIS PROP EXISTS. `exportTranscript.ts` was written, imported by ConversationArea — and
-   * never called: no button, no command, and not one occurrence of 导出 anywhere in the UI. The
-   * feature was unreachable dead code, measured by driving the real panel and finding no control
-   * to click. Wiring it to a real button is the whole fix.
-   */
-  onExport?: (() => void) | undefined
   /** Toggle the room list, mirroring the native top bar's panel-left control. */
   /** Room switcher entries for the title chip's dropdown. */
   listLedger: (roomId: string, opts?: {
@@ -613,14 +604,13 @@ const clearBtn: CSSProperties = {
 // ── SessionHeader ─────────────────────────────────────────────────────────────
 
 function SessionHeader({
-  name, isGroup, isRunning, onStop, onClear, onExport,
+  name, isGroup, isRunning, onStop, onClear,
 }: {
   name: string
   isGroup: boolean
   isRunning: boolean
   onStop: () => void
   onClear: () => void
-  onExport?: (() => void) | undefined
 }) {
   const iconBtn: CSSProperties = {
     width: 28, height: 28, flexShrink: 0,
@@ -648,9 +638,6 @@ function SessionHeader({
         )}
         {/* Direct control, no overflow menu — the user asked for the clear action
             itself in the bar rather than hidden behind a "···". */}
-        {onExport !== undefined && (
-          <button type="button" onClick={onExport} style={clearBtn}>导出</button>
-        )}
         <button type="button" onClick={onClear} style={clearBtn}>清空消息</button>
       </div>
     </div>

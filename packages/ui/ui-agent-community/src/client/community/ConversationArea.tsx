@@ -276,8 +276,6 @@ export function ConversationArea({
 
             onNotice(`「${cmdId}」这个命令还没有实现。`)
           }}
-          // The export entry point: the transcript as JSON, straight from the ledger.
-          onExport={() => exportTranscript(remote, roomId!)}
           onClear={(_roomId) => {
             remote.clearMessages(roomId!).catch(() => undefined)
           }}
