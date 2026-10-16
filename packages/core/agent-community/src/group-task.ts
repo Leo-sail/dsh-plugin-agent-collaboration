@@ -137,10 +137,10 @@ export class GroupTaskDriver {
     // once per member and re-plans against a half-finished picture.
     if (state.runningBotIds.size > 0) return { leaderRuns: false }
     
-    const ok = this.accessor.enqueueRun(input.roomId, leader, this.integratePrompt(input.roomId, state))
 
     const leader = this.accessor.leaderOf(input.roomId)
     if (leader === undefined) return { leaderRuns: false }
+    const ok = this.accessor.enqueueRun(input.roomId, leader, this.integratePrompt(input.roomId, state))
     if (ok) state.runningBotIds.add(leader)
     this.save(input.roomId, state)
     return { leaderRuns: ok }
@@ -316,6 +316,9 @@ export class GroupTaskDriver {
       '',
       '请判断任务是否已经完成。',
       '已完成 → 调用 finish_task 给出最终汇报。',
+      // 该不该发这条消息，由你判断：成员的结果如果已经发在群里、你上一轮也已经对用户说明过，'
+      // 而这一轮并没有新的东西要说，就直接结束本轮，不要为了汇报而汇报。
+      '（如果成员的结果已经在群里、这一轮你没有新的内容要对用户说，就直接结束本轮，不要重复播报。）',
       '还需要工作 → 调用 assign_task 继续分派；不要再重复分派同一件事。',
     ].join('\n')
   }
