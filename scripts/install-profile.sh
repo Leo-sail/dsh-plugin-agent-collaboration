@@ -219,3 +219,27 @@ if grep -q '__ModuleLoader__' "$DEST/ui-agent-community/lib/index.js"; then
   exit 1
 fi
 echo "install-profile: all checks passed."
+
+# ── THE BOT AGENT PRESET ─────────────────────────────────────────────────────
+#
+# Bot sessions run the plugin's own preset instead of the deployment's `standard` one, because
+# `standard` mounts `workflow`/`subagent`/`create_goal`/... per agent and a global deny cannot
+# hide those (measured: 11 of them stayed in the catalog). Presets are discovered from
+# <DSH_HOME>/.agent-presets, so the plugin's preset is installed there rather than patched into
+# any bundle. A host that cannot find it degrades to the deployment default — the plugin never
+# requires this file to exist.
+PRESET_SRC="$ROOT/packages/bundle/agent-collaboration/agent-presets/bot"
+PRESET_DEST="${DSH_HOME:-$HOME/.dsh}/.agent-presets/bot"
+if [ -d "$PRESET_SRC" ]; then
+  mkdir -p "$PRESET_DEST"
+  for f in preset.yml agent.cordis.yml; do
+    if [ -f "$PRESET_SRC/$f" ]; then
+      if [ -f "$PRESET_DEST/$f" ] && cmp -s "$PRESET_SRC/$f" "$PRESET_DEST/$f"; then
+        :
+      else
+        cp "$PRESET_SRC/$f" "$PRESET_DEST/$f"
+      fi
+    fi
+  done
+  echo "install-profile: bot agent preset → $PRESET_DEST"
+fi

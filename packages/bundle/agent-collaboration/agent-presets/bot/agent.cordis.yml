@@ -1,0 +1,103 @@
+# The `bot` agent preset: what a Bots团队 member runs with.
+#
+# WHY THIS FILE EXISTS. A bot used to run under the deployment's `standard` preset, so its tool
+# catalog carried the whole coding-agent world: `workflow`, `subagent`/`subagent_fork`,
+# `create_goal`/`update_goal`, `present`, `exit_plan_mode`, `list_agents`, `send_message`,
+# `interrupt_agent`. The plugin tried to HIDE those with `ctx.tools.restrict({deny})` and could
+# not: DSH keeps a scope-local registration visible through a global deny, and these rows are
+# mounted per agent by the preset, not by the host. Measured on 2026-10-16, the deny list left
+# 11 of them in place; only `plugin_manager` (a genuine host tool) disappeared.
+#
+# A preset is the mechanism DSH provides for exactly this: the session's tools ARE what its
+# preset mounts. So a bot gets its own composition instead of a deny list fighting a preset.
+#
+# WHAT A BOT KEEPS, and why: files and shell (it does real work in its own workspace), search,
+# skills, todos, web, and session compaction. Everything about GOALS, PLAN MODE, SUBAGENTS and
+# WORKFLOWS is gone — a bot collaborates through the plugin's own tools (`agent_community_*`,
+# `assign_task`, `task_report`, `finish_task`, `invite_bot`, `remove_bot`, `propose_group`),
+# which the plugin registers into the agent's own scope and which therefore need no row here.
+#
+# `tool-ask-user` is deliberately absent: the plugin registers its own `ask_user_question` that
+# renders the in-panel question card, and two registrations of one name is the collision that
+# silently dropped tools earlier in this project.
+#
+# A service row MUST sit inside a group carrying an `isolate` realm (see the shipped `standard`
+# preset for the full reasoning); only the compaction group below publishes services.
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: >-
+      You are a member of a user's bot team. Your working directory is {{cwd}}.
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ─────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: true
+    searchTimeoutMs: 60000

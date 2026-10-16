@@ -1,0 +1,49 @@
+// The bot agent preset is a CONFIGURATION file, so nothing type-checks it: a typo'd module name or
+// a re-added `tool-subagent` row would only show up as a bot with the wrong tools at runtime —
+// exactly the defect this preset exists to fix. These assertions are cheap and catch that.
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+const dir = join(root, 'packages/bundle/agent-collaboration/agent-presets/bot')
+const yml = readFileSync(join(dir, 'agent.cordis.yml'), 'utf8')
+const meta = readFileSync(join(dir, 'preset.yml'), 'utf8')
+const indexSrc = readFileSync(join(root, 'packages/core/agent-community/src/index.ts'), 'utf8')
+
+let pass = 0
+const check = (ok, label, extra) => {
+  if (!ok) { console.error(`FAIL ${label}${extra === undefined ? '' : ' — ' + extra}`); process.exitCode = 1 }
+  else pass += 1
+}
+
+// ── what a bot MUST keep ────────────────────────────────────────────────────
+for (const name of [
+  '@deepseek-ai/dsh-tool-bash', '@deepseek-ai/dsh-tool-fs', '@deepseek-ai/dsh-tool-fs-search',
+  '@deepseek-ai/dsh-tool-skill', '@deepseek-ai/dsh-skill-filesystem', '@deepseek-ai/dsh-tool-todo',
+  '@deepseek-ai/dsh-tool-web', '@deepseek-ai/dsh-compaction-basic',
+]) check(yml.includes(name), `保留 ${name}`)
+
+// ── what a bot must NOT get (this is the whole point of the file) ───────────
+for (const name of [
+  '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-command-goal', '@deepseek-ai/dsh-plan-mode',
+  '@deepseek-ai/dsh-tool-subagent', '@deepseek-ai/dsh-tool-subagent-control',
+  '@deepseek-ai/dsh-tool-workflow', '@deepseek-ai/dsh-workflow-worker-thread',
+  '@deepseek-ai/dsh-tool-ralph',
+  // the plugin registers its own ask_user_question that draws the question card: a second
+  // registration of that name is the collision that silently dropped tools earlier
+  '@deepseek-ai/dsh-tool-ask-user',
+]) check(!yml.includes(name), `不含 ${name}`)
+
+// A service row outside an isolate realm publishes process-globally, which the roster rejects at
+// mount time — the preset would simply not load.
+const groups = (yml.match(/isolate:/g) ?? []).length
+check(groups >= 1, 'compaction 组带 isolate realm', String(groups))
+
+// The name a session is created with must be the directory the roster will find.
+check(/order:\s*\d+/.test(meta), 'preset.yml 有 order')
+check(meta.includes('name:'), 'preset.yml 有展示名')
+check(/agentPreset:\s*config\.botAgentPreset \?\? 'bot'/.test(indexSrc), "插件默认 agentPreset = 'bot'")
+check(!/agentPreset:\s*config\.botAgentPreset \?\? 'standard'/.test(indexSrc), "不再默认 'standard'")
+
+console.log(`[bot-preset] ${pass} 通过`)

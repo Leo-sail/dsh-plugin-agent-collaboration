@@ -860,7 +860,7 @@ export class SessionRunner {
     // bot would keep its 31-tool world forever. Mounting into the agent's own scope is
     // the same call the loop makes for `meta.agentPreset`, and it is idempotent for a
     // session that already has one (skipped here).
-    const preset = this.opts.agentPreset
+    const preset = await this.resolvePresetId()
     const existingPreset = this.sessionOf(roomId, botId)?.header?.agentPreset
     const mountPreset = preset !== undefined && preset !== '' && existingPreset === undefined
     const setup = async (agentCtx: Context): Promise<void> => {
@@ -1072,6 +1072,42 @@ export class SessionRunner {
    * with `meta.agentPreset`; doing it in `setup` is what upgrades a session that was
    * created before this plugin knew about presets.
    */
+  /**
+   * The preset this bot session should run under, or `undefined` to use the deployment default.
+   *
+   * The plugin ships its own `bot` preset, but "the plugin must not require a particular DSH
+   * version" is a standing requirement: a host whose roster does not offer it (older DSH, a user
+   * who deleted `<DSH_HOME>/.agent-presets/bot`, a deployment that supplies its own presets)
+   * must still get working bots rather than sessions that refuse to start. So the roster is
+   * asked first and an unknown preset degrades to "no preset" — the behaviour every bot had
+   * before presets were wired up at all.
+   *
+   * The roster API is probed defensively (`has(id)`, then `has(ctx, id)`): the package is
+   * resolved from the host, so its exact signature is not ours to pin, and a probe that throws
+   * must not take a bot down with it.
+   */
+  private async resolvePresetId(): Promise<string | undefined> {
+    const preset = this.opts.agentPreset
+    if (preset === undefined || preset === '') return undefined
+    type Roster = { has?: (...args: unknown[]) => unknown }
+    const roster = (optionalService<Roster>(this.ctx, 'agentPresets')
+      ?? safeProperty<Roster>(this.ctx, 'agentPresets'))
+    if (roster?.has === undefined) return preset
+    for (const args of [[preset], [this.ctx, preset]]) {
+      try {
+        const answer = await roster.has(...args)
+        if (answer === false) {
+          this.notePresetMount(`skip preset=${preset} reason=not-in-roster`)
+          return undefined
+        }
+        if (answer === true) return preset
+      } catch {
+        // A different signature threw; try the next shape, then give up and keep the preset.
+      }
+    }
+    return preset
+  }
+
   private async mountAgentPreset(agentCtx: Context, preset: string): Promise<void> {
     type Registry = { mount?(ctx: Context, id?: string): Promise<unknown> }
     // ── THE SERVICE LIVES OUTSIDE THE AGENT'S ISOLATED SCOPE ──────────────────

@@ -712,7 +712,12 @@ export class AgentCommunityService extends TypertRemoteService {
         // grep, web_search/web_fetch, skill, todo_write, subagent, …) on top of the
         // plugin-registered community tools. Before this they had 31 tools and none of
         // the core ones, which is why they kept saying they could not touch files.
-        agentPreset: config.botAgentPreset ?? 'standard',
+        // Bot sessions run the plugin's own preset (shipped in this package and installed into
+        // <DSH_HOME>/.agent-presets/bot). `standard` gave them `workflow`/`subagent`/`create_goal`
+        // and friends, which a global deny cannot hide because the preset mounts them per agent.
+        // An explicit config value still wins, and the runner falls back to the deployment
+        // default when the roster does not know this preset (see `resolvePresetId`).
+        agentPreset: config.botAgentPreset ?? 'bot',
         deniedTools: config.botDeniedTools ?? DEFAULT_DENIED_TOOLS,
         // Where the preset-mount diagnostic lands (plugin data dir, not the profile).
         presetLogDir: join(this.home, 'agent-community'),
