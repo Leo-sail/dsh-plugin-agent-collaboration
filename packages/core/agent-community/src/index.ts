@@ -2558,7 +2558,11 @@ export class AgentCommunityService extends TypertRemoteService {
       .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
     const alreadySpoke = instructionAt !== '' && this.state.messages.some(m => m.roomId === prev.roomId
       && m.sender.kind === 'bot' && m.sender.botId === prev.botId && m.createdAt > instructionAt)
-    if (alreadySpoke) this.silentRuns.add(prev.id)
+    if (alreadySpoke) {
+      this.silentRuns.add(prev.id)
+      // Its rows were created when the run STARTED; the verdict only exists now.
+      this.ledger.dropRunRows(String(prev.roomId), prev.id)
+    }
     if (!alreadySpoke && input.reply !== undefined && replyText.trim() !== '') {
       // B-2: use the real session id from roomAgentSessions rather than
       // prev.sessionId, which is often a stale UUID that has no session directory.
@@ -3141,6 +3145,14 @@ export class AgentCommunityService extends TypertRemoteService {
         // follows: the leader had spoken, so its message_member call returned early and the member
         // was never woken — the room then showed one reply and the leader waited for ever.
         suppressMessage = true
+        const current = this.state.runs.find(r => r.roomId === input.roomId
+          && r.botId === senderBot.id && (r.status === 'queued' || r.status === 'running'))
+        if (current !== undefined) {
+          this.silentRuns.add(current.id)
+          // Drop what this run has already rendered: the panel shows the ledger, and its
+          // rows exist from the moment it started.
+          this.ledger.dropRunRows(String(input.roomId), current.id)
+        }
       }
     }
     // Internal coordination is delivered to the target below and never rendered in the room — but
