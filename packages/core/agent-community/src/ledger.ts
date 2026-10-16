@@ -368,13 +368,26 @@ export class LedgerProjector {
    */
   push(entry: LedgerEntryInput): LedgerEntry {
     const { randomUUID } = require('node:crypto') as typeof import('node:crypto')
+    // ── A ROW BELONGING TO A RUN HAS A DERIVED ID ─────────────────────────────
+    //
+    // Random ids let one answer become two rows: the streaming row is created on the attempt's
+    // first frame, sometimes before `runIdFor` can name the run, so it carries no runId — and
+    // `patchRunText` looks rows up BY runId, finds nothing, and opens a second row for the same
+    // text. Measured: one reply rendered twice, one copy with its reasoning and one without,
+    // which is exactly that pair. Deriving the id from (run, type, call) makes the projection's
+    // row and the settling write the same row by construction.
+    const rowRunId = (entry as { runId?: string }).runId
+    const rowCallId = (entry as { callId?: string }).callId
+    const rowType = (entry as { type?: string }).type
     const full = {
       ...entry,
       // Stamped here, not by callers. Required by LedgerEntryBase, and every consumer
       // that sorts, groups or formats by time depends on it; making callers supply it
       // is what let the streaming path emit timeless entries.
       at: entry.at ?? new Date().toISOString(),
-      id: randomUUID(),
+      id: rowRunId !== undefined && rowType !== undefined
+        ? `run:${rowRunId}:${rowType}${rowCallId !== undefined ? `:${rowCallId}` : ''}`
+        : randomUUID(),
       sequence: ++this.seq,
       rev: 1,
     } as LedgerEntry
@@ -538,6 +551,13 @@ export class LedgerProjector {
       // So the newest streaming text row for this bot is taken over instead. Only when
       // there is genuinely no row does one get created, which keeps the original fix
       // (an answer is never dropped) without ever duplicating it.
+      // The adopted row must carry the runId from now on, or the next write for this
+      // run will fail to find it and open yet another row.
+      const stampAdopted = (rowId: string): void => {
+        const current = (this.byRoom.get(roomId) ?? []).find(e => e.id === rowId)
+        if (current !== undefined) (current as { runId?: string }).runId = runId
+      }
+      void stampAdopted
       const orphan = identity !== undefined
         ? [...list].reverse().find(e =>
             e.type === 'bot-text'
