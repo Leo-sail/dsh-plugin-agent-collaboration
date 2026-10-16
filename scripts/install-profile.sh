@@ -273,7 +273,10 @@ for pair in \
   "tools/tool-agent-community:tool-agent-community" \
   "ui/ui-agent-community:ui-agent-community"; do
   src="$ROOT/packages/${pair%%:*}/lib"
-  dst="$DEST/node_modules/.ignored/@dsh-plugin-agent-community/${pair##*:}/lib"
+  # NOTE: $DEST is the SCOPE directory (…/node_modules/@dsh-plugin-agent-community), so the
+  # .ignored copy is a SIBLING of it, not a child — building "$DEST/node_modules/…" silently
+  # pointed at a path that does not exist, and the guard below then skipped every pair.
+  dst="$PROFILE_DIR/node_modules/.ignored/@dsh-plugin-agent-community/${pair##*:}/lib"
   [ -d "$src" ] && [ -d "$dst" ] || continue
   if ! diff -rq "$src" "$dst" >/dev/null 2>&1; then
     cp -R "$src/." "$dst/"
