@@ -61,6 +61,7 @@ dsh plugin --profile <profile> add <插件包或本地路径>     # 用启动该
 
 所以下列位置都必须是"空的"：
 
+- `<profile>/node_modules/@deepseek-ai/`（必须 0 项 —— 宿主自带的包被装进 profile 会遮蔽运行时，见校验脚本的检查）
 - `~/.dsh/profiles/node_modules/`（**profile 的上级目录**）：用 `npx @deepseek-ai/dsh` 启动过一次 profile 就会
   生成这个 hoisted 树（223 个软链指向 npx 缓存里的那个版本），它会在解析顺序上抢先。实测 2026-10-15
   它指向 **0.1.2-rc.1**，而 app 是 0.2.0-rc.2 —— 版本不匹配正是 typert 报
