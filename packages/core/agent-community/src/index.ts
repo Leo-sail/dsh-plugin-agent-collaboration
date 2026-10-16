@@ -592,12 +592,15 @@ export class AgentCommunityService extends TypertRemoteService {
     this.statePath = join(this.home, 'agent-community', 'state.json')
     // The memory root sits beside the board, for the same reason: everything the plugin owns
     // lives under one directory, so a user can find (or remove) all of it in one place.
+    this.bootTrace('before memoryStore')
     this.memoryStore = new MemoryStore(join(this.home, 'agent-community', 'memory'))
     this.sessionsDir = config.sessionsDir !== undefined
       ? resolve(config.sessionsDir.replace(/^~(?=[/\\]|$)/u, homedir()))
       : join(this.home, 'sessions')
     // P0-2: Ledger projector — in-memory store, shared with RunExecutor and ApprovalBridge
+    this.bootTrace('before ledger')
     this.ledger = new LedgerProjector(this)
+    this.bootTrace('before skills')
     this.skills = new SkillLifecycle({
       scan: roomId => this.listSkills(roomId),
       statFile: async (path) => {
@@ -609,6 +612,7 @@ export class AgentCommunityService extends TypertRemoteService {
       stream: () => this.directStream(),
       logger: this.ctx.logger as unknown as { info?(...a: unknown[]): void; warn?(...a: unknown[]): void },
     })
+    this.bootTrace('before groupFlow')
     this.groupFlow = new GroupFlowService(this.groupFlowPort(), {
       proposalTimeoutMs: this.cfg.groupProposalTimeoutMs,
     })
