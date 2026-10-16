@@ -1,6 +1,6 @@
 /** Agent Community core service — Bot management, rooms, messaging, run scheduling, and state persistence. */
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
@@ -852,6 +852,21 @@ export class AgentCommunityService extends TypertRemoteService {
       await this.maintenance.sweepPluginSessions()
 
       void this.executor.start()
+      // ── PROOF OF LIFE ────────────────────────────────────────────────────────
+      //
+      // One line at mount time, in a file a human can read. A queued run that never starts has two
+      // possible causes that look identical from outside: this code is not what the host loaded,
+      // or the executor was never created. This line separates them — it is written the moment the
+      // service is constructed and the executor exists.
+      try {
+        appendFileSync(
+          join(this.home, 'agent-community', 'boot.log'),
+          `${new Date().toISOString()} boot pid=${String(process.pid)} home=${this.home} `
+          + `executor=${this.executor === undefined ? 'missing' : 'created'}\n`,
+        )
+      } catch {
+        // Diagnostics must never break startup.
+      }
 
       // A proposal nobody answers must still resolve (§5.4): the panel has its own
       // countdown, this covers the closed-tab case.
