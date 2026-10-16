@@ -807,6 +807,22 @@ export class AgentCommunityService extends TypertRemoteService {
         isCompacting: () => false,
         postReport: (roomId, leaderId, report) => {
           const leader = this.state.bots.find(b => b.id === leaderId)
+          // ── THE DELIVERY IS THE LEADER'S OWN MESSAGE; DO NOT PUSH A SECOND COPY ──────
+          //
+          // This row is what the user saw as "one reply with 思考过程 and one without": a ledger
+          // push carries no runId and no reasoning, while the leader's own answer carries both.
+          // Measured on a task where the leader delivered in its turn AND called finish_task —
+          // the room showed its answer plus this report, two replies for one delivery.
+          //
+          // The report is still the delivery when the turn produced nothing: then no message exists
+          // after the instruction, and the push below is the only thing the user would see.
+          const instructionAt = [...this.state.messages]
+            .filter(m => m.roomId === roomId && m.sender.kind === 'user')
+            .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
+          const alreadyDelivered = instructionAt !== '' && this.state.messages.some(m =>
+            m.roomId === roomId && m.sender.kind === 'bot' && m.sender.botId === leaderId
+            && m.createdAt > instructionAt)
+          if (alreadyDelivered) return
           this.ledger.push({
             type: 'bot-text',
             roomId: roomId as never,
