@@ -72,7 +72,7 @@ export function SlashMenu({ query, commands, onSelect, onClose, openSubmenu, set
   const listRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
-  /** Measured cap for the open menu, in px; `null` until the first layout pass. */
+  /** Observed cap for the open menu, in px; `null` until the first layout pass. */
   const [maxHeight, setMaxHeight] = useState<number | null>(null)
 
   const submenuCmd = openSubmenu === null ? undefined : commands.find(c => c.id === openSubmenu)
@@ -116,7 +116,7 @@ export function SlashMenu({ query, commands, onSelect, onClose, openSubmenu, set
    *
    * WHY THIS IS NOT JUST `index === active` DURING RENDER: the row's `onMouseMove` handler
    * closed over a `let index` that the render loop mutated as it walked the sections, and
-   * every handler captured the SAME binding — so they all read its final value. Measured:
+   * every handler captured the SAME binding — so they all read its final value. Observed:
    * hovering any row of a 12-row menu highlighted row 11, whatever the pointer did
    * (closureIndex was 11 for dom rows 1, 5 and 9 alike), which is exactly the reported
    * "只有最后一个 skills 高亮".

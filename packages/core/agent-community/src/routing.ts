@@ -76,7 +76,7 @@ export interface RouteInput {
  */
 export function mentionsEveryone(text: string): boolean {
   // `@all` must not be a prefix of a longer LATIN word (`@allow` is not a broadcast) — but a CJK
-  // character right after it is ordinary text, not part of the token. Measured through the UI:
+  // character right after it is ordinary text, not part of the token. Observed in the UI:
   // `@all say hi` arrived as `@all撒盐hi` (an input-method artefact, and exactly how a user typing
   // Chinese would produce it) and the room-wide mention was missed, so only the leader answered.
   // The lookahead therefore excludes Latin letters and digits only.
@@ -98,7 +98,7 @@ export function mentionsEveryone(text: string): boolean {
  */
 const COLLECTIVE_STRONG = [
   '大家', '各位', '所有人', '全体', '全员', '每个bot', '每个 bot', '每个机器人',
-  // 第二人称复数也是对房间说的 —— 实测漏了这一类：用户发「你们介绍下自己」时只有队长被唤醒。
+  // 第二人称复数也是对房间说的 —— 容易漏掉这一类：用户发「你们介绍下自己」时只有队长被唤醒。
   '你们', '你俩', '你们俩', '你们两', '两位', '诸位', '大伙', '各位同学',
   'everyone', 'everybody', 'all of you', 'all bots', 'you two', 'you all', 'both of you',
 ]
@@ -302,7 +302,7 @@ export function routeMessage(input: RouteInput): RouteDecision {
   // This is the difference between talking TO somebody and doing something ABOUT them.
   // "把 htsrgds 从这个群里踢出去" names htsrgds, so name matching would wake htsrgds — which
   // cannot remove anybody: `remove_bot` is leader-only, so the one bot guaranteed to be
-  // unable to comply was the one that answered, and the leader never ran. Measured on the
+  // unable to comply was the one that answered, and the leader never ran. Observed on the
   // real host: the target replied "我做不到", then the user had to @ the leader by hand.
   //
   // The rule is deliberately narrow: a management verb AND a member's name, with no
@@ -445,7 +445,7 @@ const INVITE_VERBS: readonly string[] = [
  */
 const REMOVAL_VERBS: readonly string[] = [
   '踢', '移出', '移除群', '移出群', '赶出', '清出', '开除', '不要他了', '别让他',
-  // 用户实际会怎么说（实测漏了第一类，于是请求被路由给"被移除的那个人"）：
+  // 用户实际会怎么说（容易漏掉第一类，于是请求被路由给"被移除的那个人"）：
   '不想在群里看到', '不想看到', '别在群里', '不要在群里', '别再出现', '不需要他', '不需要她',
   '让他离开', '请离开', '可以走了', '拿走', '去掉', '移除',
   'kick', 'remove from the group', 'remove from this group', 'drop from the group',

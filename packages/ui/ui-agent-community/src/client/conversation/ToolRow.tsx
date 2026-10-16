@@ -12,7 +12,7 @@
  *                     `ToolDetails.module.css` (tool:1260), `AskQuestionCard.module.css`
  *                     (tool:1197) and the primitives stylesheets into `styles.ts`
  *                     from the shipped native bundle — never retyped (the generator script was
- *                     removed with the verification suites on 2026-10-13)
+ *                     removed with the verification suites on )
  *   • icon paths      generated from the primitives bundle into `NativeIcons.tsx`
  *
  * Facts that are easy to get wrong and are therefore explicit here:

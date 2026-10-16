@@ -256,7 +256,7 @@ export class MemoryStore {
    *
    * WHY THIS EXISTS. Deleting a room used to archive only the rooms's CURRENT members, so a bot
    * that had been kicked earlier kept its partition in the live tree forever: the room was gone
-   * (unreachable), yet no `_archive/<roomId>/` entry was written for it. Measured on 2026-10-16:
+   * (unreachable), yet no `_archive/<roomId>/` entry was written for it. Observed on :
    * a temp group with fghj's partition was deleted AFTER fghj was kicked, and his 535-byte memory
    * file survived in `memory/<botId>/rooms/<roomId>.md` while the archive stayed empty.
    *

@@ -1,129 +1,112 @@
-# 本地开发安装（把仓库里的插件装进 DSH profile）
+# 从仓库安装到 DSH profile
 
-这份文档记录**验证过的**本地安装步骤，以及每一步为什么必要。踩过的坑都在下面，别重复踩。
+本文档说明如何把本仓库的三个组件装进一个 DSH profile，以及安装后必须遵守的几条规则。
 
-## 一条命令（从仓库根目录）
+## 安装
 
 ```bash
-pnpm run bundle                     # 出构建产物（lib/），check-build 会校验形状
-bash scripts/install-profile.sh desktop   # 把三个组件拷进 profile 的新 scope
+pnpm run bundle                          # 产出 lib/，check-build 校验构建形状
+bash scripts/install-profile.sh desktop  # 安装三个组件到 profile 的插件 scope
 ```
 
-然后 **重启 DSH**（Node 那一半在启动时装载），浏览器刷新一次（客户端那一半）。
+安装脚本支持任意 DSH home（用于同一台机器上并存多个 DSH 安装）：
 
-## 为什么是这几步
+```bash
+DSH_HOME=/path/to/dsh-home bash scripts/install-profile.sh <profile>
+```
 
-### 1. 组件必须放在 profile 的 `@dsh-plugin-agent-community/` 下，而且是**真目录**
+安装完成后 **重启 DSH**（Node 半边在宿主启动时装载），随后刷新一次页面（客户端半边）。
 
-bundle 的 `cordis.patch.yml` 用**模块名**挂载三行：
+## 安装后的验证
+
+```bash
+cd <DSH_HOME>/profiles/<profile>
+node <repo>/scripts/verify-install.mjs
+```
+
+该脚本会真加载三个入口并逐项检查：三个组件都能解析、`agent-community` 导出
+`AgentCommunityService`、`tool-agent-community` 与 `ui-agent-community` 导出 `apply`，
+且 profile 内不存在 `@deepseek-ai/*`（见下节规则）。全部通过才表示安装可用。
+
+## 必须遵守的规则
+
+### 组件必须位于 profile 的 `@dsh-plugin-agent-community/` 下，且是完整包目录
+
+bundle 的 `cordis.patch.yml` 以**模块名**挂载组件行：
 
 ```yaml
 - id: plugin-agent-community
   name: "@dsh-plugin-agent-community/agent-community"
 ```
 
-宿主 loader 按 profile 目录解析这些名字（`cordis-plugin-loader` 用 `ctx.baseUrl`），所以文件必须落在
-`~/.dsh/profiles/<profile>/node_modules/@dsh-plugin-agent-community/<组件>/` 里，且目录里要有
-**`package.json`**（`main`/`exports` 指向 `lib/index.js`）——只有 `lib/` 的话，`require`/`import` 解析不到包。
-`scripts/install-profile.sh` 只负责刷新 `lib/*` 字节，包目录本身要存在。
+宿主 loader 从 profile 目录解析这些名字，因此组件必须位于
+`<DSH_HOME>/profiles/<profile>/node_modules/@dsh-plugin-agent-community/<组件>/`，
+且目录内要有 `package.json`（`main`/`exports` 指向 `lib/index.js`）。只有 `lib/` 的目录在 Node 解析下
+不是一个包。`scripts/install-profile.sh` 会一并写入 `package.json`，因此单独运行即可产出可加载的包。
 
-### 2. ⛔ 绝对不要把 `@deepseek-ai/*` 装进 profile —— 这是 2026-10-15 那次事故的根因
+### 不要把 `@deepseek-ai/*` 安装进 profile
 
-我按前一节的推理手装了一套 `@deepseek-ai/dsh-*@0.2.0-rc.2` 到 profile，结果**把启动这个 profile 的运行时
-自带的同名包遮蔽掉了**。用 `npx @deepseek-ai/dsh`（0.1.2-rc.1）启动时直接炸：
+DSH 的包由**启动该 profile 的运行时**提供给插件（插件以 `peerDependencies` 声明）。把同名的包装进
+profile 会**遮蔽运行时自带的版本**，导致启动失败或功能异常，典型报错：
 
 ```
 parameter codec is not backed by a zod v4 schema
-    at requireStrictCodec (file://<host-prefix>/…/node_modules/…)
 ```
 
-连带症状：**无法创建原生会话、无法在原生会话发消息**，而且 Agent Teams 的行被挂载两次 →
-`tool "send_message" is already registered`。
+伴随症状包括无法创建原生会话、无法在原生会话发消息，以及 `tool "send_message" is already registered`
+（同名工具被挂载两次）。
 
-**规则**：profile 里只有你自己插件的包；DSH 的包由**启动这个 profile 的那个运行时**提供。
-插件声明的是 peerDependencies，装插件请用**同一个运行时**的插件管理器：
+安装插件请使用**启动该 profile 的同一个运行时**的插件管理器：
 
 ```bash
-dsh plugin --profile <profile> add <插件包或本地路径>     # 用启动该 profile 的那个 dsh
+<该运行时>/dsh plugin --profile <profile> add <插件包或本地路径>
 ```
 
-运行时的版本必须 ≥ 插件的 peer 要求（本插件 0.2.0 要求 `@deepseek-ai/dsh-* >= 0.2.0-rc.1`）。
-旧 CLI（0.1.2-rc.1）装不了本插件；要么升级运行时，要么别在那个运行时里用它。
+下列位置必须保持为空：
 
-### 2b. 三行 patch 挂的组件名必须在 profile 的 node_modules 里解析得到
+- `<profile>/node_modules/@deepseek-ai/`
+- `<DSH_HOME>/profiles/node_modules/`（profile 的上级目录）
 
-### 2c. 宿主会自己提供给插件 DSH 包 —— 别在任何解析路径上放它们
+第二种情况由 `npx @deepseek-ai/dsh …` 启动过 profile 时产生：它会在该位置生成一棵 hoisted 依赖树，
+并在解析顺序上抢先于运行时。若已存在，移出解析路径：
 
-**证据**：2026-10-11 到 10-15 插件在本机稳定工作，而这段时间
-`@deepseek-ai/dsh-typert-protocol` / `dsh-llm` / `dsh-atomic-write` **在 profile 及其任何上级目录里都不存在**
-（`~/.dsh/profiles/node_modules` 的 APFS 创建时间是 10-15 13:19，是后来才出现的）。
-也就是说这些包是**宿主自己提供给插件的**，profile 里放了只会遮蔽它。
+```bash
+mv <DSH_HOME>/profiles/node_modules <DSH_HOME>/profiles/node_modules.backup-$(date +%s)
+```
 
-所以下列位置都必须是"空的"：
+### 客户端半边变更后必须重启宿主
 
-- `<profile>/node_modules/@deepseek-ai/`（必须 0 项 —— 宿主自带的包被装进 profile 会遮蔽运行时，见校验脚本的检查）
-- `~/.dsh/profiles/node_modules/`（**profile 的上级目录**）：用 `npx @deepseek-ai/dsh` 启动过一次 profile 就会
-  生成这个 hoisted 树（223 个软链指向 npx 缓存里的那个版本），它会在解析顺序上抢先。实测 2026-10-15
-  它指向 **0.1.2-rc.1**，而 app 是 0.2.0-rc.2 —— 版本不匹配正是 typert 报
-  `parameter codec is not backed by a zod v4 schema` 的成因。清掉（或改名移出解析路径）：
+宿主在**启动时**登记客户端模块（带内容哈希）。只替换 `ui-agent-community/lib/client.js` 后刷新页面，
+页面会按旧哈希取到新文件，客户端半边加载失败，插件 UI 整体不再注册（侧边栏入口消失），热重挂也无法恢复。
+因此：
 
-  ```bash
-  mv ~/.dsh/profiles/node_modules ~/.dsh/profiles/node_modules.shadow-backup-$(date +%s)
-  ```
+- 只改 **Node 半边**（core / tools）→ 重启宿主；
+- 改了 **UI 半边**（`ui-agent-community`）→ 同样需要重启宿主，重启后再刷新页面；
+- 顺序固定为：`install-profile.sh` → 退出并重开 DSH → 刷新页面。
 
-### 2d. 安装脚本会连 `package.json` 一起放
+## 主会话工具默认关闭
 
-只有 `lib/` 的目录 Node 解析不到包（字节数看起来完全正常）——`scripts/install-profile.sh` 现在同时拷
-`package.json`，所以它单独就能产出一个可加载的包，不需要中间跑 pnpm。
+`cordis.patch.yml` 中 `plugin-tool-agent-community` 一行默认注释。该行会给**用户自己的主会话**注册
+`agent_community_post_message`、`task_decompose`、`submit_final`、`create_bot` 等工具，使主会话也能直接
+指挥房间，与「房间由 leader 协调」的模型重复。需要恢复时取消该行注释。
 
-### 3. 出问题时的清理顺序
+Bot 侧的协作工具不受影响：`agent_community_dispatch`、`assign_task`、`message_member`、`finish_task`、
+`invite_bot`、`remove_bot`、`propose_group` 由核心包注册进**每个 Bot 自己的作用域**。
 
-1. 从 profile 的 `bundles` 里去掉 `dsh-plugin-agent-collaboration`，并删掉它的 dependency；
-2. 删 `node_modules/dsh-plugin-agent-collaboration`；
-3. 跑一次 `pnpm install`（会按 package.json 重算依赖树）；
-4. **删掉手装进 profile 的 `node_modules/@deepseek-ai/`** —— 这是遮蔽源，留着就还会炸；
+## 卸载与回滚
+
+卸载顺序：
+
+1. 从 profile 的 `bundles` 中移除 `dsh-plugin-agent-collaboration`，并删除对应 dependency；
+2. 删除 `node_modules/dsh-plugin-agent-collaboration`；
+3. 运行一次 `pnpm install`，按 `package.json` 重算依赖树；
+4. 删除被手工安装进 profile 的 `node_modules/@deepseek-ai/`；
 5. 重启 DSH。
 
-### 4. 验证（不需要启动服务）
+回滚到安装前状态：解开安装前的 profile 备份（含 `package.json`、`cordis.patch.yml`、`pnpm-lock.yaml`
+及旧副本）覆盖回 profile，然后重启 DSH。
 
-```bash
-cd ~/.dsh/profiles/<profile>
-node -e '
-const {createRequire}=require("module");
-const r=createRequire(process.cwd()+"/probe.cjs");
-for (const m of ["agent-community","tool-agent-community","ui-agent-community"]) {
-  console.log(m, r.resolve("@dsh-plugin-agent-community/"+m));
-}'
-```
+## 运行时版本
 
-更严格的一步是**真加载**（模拟宿主 `import` 入口）；脚本在 `scripts/verify-install.mjs`。
-它必须报三个入口都 `ok`，并且 `agent-community` 导出 `AgentCommunityService`、`tool-agent-community` 导出
-`apply`/`inject`、`ui-agent-community` 导出 `apply`。
-
-## ⚠️ 改了「客户端半边」必须重启宿主，**只刷新页面会让入口消失**
-
-实测（2026-10-15）：app 于 14:35:52 启动，我在 14:44:35 覆盖了
-`ui-agent-community/lib/client.js`，随后只刷新页面 —— **侧边栏的「Bots团队」入口直接消失**。
-原因：宿主在**启动时**登记客户端模块（带内容哈希），页面刷新时按旧哈希去取新文件，客户端半边
-加载失败，插件 UI 就整体不注册了。热重挂也救不回来（插件管理器直接以 `ambiguous-install` 拒绝）。
-
-规则：
-
-- 只改 **Node 半边**（core / tools）→ 重启宿主即可；
-- 改了 **UI 半边**（`ui-agent-community`）→ 也**必须重启宿主**，重启后再刷新页面；
-- 顺序永远是：`install-profile.sh` → **退出并重开 DSH** → 刷新页面。
-
-## 恢复
-
-安装前的 profile 备份：`/tmp/ac-profile-backup-*.tar.gz`（含 `package.json`、`cordis.patch.yml`、
-`pnpm-lock.yaml`、旧的 `node_modules/@dsh-plugin` 与 bundle 副本）。要回退就解开覆盖回去，然后重启 DSH。
-
-## 主会话工具（tool-agent-community）默认关闭
-
-`cordis.patch.yml` 里 `plugin-tool-agent-community` 那一行**默认是注释掉的**：它给**用户自己的主会话**
-装上 `agent_community_post_message` / `task_decompose` / `submit_final` / `create_bot` 等工具，
-等于让主会话也能指挥房间，和"房间由 leader 协调"重复。需要恢复时把那行取消注释即可。
-
-Bot 侧的协作工具不受影响：`agent_community_dispatch` / `assign_task` / `message_member` / `finish_task` / `invite_bot` / `remove_bot` / `propose_group` 由核心包注册进
-**每个 Bot 自己的作用域**。
-
+本插件以 `peerDependencies` 声明对 DSH 包的要求，不锁定具体版本。运行时应满足插件的 peer 范围；
+过旧的运行时可能无法加载本插件的 bundle。运行时的选择与升级由 DSH 安装方式决定。

@@ -235,7 +235,7 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
   // `messages` is empty for it and the planner returns `undefined` without ever calling the host.
   // Nothing then re-ran this effect (the selection had not changed and the unread COUNT had not
   // changed either), so `roomReadAt` stayed empty for every room and the badge could never clear
-  // by opening a room. Measured: `state.roomReadAt` was undefined across the whole board.
+  // by opening a room. Observed: `state.roomReadAt` was undefined across the whole board.
   //
   // The dependency is a STRING, not the array: `snapshot.messages` is a fresh array on every poll,
   // and depending on it re-fired the RPC for ever (the request storm behind the blinking badges).

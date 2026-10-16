@@ -43,7 +43,7 @@ const INTERVENTION_HINTS = ['改成', '应该', '要这样', '按', '用', '而�
 /**
  * Phrases that mean the bot did NOT do the work.
  *
- * A REFUSAL MUST NEVER BE PROMOTED. Measured on a live group: the bot answered 「我认真试了两次，
+ * A REFUSAL MUST NEVER BE PROMOTED. Observed in a group: the bot answered 「我认真试了两次，
  * 不是推脱，是插件层面拦住了…要用 bot id，不是显示名」, the run counted as `completed` (it did
  * answer), and the repetition channel promoted that text as "做法" — so the instruction file then
  * taught the bot an outdated conclusion ("I cannot do this") that outlived the bug it described.

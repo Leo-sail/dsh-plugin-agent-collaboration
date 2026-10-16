@@ -99,7 +99,7 @@ function clipSkillBody(body: string): string {
  *
  * Timing matters: this runs at SUBMIT, in one synchronous pass, so the skill body
  * travels with the message instead of costing the bot an extra `skill` tool round
- * trip. Measured on a real turn, letting the model fetch the skill itself took
+ * trip. Observed on a real turn, letting the model fetch the skill itself took
  * 127s across five tool rounds versus ~3s for an ordinary reply.
  *
  * Token rules copied from the conversation bundle's `scanTextRefs`:

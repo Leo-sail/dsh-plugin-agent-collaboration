@@ -25,7 +25,7 @@ import { CommunityPage } from './CommunityPage.tsx'
 import { installNavBadge } from './navBadge.ts'
 // The native-conversation surface is deliberately NOT embedded: the plugin draws its own
 // transcript and composer from its own ledger. The two components that used to do that
-// (ConversationSlotPanel, RoomTranscriptView) were deleted on 2026-10-13 — they were imported
+// (ConversationSlotPanel, RoomTranscriptView) were deleted on  — they were imported
 // nowhere and only kept a typecheck surface alive.
 
 // the native conversation surface is no longer embedded (see the registration

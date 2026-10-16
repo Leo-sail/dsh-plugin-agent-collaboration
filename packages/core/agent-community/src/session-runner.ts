@@ -213,7 +213,7 @@ const OWNED_SEP = ':'
  *     bot keeps the working card while the host's UI-bound version stays hidden.
  *
  * The rest is the room-bot tool surface: every entry brings system-prompt guidance that
- * assumes a role a Bot in a room does not have. Measured on a real bot session before this
+ * assumes a role a Bot in a room does not have. Observed on a real bot session before this
  * list existed: `workflow`, `subagent`, `subagent_fork`, `create_goal`/`get_goal`/
  * `update_goal`, `present`, `exit_plan_mode`, `list_agents`, `send_message` and
  * `interrupt_agent` were all in the catalog, and their paragraphs were in the prompt.
@@ -585,7 +585,7 @@ export class SessionRunner {
       for (let attempt = 0; attempt <= turns; attempt++) {
         // ── IT MAY HAVE LEFT THE ROOM DURING THE PREVIOUS ATTEMPT ────────────────
         //
-        // Measured on a live group: the user asked to remove the coordinator, the coordinator
+        // Observed in a group: the user asked to remove the coordinator, the coordinator
         // executed it (the fix that made that possible), the service stopped this run and retired
         // the session — and the loop then spent THREE repair attempts talking to a session being
         // torn down, ending in "model produced no visible answer text". The bot had done exactly
@@ -731,7 +731,7 @@ export class SessionRunner {
     //
     // It used to search the WHOLE history, so a turn that produced no text at all —
     // a failed model call, most of all — returned the PREVIOUS turn's answer as if it
-    // were this one's. Measured on a session whose provider was misconfigured: 60+
+    // were this one's. Observed on a session whose provider was misconfigured: 60+
     // consecutive turns ended in `turn/end {kind: error, "… request failed (404)"}`,
     // and every one of them still published the same stale reply ("ATTACH-PROBE-4871")
     // while the run reported `completed`. The user sees a bot that answers every
@@ -846,7 +846,7 @@ export class SessionRunner {
       // The deny ran in `setup` when the agent was created, but the Agent Teams tools
       // (`list_agents`, `send_message`, `interrupt_agent`) are mounted by the profile's
       // `tool-agent-team` row AFTER that, into the same scope — and a restriction that ran before
-      // a tool existed cannot hide it. Measured: those three sat in a bot's catalog while
+      // a tool existed cannot hide it. Observed: those three sat in a bot's catalog while
       // `botDeniedTools` listed all three. Re-applying here, on every request, closes the ordering
       // hole; already-applied names are skipped so DSH's append-only restriction list cannot grow
       // without bound, and previously-skipped names are retried in case they registered late.
@@ -1548,7 +1548,7 @@ export function restrictGlobalTools(
       //
       // `tools.restrict()` validates the ENTIRE filter first and rejects the call when any
       // name is unknown to the scope ("names unknown global tool ...; known global tools:"),
-      // and the old code called it once inside a bare `catch {}`. Measured on a real bot
+      // and the old code called it once inside a bare `catch {}`. Observed on a real bot
       // session: its tool catalog still listed `ask_user_question` and `skill` even though
       // both sat in `botDeniedTools` — one name the scope did not know about (the plugin
       // registers its OWN tool of that name after this runs) discarded the whole mask.

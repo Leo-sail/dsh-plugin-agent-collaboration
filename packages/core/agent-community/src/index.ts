@@ -1338,7 +1338,7 @@ export class AgentCommunityService extends TypertRemoteService {
     //
     // A read water mark from before marks carried a time, whose message was later deleted
     // (compaction), can never be interpreted — and reading it as "read everything" keeps
-    // that room's unread dot off for ever. Measured on a real board: a group with three bot
+    // that room's unread dot off for ever. Observed on a real board: a group with three bot
     // replies reported no unread because its mark pointed at a compacted-away message. New
     // marks carry their time; this repairs the ones that cannot, at load time.
     // ── MEMORY FILES: load the mirror, migrate a board that still inlines it ────
@@ -1716,7 +1716,7 @@ export class AgentCommunityService extends TypertRemoteService {
     }
     // ── ONE REQUEST, ONE GROUP ──────────────────────────────────────────────────
     //
-    // A Bot may not create a GROUP room, whichever room it is working in. Measured failure: the
+    // A Bot may not create a GROUP room, whichever room it is working in. Failure mode: the
     // user asked a 1:1 bot to pull a group together, the panel's post-send analysis proposed one
     // (the user confirmed it), and the bot — still inside its own turn — called this very method
     // through `agent_community_create_room` and built a SECOND group. The bot's sanctioned path is
@@ -1861,7 +1861,7 @@ export class AgentCommunityService extends TypertRemoteService {
     //
     // `memberIds` alone was not enough: a bot kicked before the room was deleted kept its
     // partition in the live tree forever — the room was gone, and no archive entry was written
-    // for it either. Measured on 2026-10-16 with a temp group whose kicked member still had a
+    // for it either. Observed with a temp group whose kicked member still had a
     // 535-byte memory file after the group was deleted. The user's rule is that deleting a room
     // keeps what the bots learned there, which is about the room's history rather than about who
     // happened to be a member at the end.
@@ -1980,7 +1980,7 @@ export class AgentCommunityService extends TypertRemoteService {
       if (mentionOnly && !message.mentions.includes(botId)) {
         // ── A NAME IN THE TEXT IS A DIRECTIVE TOO ────────────────────────────────
         //
-        // Measured through the UI (2026-10-16): with 仅在被 @ 时响应 on, a user who TYPES
+        // Observed in the UI: with 仅在被 @ 时响应 on, a user who TYPES
         // `@fghj 你看一下` got silence — the composer only produces `message.mentions` when the
         // mention is picked from the menu, so a hand-typed @name arrives as plain text and this
         // filter dropped it. The router itself treats a written name as targeted (its own name
@@ -3090,7 +3090,7 @@ export class AgentCommunityService extends TypertRemoteService {
     //
     // A run's reply can be addressed to a peer, and waking that peer starts a run whose
     // OWN reply can be addressed back — so two bots left alone held an unbounded
-    // conversation. Measured on a real room: the user's "@A 你跟 B 打个招呼" produced
+    // conversation. Observed in a room: the user's "@A 你跟 B 打个招呼" produced
     // A → B → A → B → A, five extra turns of invented collaboration detail
     // ("Token 交付契约 / 差异轴 / 互评机制") that nobody asked for, and every reply was
     // posted twice.

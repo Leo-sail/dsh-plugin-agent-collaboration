@@ -100,7 +100,7 @@ export function unreadByRoom(
      * what the user counts on screen, and it covers both ways a single reply became two rows:
      *
      *   · the run's own answer (which carries a `runId`) PLUS a message the bot posted itself
-     *     through `agent_community_post_message`, which has no run id at all. Measured on a
+     *     through `agent_community_post_message`, which has no run id at all. Observed on a
      *     real board: three bots answered one 「你好」 and the group showed 4 unread, because
      *     one of them had done exactly that;
      *   · a bot that runs twice for one prompt, which a run-only key counted twice.

@@ -470,7 +470,7 @@ export class GroupFlowService {
         // ── THE COORDINATOR MAY REMOVE ITSELF ────────────────────────────────────
         //
         // This used to refuse self-removal, on the theory that "leaving is a different action".
-        // Measured on a live group: the user asked to remove the coordinator, the request was
+        // Observed in a group: the user asked to remove the coordinator, the request was
         // routed to the coordinator (correct — it is the only bot that may remove anybody), and
         // the room then had NO path to carry it out. The user asked for it explicitly, so it is
         // not an accident; leadership passes to the first remaining member.

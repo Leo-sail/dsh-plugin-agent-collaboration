@@ -10,7 +10,7 @@
  *     … return { error: apiSessionSubagentOwnershipError(sessionId) }
  *
  * Bot sessions are exactly that — the plugin creates them as subagent sessions so they stay out
- * of the user's sidebar. Measured on the real host: a reminder created at 04:31:44 (due
+ * of the user's sidebar. Observed on the host: a reminder created at 04:31:44 (due
  * 04:33:44) stayed `status: "active"`, `lastDelivery: null`, and not one event reached the
  * session; the host only wrote an unpersisted `logger.warn`.
  *
@@ -65,7 +65,7 @@ export interface BotSchedule {
  *
  *   {"id":"schedule-8cb49253-…","kind":"after","title":"2分钟后发送「你好」",
  *    "prompt":"现在发送消息：你好…","afterSeconds":120,
- *    "scheduledAt":"2026-10-13T08:33:44.224Z","sessionId":"ac:…:g14","status":"active"}
+ *    "scheduledAt":"","sessionId":"ac:…:g14","status":"active"}
  *
  * `ScheduleCatalogEntry` is `ScheduleRecord & { sessionId, status, lastDelivery? }`, so every
  * record field sits at the TOP level. The first version of this file read `row.record.scheduledAt`

@@ -1,6 +1,6 @@
-## 0.2.1 — 真机验收后的修复（2026-10-16）
+## 0.2.1 — 修复
 
-真机（CDP 驱动真实界面）逐项验收 35 项清单时抓到的缺陷，全部修复并逐条复验。
+本版本修复以下问题，每一项都在真实环境中复验过。
 
 
 ### 修复
@@ -42,7 +42,7 @@
 
 ### 工具面
 
-- **修复黑名单根本没生效**：`tools.restrict()` 会因**任一未知名字**让整次调用失败，而插件只调一次并吞掉异常 —— 实测 Bot 目录里 `ask_user_question`、`skill` 明明在黑名单里却仍在。现在**逐名调用**、单项失败只损失那一个名字，并把 `applied/skipped` 写进日志。
+- **修复黑名单根本没生效**：`tools.restrict()` 会因**任一未知名字**让整次调用失败，而插件只调一次并吞掉异常 —— Bot 目录里 `ask_user_question`、`skill` 在黑名单里却仍然出现。现在**逐名调用**、单项失败只损失那一个名字，并把 `applied/skipped` 写进日志。
 - 默认黑名单收敛为完整的"房间 Bot 工具面"：`plugin_manager`、`workflow`、`subagent*`、`goal` 三件套、`present`、`exit_plan_mode`、`load_workspace_dependencies`、Agent Teams 三件套。
 - 插件自己注册的同名工具（提问卡、skill 包装）**仍然可用** —— DSH 规定作用域内注册不会被全局禁用遮蔽。
 

@@ -273,7 +273,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // ── TELL THE MODEL WHEN IT JUST DUPLICATED ITSELF ───────────────────────────
       //
       // The answer this run produces is published automatically, so an undirected post made
-      // while the bot is still answering is a second copy of it. Measured: a bot answered a
+      // while the bot is still answering is a second copy of it. Observed: a bot answered a
       // greeting and then posted the same text, and the user saw two replies to one message
       // (「群聊内的 bot 会对我的消息回复两次，这简直有病」). The tool description and the
       // group prompt both say not to do this; this line is what a session that already

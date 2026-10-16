@@ -1,7 +1,7 @@
 /**
  * Who may create which kind of room.
  *
- * ONE REQUEST, ONE GROUP. Measured failure this exists for: in a direct chat the user wrote
+ * ONE REQUEST, ONE GROUP. Failure mode: in a direct chat the user wrote
  * 「你们两个拉个群打个招呼」, the panel's post-send analysis recorded a group proposal for it
  * (the user then confirmed → group A), and the direct-chat bot — still inside its own turn —
  * called `agent_community_create_room` and built group B. Two rooms, one sentence, and the other
@@ -56,7 +56,7 @@ export function screenRoomCreation(
   if (actor.kind === 'user') {
     // ── A GROUP WITH NOBODY IN IT CAN NEVER BE USED ───────────────────────────
     //
-    // Measured through the UI (2026-10-16): the 新建群聊 dialog happily created a group with
+    // Observed in the UI: the 新建群聊 dialog happily created a group with
     // zero members ticked. Such a room has no leader (`leaderOfRoom` falls back to the first
     // member, and there is none), so no message can ever be routed or answered — the user gets a
     // room that silently does nothing. The UI is where it was created, but this is the one place

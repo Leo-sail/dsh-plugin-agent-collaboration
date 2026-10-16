@@ -176,7 +176,7 @@ task board and peer messaging, so this bundle mounts only what has no in-box equ
 side by side without either disabling the other.
 
 An older `@dsh-plugin-agent-community/agent-team` fork (with its `tool-` and `ui-` packages) used to live in this repo
-unmounted and unbuildable; it was removed on 2026-10-14.
+unmounted and unbuildable; it has been removed.
 
 ## Screenshots
 

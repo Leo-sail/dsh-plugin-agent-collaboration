@@ -87,7 +87,7 @@ ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/
 > 0.2.0 的改动见 [CHANGELOG.md](CHANGELOG.md)，装好后的自测步骤见 [ACCEPTANCE.zh-CN.md](ACCEPTANCE.zh-CN.md)。
 
 把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
-这个 DSH 插件装进我的 DSH profile，重启 DSH，并确认侧栏出现「Bots团队」。
+把本插件装进目标 DSH profile，重启 DSH，并确认侧栏出现「Bots团队」。
 ```
 
 ## 使用
@@ -151,7 +151,7 @@ $DSH_HOME/agent-community/workspaces/<bot>  每个 Bot 的工作区，附件也�
 本仓库只发布 **Community** 这一半。DSH 内置的 Agent Teams bundle 负责队友、共享任务板与点对点消息，
 所以本 bundle 只挂载**内置版没有对应物**的部分。两者可以并存，不需要关掉任何一个。
 
-仓库里曾经有一个未挂载、也无法构建的 `@dsh-plugin-agent-community/agent-team` 分支（连同它的 `tool-`、`ui-` 包），已于 2026-10-14 删除。
+仓库里曾经有一个未挂载、也无法构建的 `@dsh-plugin-agent-community/agent-team` 分支（连同它的 `tool-`、`ui-` 包），已删除。
 
 ## 截图
 

@@ -76,14 +76,14 @@
     # renaming in a future DSH version will not break the executor.
 
     # The legacy `agent-team` fork's rows used to live here. Its three packages were removed on
-    # 2026-10-14 (never mounted, never built — see pnpm-workspace.yaml), so there is nothing left to
+    #  (never mounted, never built — see pnpm-workspace.yaml), so there is nothing left to
     # enable: this bundle mounts the Community packages only.
 
 # ── THE BOT AGENT PRESET ─────────────────────────────────────────────────────
 #
 # This deployment declares agent presets as PLUGIN ROWS (`@deepseek-ai/dsh-agent-preset` with
 # `config.plugins`), not as directories under <DSH_HOME>/.agent-presets — that directory belongs
-# to `dsh-agent-presets`, which this deployment does not mount. Measured: with the directory in
+# to `dsh-agent-presets`, which this deployment does not mount. Observed: with the directory in
 # place the mount still failed with `RemoteError: Unknown agent preset: bot`, because the roster
 # never looked there.
 #
@@ -91,7 +91,7 @@
 # carries `workflow`, `subagent`/`subagent_fork`, `create_goal`/`update_goal`, `present`,
 # `exit_plan_mode`, `list_agents`, `send_message` and `interrupt_agent`. The plugin tried to hide
 # them with `ctx.tools.restrict({deny})` and could not — DSH keeps a scope-local registration
-# visible through a global deny, and a preset mounts these per agent. Measured: 11 of them
+# visible through a global deny, and a preset mounts these per agent. Observed: 11 of them
 # survived; only `plugin_manager` (a host tool) went away.
 #
 # What a bot keeps: files, shell, search, skills, todos, web, session compaction. What is

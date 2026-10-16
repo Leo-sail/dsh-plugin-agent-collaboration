@@ -17,7 +17,7 @@
  * cannot cover what is on screen (the replies arrived AFTER the room was opened — deliberately
  * still unread, see README §17) is refused host-side, so the entry came back on the next poll and
  * the badge flipped for ever: reported as 「bots团队入口处的未读消息和侧栏的群聊都会一直闪烁」.
- * Measured on the real modules: ten poll cycles produced nineteen flips and ten local deletes,
+ * Observed on the real modules: ten poll cycles produced nineteen flips and ten local deletes,
  * where the fixed version produces none.
  *
  * Three rules kill that, and all three live here so they can be tested without a DOM:

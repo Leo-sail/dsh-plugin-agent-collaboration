@@ -5,7 +5,7 @@
 # `create_goal`/`update_goal`, `present`, `exit_plan_mode`, `list_agents`, `send_message`,
 # `interrupt_agent`. The plugin tried to HIDE those with `ctx.tools.restrict({deny})` and could
 # not: DSH keeps a scope-local registration visible through a global deny, and these rows are
-# mounted per agent by the preset, not by the host. Measured on 2026-10-16, the deny list left
+# mounted per agent by the preset, not by the host. Observed on , the deny list left
 # 11 of them in place; only `plugin_manager` (a genuine host tool) disappeared.
 #
 # A preset is the mechanism DSH provides for exactly this: the session's tools ARE what its

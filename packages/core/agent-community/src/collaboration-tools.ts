@@ -293,7 +293,7 @@ export function registerCollaborationTools(
     // ── ONE COLLISION MUST NOT COST THE OTHER TOOLS ─────────────────────────────
     //
     // `tools.register` throws when the name is already taken IN THIS SCOPE, and this scope is
-    // the agent's — where the deployment preset has already mounted its own tools. Measured on
+    // the agent's — where the deployment preset has already mounted its own tools. Observed on
     // a real install: the bot lost `agent_community_dispatch`, `agent_community_goal` and
     // `agent_community_recall` (every tool registered after the clashing one) and the host
     // surfaced the collision as a plugin failure, which the user saw as "the plugin broke my
@@ -331,7 +331,7 @@ export function registerCollaborationTools(
       //
       //   Invalid schema for function 'agent_community_recall': true is not of type "array"
       //
-      // Measured on a live bot: the request failed in 200ms and the room showed NO reply at all —
+      // Observed in a bot session: the request failed in 200ms and the room showed NO reply at all —
       // every tool is sent with every request, so ONE malformed tool silences the bot completely.
       // Normalise here, at the single place every tool goes through.
       parameters: {
@@ -412,7 +412,7 @@ export function registerCollaborationTools(
   // This used to register a tool named `get_goal` to re-point the host's goal tool at the room.
   // It cannot work: `tools.register` refuses a name that already exists in the scope, and the
   // deployment preset mounts `get_goal` per agent — so the registration threw, and (before the
-  // per-tool guard above) took the rest of the room's tools with it. Measured on a real install:
+  // per-tool guard above) took the rest of the room's tools with it. Observed on a real install:
   // `tool "get_goal" is already registered (for a per-agent variant, register through that
   // agent's agent.ctx instead)`.
   //
@@ -643,7 +643,7 @@ export function registerCollaborationTools(
       if (refs.length === 0) return { value: { ok: false }, text: 'botIds is required' }
       // ── NAMES ARE THE NATURAL INPUT, SO RESOLVE THEM ─────────────────────────
       //
-      // Measured on a live group: the user asked to remove a member, the model passed the
+      // Observed in a group: the user asked to remove a member, the model passed the
       // member's NAME (what the room shows, and what the user typed), and the service answered
       // "not a member of this group" — because this tool only ever accepted ids. The dispatch
       // tool has resolved names from the start; this one must too, or the removal path is
@@ -736,7 +736,7 @@ export function registerCollaborationTools(
       //
       // The previous text said "用你自己的判断继续，并在回复里说明你替他做的选择" — so a bot that asked
       // "想让我先做哪个？" and got no answer took that as permission and built a whole deliverable
-      // nobody asked for. Measured on the real host: the user said only 你好, the question was never
+      // nobody asked for. Observed on the host: the user said only 你好, the question was never
       // answered (and the run was cancelled), and the bot wrote an entire brand package
       // (aurora-brand/tokens.css + three banner pages) before anyone could stop it.
       //

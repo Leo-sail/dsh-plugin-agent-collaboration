@@ -37,7 +37,7 @@ export interface PersistedState {
    *
    * Without it the loop re-imports a delivered reminder: the entry leaves `botSchedules` the
    * moment it fires, while the host row is only settled a moment later (an async delete), so the
-   * next 5-second scan sees a due row it has never seen before and delivers it AGAIN. Measured on
+   * next 5-second scan sees a due row it has never seen before and delivers it AGAIN. Observed on
    * the real host: one reminder produced two runs 5 seconds apart, and the bot itself reported
    * "这条是重复投递的提醒". Bounded to the most recent ids.
    */

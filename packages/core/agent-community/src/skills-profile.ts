@@ -102,7 +102,7 @@ export interface LlmChunk {
  * "(TRANSPORT) DeepSeek Messages transport failed" with no cause, which reads like a
  * network problem and is why this stayed undiagnosed.
  *
- * Measured: the room compactor hit it four times while being written; fixing the shape in
+ * Observed: the room compactor hit it four times while being written; fixing the shape in
  * its own module made summaries work. Every other direct caller (group proposals via
  * `group-flow`, skill profiles here) was still sending strings and was therefore dead on
  * this build — they all go through this type, so correcting it here fixes them together.

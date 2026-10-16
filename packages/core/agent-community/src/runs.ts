@@ -1017,7 +1017,7 @@ export class RunExecutor {
     // ── 没有要求就不要开工 ────────────────────────────────────────────────────────────────────────
     // Stated on EVERY turn, not just when a question is pending: a bot that treats an unanswered
     // question (or a bare greeting) as permission to start building produces work nobody asked for.
-    // Measured live: the user said only 你好, left the question card alone, and the bot wrote a whole
+    // Observed: the user said only 你好, left the question card alone, and the bot wrote a whole
     // brand package. Asking is encouraged; acting without an answer is not.
     // ── THE PER-TURN BLOCKS ARE DYNAMIC ONLY ────────────────────────────────────
     //

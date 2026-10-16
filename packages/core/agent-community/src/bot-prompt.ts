@@ -6,7 +6,7 @@
  * mounted tool's guidance, the Web GUI address, the DSH checkout path, and the instructions
  * for Agent Teams / workflow / subagents / goals. A Bot in a room is none of those things —
  * it answers in a room, may coordinate a few members, and must not leak one room into
- * another. Measured on a real bot session: all of that guidance was in the prompt, and none
+ * another. Observed in a bot session: all of that guidance was in the prompt, and none
  * of it described what a room Bot actually does.
  *
  * HOW IT IS INSTALLED. `@deepseek-ai/dsh-system-prompt` exposes `section({name, order, text})`
@@ -65,7 +65,7 @@ export interface BotPromptIdentity {
   /**
    * Whether THIS bot is the room's coordinator (its leader).
    *
-   * Measured on a live group: the user asked to remove a member, the leader was the bot itself,
+   * Observed in a group: the user asked to remove a member, the leader was the bot itself,
    * and it answered "我自己做不到，只有队长能执行" — because nothing in its prompt said it WAS the
    *队长. It then asked `list_agents` (an Agent Teams tool that has nothing to do with the room)
    * and concluded from that roster that it was not in charge. Authority a bot cannot see is
