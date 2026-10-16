@@ -557,13 +557,6 @@ export class AgentCommunityService extends TypertRemoteService {
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'agentCommunity')
-    // ── THE FIRST THING THE CONSTRUCTOR DOES ────────────────────────────────────
-    //
-    // Startup used to be instrumented only AFTER an `await`, which made a rejected await
-    // indistinguishable from code that never loaded: everything below it — including
-    // `executor.start()` — silently did not run, runs queued for ever, and no log existed to say
-    // why. The trace now begins before any await and records each step.
-    this.bootTrace('constructor entered')
     this.cfg = {
       maxBots: config.maxBots ?? 32,
       maxRooms: config.maxRooms ?? 64,
@@ -592,15 +585,12 @@ export class AgentCommunityService extends TypertRemoteService {
     this.statePath = join(this.home, 'agent-community', 'state.json')
     // The memory root sits beside the board, for the same reason: everything the plugin owns
     // lives under one directory, so a user can find (or remove) all of it in one place.
-    this.bootTrace('before memoryStore')
     this.memoryStore = new MemoryStore(join(this.home, 'agent-community', 'memory'))
     this.sessionsDir = config.sessionsDir !== undefined
       ? resolve(config.sessionsDir.replace(/^~(?=[/\\]|$)/u, homedir()))
       : join(this.home, 'sessions')
     // P0-2: Ledger projector — in-memory store, shared with RunExecutor and ApprovalBridge
-    this.bootTrace('before ledger')
     this.ledger = new LedgerProjector(this)
-    this.bootTrace('before skills')
     this.skills = new SkillLifecycle({
       scan: roomId => this.listSkills(roomId),
       statFile: async (path) => {
@@ -612,7 +602,6 @@ export class AgentCommunityService extends TypertRemoteService {
       stream: () => this.directStream(),
       logger: this.ctx.logger as unknown as { info?(...a: unknown[]): void; warn?(...a: unknown[]): void },
     })
-    this.bootTrace('before groupFlow')
     this.groupFlow = new GroupFlowService(this.groupFlowPort(), {
       proposalTimeoutMs: this.cfg.groupProposalTimeoutMs,
     })
@@ -661,7 +650,6 @@ export class AgentCommunityService extends TypertRemoteService {
       // Native session driver. Built before the executor so the executor can be
       // handed a runner that is fully wired — an executor that starts runs against a
       // half-initialised runner would materialise agents with no tools registered.
-      this.bootTrace('before new SessionRunner')
       const runner = new SessionRunner(ctx, {
         // WHO IS IN CHARGE, told to each bot: the coordinator may invite/remove/dispatch/finish.
         leaderOf: (roomId) => this.leaderOfRoom(roomId),
@@ -763,8 +751,6 @@ export class AgentCommunityService extends TypertRemoteService {
         hardLimit: config.hardLimit ?? 24,
       })
       this.sessionRunner = runner
-
-      this.bootTrace('before new LedgerProjection{')
       this.ledgerProjection = new LedgerProjection({
         ledger: this.ledger,
         botName: (botId) => this.state.bots.find(b => b.id === botId)?.name ?? botId,
@@ -793,8 +779,6 @@ export class AgentCommunityService extends TypertRemoteService {
         },
       })
       this.ledgerProjection.install(ctx)
-
-      this.bootTrace('before new GroupTaskDriver{')
       this.groupTask = new GroupTaskDriver({
         enqueueRun: (roomId, botId, prompt) => this.enqueueGroupRun(roomId, botId, prompt),
         roomById: (roomId) => {
@@ -837,8 +821,6 @@ export class AgentCommunityService extends TypertRemoteService {
           return fromRoomTaskState(room?.taskState)
         },
       })
-
-      this.bootTrace('before new RunExecutorctx, this, {')
       this.executor = new RunExecutor(ctx, this, {
         // ── GROUP MEMBERS RUN TOGETHER ─────────────────────────────────────────
         //
@@ -868,13 +850,12 @@ export class AgentCommunityService extends TypertRemoteService {
       // user creates queues for ever, which is exactly the state this trace was written to find.
       try {
         await this.maintenance.sweepPluginSessions()
-      } catch (error: unknown) {
-        this.bootTrace(`sweep FAILED (continuing): ${error instanceof Error ? error.message : String(error)}`)
+      } catch {
+        // A failing cleanup must never prevent the executor from starting: without it every run
+        // the user creates queues for ever.
       }
-      this.bootTrace(`executor=${this.executor === undefined ? 'missing' : 'created'}`)
 
       void this.executor.start()
-      this.bootTrace('executor started')
       // ── PROOF OF LIFE ────────────────────────────────────────────────────────
       //
       // One line at mount time, in a file a human can read. A queued run that never starts has two
@@ -3986,20 +3967,6 @@ export class AgentCommunityService extends TypertRemoteService {
     }
   }
 
-  /**
-   * One line per startup step, written where it cannot be swallowed.
-   *
-   * `/tmp` first (no path resolution that could fail), then the plugin's home, then the logger.
-   * This exists because a half-initialised service is invisible from outside: the RPC surface works,
-   * the panel looks fine, and the only symptom is that nothing ever runs.
-   */
-  private bootTrace(step: string): void {
-    const home = this.home
-    const line = `${new Date().toISOString()} boot pid=${String(process.pid)} home=${String(home)} ${step}\n`
-    try { appendFileSync('/tmp/ac-boot.log', line) } catch { /* nothing else to do */ }
-    try { appendFileSync(join(home, 'agent-community', 'boot.log'), line) } catch { /* ditto */ }
-    try { this.ctx.logger?.info?.(`agent-community: ${line.trim()}`) } catch { /* ditto */ }
-  }
 
   /** The bot's own workspace, used when a bot record has none. */
   private async defaultBotWorkspace(): Promise<string> {

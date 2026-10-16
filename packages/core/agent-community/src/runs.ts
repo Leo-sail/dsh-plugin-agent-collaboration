@@ -7,8 +7,6 @@
  * never appear there. `ctx.llm.stream()` plus the in-process ToolRunner keeps the
  * entire loop inside the plugin, with the ledger as its only record.
  */
-import { appendFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
@@ -694,23 +692,6 @@ export class RunExecutor {
     this.handles.clear()
   }
 
-  /**
-   * Record what the executor is doing, in a file a human can read.
-   *
-   * WHY. `tick()` launches each run with `void this.driveRun(run)` — fire and forget. A rejection
-   * that happens before the run is claimed therefore leaves it `queued` for ever: the panel shows
-   * 排队中, the stale-queue sweep eventually cancels it, and nothing anywhere says why. A queued run
-   * that never starts is indistinguishable from a slow one, which is exactly the report that
-   * produced this method.
-   */
-  private diag(line: string): void {
-    try {
-      const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-      appendFileSync(join(home, 'agent-community', 'run.log'), `${new Date().toISOString()} ${line}\n`)
-    } catch {
-      // Diagnostics must never break a run.
-    }
-  }
 
   /** Wake up immediately (called after sendMessage creates new runs). */
   nudge(): void {
@@ -730,21 +711,17 @@ export class RunExecutor {
     if (this.disposed) return
     try {
       const slots = this.maxConcurrent - this.active.size
-      const queued = this.svc.listRuns().filter(r => r.status === 'queued').length
-      if (queued > 0) this.diag(`tick slots=${String(slots)} active=${String(this.active.size)} queued=${String(queued)}`)
       if (slots > 0) {
         // Reclaim the queue from runs that will never start before handing slots out,
         // or a stuck run keeps consuming one on every pass.
         await this.cancelStaleQueuedRuns()
         const candidates = this.pickQueued(slots)
         for (const run of candidates) {
-          this.diag(`launch run=${run.id} bot=${run.botId} attempt=${String(run.attempt)}`)
           // NOT JUST fire-and-forget: an unhandled rejection here used to leave the run queued
           // for ever with no trace anywhere. Record it and settle it as a real failure, so the
           // panel shows the reason instead of an eternal 排队中.
           void this.driveRun(run).catch((error: unknown) => {
             const msg = error instanceof Error ? error.message : String(error)
-            this.diag(`drive FAILED run=${run.id} error=${msg}`)
             this.active.delete(run.id)
             void this.svc.settleRun({
               id: run.id,
