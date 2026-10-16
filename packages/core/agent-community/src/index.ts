@@ -761,6 +761,11 @@ export class AgentCommunityService extends TypertRemoteService {
         // of a normal flow (create a group and greet) is exactly two replies: the bot that ran
         // it, and the bot that was pulled in. This is what tells the projection which turns are
         // internal so it creates no rows for them.
+        runSilentFor: (roomId, botId) => {
+          const run = this.state.runs.find(r => r.roomId === roomId && r.botId === botId
+            && (r.status === 'queued' || r.status === 'running'))
+          return run !== undefined && this.silentRuns.has(run.id)
+        },
         runOriginFor: (roomId, botId) => this.state.runs
           .find(r => r.roomId === roomId && r.botId === botId
             && (r.status === 'queued' || r.status === 'running'))?.origin,
@@ -832,6 +837,9 @@ export class AgentCommunityService extends TypertRemoteService {
           return fromRoomTaskState(room?.taskState)
         },
       })
+      // Runs whose turn was suppressed: the room must not show them AT ALL — suppressing only the
+      // persisted message left the run's streamed answer in the ledger, which is what the
+      // panel renders, so the reply still appeared (and a report appeared instead of it).
       this.executor = new RunExecutor(ctx, this, {
         // ── GROUP MEMBERS RUN TOGETHER ─────────────────────────────────────────
         //
@@ -2550,6 +2558,7 @@ export class AgentCommunityService extends TypertRemoteService {
       .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
     const alreadySpoke = instructionAt !== '' && this.state.messages.some(m => m.roomId === prev.roomId
       && m.sender.kind === 'bot' && m.sender.botId === prev.botId && m.createdAt > instructionAt)
+    if (alreadySpoke) this.silentRuns.add(prev.id)
     if (!alreadySpoke && input.reply !== undefined && replyText.trim() !== '') {
       // B-2: use the real session id from roomAgentSessions rather than
       // prev.sessionId, which is often a stale UUID that has no session directory.
@@ -3084,6 +3093,9 @@ export class AgentCommunityService extends TypertRemoteService {
   }
 
   /** Post a message from a Bot, with optional a2a direct delivery. */
+  /** Run ids whose turn must not be rendered at all. */
+  private readonly silentRuns = new Set<string>()
+
   async postBotMessage(input: PostBotMessageRequest & { internal?: boolean }): Promise<BotMessage> {
     const room = requireRoom(this.state, input.roomId)
     // Resolve sender bot from session id
