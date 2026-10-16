@@ -1185,6 +1185,22 @@ export class AgentCommunityService extends TypertRemoteService {
       finishTask: (input) => {
         void this.groupTask?.finish({ roomId: input.roomId, report: input.report })
       },
+      // A member's direct message. The existing post path already knows how to deliver to one bot
+      // (`toBotName` → a mailbox entry with origin 'a2a'), so this is only the tool-side adapter:
+      // the sender's session is derived from the pair, never from the model.
+      messageMember: async (input) => {
+        try {
+          await this.postBotMessage({
+            roomId: brandId<BotRoomId>(input.roomId),
+            senderSessionId: this.sessionIdFor(input.roomId, input.botId),
+            text: input.text,
+            toBotName: input.toName,
+          })
+          return { ok: true }
+        } catch (error: unknown) {
+          return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+        }
+      },
       roomGoal: (input) => {
         const goal = this.roomGoal(input.roomId)
         return goal === undefined

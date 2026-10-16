@@ -228,6 +228,26 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
    * the request storm behind the blinking badges. Messages now reach `markReadRef` through a ref,
    * which is what the planner needs and nothing more.
    */
+  // ── THE ANCHOR THE PLANNER NEEDS, AS A DEPENDENCY ────────────────────────────
+  //
+  // `planMarkRead` needs a target message: the newest one that existed when the room was opened.
+  // On the first pass it has NOTHING to aim at — the ledger for the room is still loading, so
+  // `messages` is empty for it and the planner returns `undefined` without ever calling the host.
+  // Nothing then re-ran this effect (the selection had not changed and the unread COUNT had not
+  // changed either), so `roomReadAt` stayed empty for every room and the badge could never clear
+  // by opening a room. Measured: `state.roomReadAt` was undefined across the whole board.
+  //
+  // The dependency is a STRING, not the array: `snapshot.messages` is a fresh array on every poll,
+  // and depending on it re-fired the RPC for ever (the request storm behind the blinking badges).
+  // A string only changes when the room's newest message does, which is exactly when a retry is
+  // worth making; repeats are already suppressed by the planner's `lastMarkedAt` guard.
+  const selectedNewestAnchor = (() => {
+    if (selectedId === undefined) return ''
+    let newest: { readonly id: string; readonly createdAt: string } | undefined
+    for (const m of snapshot?.messages ?? []) if (m.roomId === selectedId) newest = m
+    return newest === undefined ? '' : `${newest.id}@${newest.createdAt}`
+  })()
+
   useEffect(() => {
     // Only a room the user actually opened counts as read. An auto-selected room is on
     // screen, but the user never chose it — and marking it read is what made a group's
@@ -235,7 +255,7 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
     if (selectedId === undefined || selectedId !== userSelectedId) return
     if (selectedUnread === 0) return
     markReadRef.current?.(selectedId, null)
-  }, [selectedId, userSelectedId, selectedUnread])
+  }, [selectedId, userSelectedId, selectedUnread, selectedNewestAnchor])
 
   /**
    * Load the provider/model catalog for the SLASH MENU, not only for the form.

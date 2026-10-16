@@ -58,6 +58,7 @@ function makeDeps(overrides = {}) {
     removeBot: async () => ({ ok: true }),
     postMessage: () => ({ ok: true }),
     assignTask: () => ({ ok: true }),
+    messageMember: async () => ({ ok: true }),
     finishTask: () => undefined,
     roomGoal: () => ({ text: '做一版新设计', status: 'active', updatedAt: '2026-10-15T10:00:00.000Z' }),
     setRoomGoal: async () => ({ ok: true }),
@@ -182,6 +183,18 @@ check(seen[3]?.botIds.join(',') === 'botA' && seen[3]?.actorId === 'botA',
   '队长可以要求移除自己（actorId 就是它）')
 const desc = removeDef.description
 check(desc.includes('REMOVE YOURSELF'), '工具描述写明可以移除自己')
+
+// ── 成员之间的直连 ───────────────────────────────────────────────────────────
+//
+// 需求：leader 分派后，成员要能把结果/进度说回去，也能直接找同伴对齐接口 —— 而提示词原本让成员
+// 用的 `task_report` 从来就不存在。这条断言盯住"这个工具真的注册了，并且要 to 与 text"。
+const mm = clean.defs.get('message_member')
+check(clean.names.has('message_member'), '成员可以直连其他成员（message_member）')
+{
+  const req = mm?.parameters?.required ?? mm?.required ?? mm?.inputSchema?.required
+  check(Array.isArray(req) && req.includes('to') && req.includes('text'),
+    'message_member 需要 to 与 text', JSON.stringify(req))
+}
 
 console.log(`\n[tool-registration] ${pass}/${total} 通过`)
 process.exit(pass === total ? 0 : 1)

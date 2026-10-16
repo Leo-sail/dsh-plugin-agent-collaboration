@@ -43,7 +43,7 @@ check(named('bots:room').text.includes('@all'), 'room 段写明 @all 会唤醒�
 check(named('bots:room').text.includes('只有 leader 会被唤醒'), 'room 段写明没点名时只有 leader')
 
 // ── 3. 协作 / 记忆 / 边界 ────────────────────────────────────────────────────
-check(all.includes('invite_bot') && all.includes('finish_task') && all.includes('task_report'),
+check(all.includes('invite_bot') && all.includes('finish_task') && all.includes('message_member'),
   'collaboration 段给出协作工具')
 check(named('bots:collaboration').text.includes('不要自己新建群聊'), 'collaboration 段禁止自己建群')
 check(named('bots:collaboration').text.includes('dispatch'), 'collaboration 段指向 dispatch')
@@ -126,7 +126,7 @@ const asMember = botPromptSections({ botName: '小毕', botDescription: '', isLe
 const memberText = asMember.find(s => s.name === 'bots:collaboration').text
 check(memberText.includes('本群的 leader（队长）是「小艾」'), '成员知道队长是谁', memberText.slice(0, 40))
 check(!memberText.includes('你是本群的 leader'), '成员不会误以为自己是队长')
-check(memberText.includes('task_report'), '成员知道做完要汇报')
+check(memberText.includes('message_member'), '成员知道做完要汇报')
 
 // Agent Teams 的工具会误导（实测：list_agents 让 leader 以为自己不是）
 const toolsText = asLeader.find(s => s.name === 'bots:tools').text

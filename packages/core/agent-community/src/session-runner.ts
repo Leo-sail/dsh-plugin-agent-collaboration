@@ -790,6 +790,16 @@ export class SessionRunner {
     })
     if (typeof svc.on !== 'function') return
     svc.on('agent/request', async (_payload, next) => {
+      // ── THE MASK HAS TO BE RE-APPLIED, NOT JUST APPLIED ONCE ──────────────────
+      //
+      // The deny ran in `setup` when the agent was created, but the Agent Teams tools
+      // (`list_agents`, `send_message`, `interrupt_agent`) are mounted by the profile's
+      // `tool-agent-team` row AFTER that, into the same scope — and a restriction that ran before
+      // a tool existed cannot hide it. Measured: those three sat in a bot's catalog while
+      // `botDeniedTools` listed all three. Re-applying here, on every request, closes the ordering
+      // hole; already-applied names are skipped so DSH's append-only restriction list cannot grow
+      // without bound, and previously-skipped names are retried in case they registered late.
+      this.reapplyToolMask(agentCtx, key)
       const config = await next() as Record<string, unknown>
       if (!this.textOnlyArmed.delete(key)) return config
       return { ...config, reasoningEffort: 'off' }
@@ -1106,6 +1116,35 @@ export class SessionRunner {
       }
     }
     return preset
+  }
+
+  /** Names already restricted for this session, so the per-request re-apply stays bounded. */
+  private readonly maskApplied = new Map<string, Set<string>>()
+
+  /**
+   * Re-apply the deny mask for tools that registered after the one-shot pass in `setup`.
+   *
+   * Idempotent by construction: DSH appends restrictions, so re-restricting an applied name is
+   * wasteful and unbounded, while a name that was unknown at setup time (and therefore skipped)
+   * may exist now. Only the difference is sent.
+   */
+  private reapplyToolMask(agentCtx: Context, key: string): void {
+    const deny = this.opts.deniedTools
+    if (deny === undefined || deny.length === 0) return
+    const applied = this.maskApplied.get(key) ?? new Set<string>()
+    const pending = deny.filter(name => !applied.has(name))
+    if (pending.length === 0) return
+    const result = restrictGlobalTools(agentCtx, pending)
+    for (const name of result.applied) applied.add(name)
+    this.maskApplied.set(key, applied)
+    if (result.applied.length > 0) {
+      // ONE LINE OF TRUTH about a late registration: without it, "the tool is still there" has no
+      // trace at all and looks like the mask is broken rather than early.
+      this.ctx.logger?.info?.(
+        `agent-community: bot tool mask re-applied late applied=[${result.applied.join(',')}] `
+        + `still-skipped=[${result.skipped.join(',')}]`,
+      )
+    }
   }
 
   private async mountAgentPreset(agentCtx: Context, preset: string): Promise<void> {

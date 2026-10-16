@@ -37,8 +37,22 @@
         historyMessagesInPrompt: 10
         a2aMinIntervalMs: 3000
 
-    - id: plugin-tool-agent-community
-      name: "@dsh-plugin-agent-community/tool-agent-community"
+    # ── THE MAIN SESSION DOES NOT DRIVE THE TEAM ────────────────────────────────
+    #
+    # These tools (`agent_community_post_message`, `task_decompose`, `submit_final`,
+    # `create_bot`, `task_assign`, …) let the USER'S OWN chat session command Bots from the main
+    # transcript. The requirement is the opposite: the main session stays out of it, and a room is
+    # run by its LEADER — who decides whether the request is complex, splits it, hands pieces to
+    # the members that fit, collects their reports, and delivers the final result. Keeping both
+    # entry points meant two coordinators for one room, with the leader's dispatch invisible to a
+    # user who asked the main session instead.
+    #
+    # The Bot-side tools are unaffected: the plugin registers those (`agent_community_dispatch`,
+    # `assign_task`, `task_report`, `finish_task`, `invite_bot`, `remove_bot`, `propose_group`, …)
+    # into each Bot's own scope from the core package.
+    # To restore the main-session tools, re-add this row.
+    # - id: plugin-tool-agent-community
+    #   name: "@dsh-plugin-agent-community/tool-agent-community"
 
     - id: plugin-ui-agent-community
       name: "@dsh-plugin-agent-community/ui-agent-community"

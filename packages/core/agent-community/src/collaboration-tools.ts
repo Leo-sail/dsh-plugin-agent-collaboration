@@ -127,6 +127,22 @@ export interface CollaborationToolDeps {
   /** Declare the task complete; publishes the report as a group message. */
   finishTask(input: { roomId: string; leaderId: string; report: string }): void
   /**
+   * Send one member a direct message (a2a), and thereby let members talk to each other.
+   *
+   * WHY THIS EXISTS. The flow the user asked for is leader-decides → decompose → assign → members
+   * work AND coordinate → members report → leader aggregates → final delivery. Everything but the
+   * middle step existed: `assign_task` hands work DOWN and `finish_task` publishes the leader's
+   * verdict, but a member had no way to say anything back — not a progress report to the leader,
+   * and not a question to the peer whose half of the work it depends on. The prompt told members
+   * to "use task_report", a tool that never existed, which is how the gap stayed invisible.
+   */
+  messageMember(input: {
+    roomId: string
+    botId: string
+    toName: string
+    text: string
+  }): Promise<{ ok: boolean; reason?: string | undefined }>
+  /**
    * Ask the user a question and wait for the answer.
    *
    * The plugin's own surface replaces the host's `ask_user_question`, which waits on a UI a
@@ -823,6 +839,44 @@ export function registerCollaborationTools(
           ? '被拒绝的成员不在本群，先用 invite_bot 邀请。'
           : '已分派，等待成员汇报。不要再重复分派同一件事。',
       }
+    },
+  })
+
+  // ── message_member (any member, group only) ─────────────────────────────────
+  add({
+    name: 'message_member',
+    description:
+      'Send a direct message to one other member of this group — the leader when you report '
+      + 'progress or finish your part, or a peer whose work touches yours. The recipient is woken '
+      + 'by it. Use it instead of talking about them in the room.',
+    properties: {
+      to: { type: 'string', description: 'The member name, from the room roster.' },
+      text: { type: 'string', description: 'What they need to know, or what you need from them.' },
+    },
+    required: ['to', 'text'],
+    run: async (args, exec) => {
+      const who = caller(exec)
+      if (typeof who === 'string') return { value: { ok: false }, text: who }
+      if (who.kind !== 'group') {
+        return { value: { ok: false }, text: 'message_member is only available in a group chat' }
+      }
+      const to = str(args, 'to').trim()
+      const text = str(args, 'text').trim()
+      if (to === '') return { value: { ok: false }, text: 'to is required' }
+      if (text === '') return { value: { ok: false }, text: 'text is required' }
+      const result = await deps.messageMember({
+        roomId: who.roomId,
+        botId: who.botId,
+        toName: to,
+        text,
+      })
+      if (!result.ok) {
+        return {
+          value: { ok: false, ...(result.reason !== undefined ? { reason: result.reason } : {}) },
+          text: `没有送到「${to}」：${result.reason ?? '不在本群。用群里现有成员的名字。'}`,
+        }
+      }
+      return { value: { ok: true, to }, text: `已直接发给「${to}」。` }
     },
   })
 
