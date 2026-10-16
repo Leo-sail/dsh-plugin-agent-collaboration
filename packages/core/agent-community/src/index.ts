@@ -657,6 +657,7 @@ export class AgentCommunityService extends TypertRemoteService {
       // Native session driver. Built before the executor so the executor can be
       // handed a runner that is fully wired — an executor that starts runs against a
       // half-initialised runner would materialise agents with no tools registered.
+      this.bootTrace('before new SessionRunner')
       const runner = new SessionRunner(ctx, {
         // WHO IS IN CHARGE, told to each bot: the coordinator may invite/remove/dispatch/finish.
         leaderOf: (roomId) => this.leaderOfRoom(roomId),
@@ -759,6 +760,7 @@ export class AgentCommunityService extends TypertRemoteService {
       })
       this.sessionRunner = runner
 
+      this.bootTrace('before new LedgerProjection{')
       this.ledgerProjection = new LedgerProjection({
         ledger: this.ledger,
         botName: (botId) => this.state.bots.find(b => b.id === botId)?.name ?? botId,
@@ -788,6 +790,7 @@ export class AgentCommunityService extends TypertRemoteService {
       })
       this.ledgerProjection.install(ctx)
 
+      this.bootTrace('before new GroupTaskDriver{')
       this.groupTask = new GroupTaskDriver({
         enqueueRun: (roomId, botId, prompt) => this.enqueueGroupRun(roomId, botId, prompt),
         roomById: (roomId) => {
@@ -831,6 +834,7 @@ export class AgentCommunityService extends TypertRemoteService {
         },
       })
 
+      this.bootTrace('before new RunExecutorctx, this, {')
       this.executor = new RunExecutor(ctx, this, {
         // ── GROUP MEMBERS RUN TOGETHER ─────────────────────────────────────────
         //
@@ -3986,8 +3990,8 @@ export class AgentCommunityService extends TypertRemoteService {
    * the panel looks fine, and the only symptom is that nothing ever runs.
    */
   private bootTrace(step: string): void {
-    const line = `${new Date().toISOString()} boot pid=${String(process.pid)} ${step}\n`
     const home = this.home
+    const line = `${new Date().toISOString()} boot pid=${String(process.pid)} home=${String(home)} ${step}\n`
     try { appendFileSync('/tmp/ac-boot.log', line) } catch { /* nothing else to do */ }
     try { appendFileSync(join(home, 'agent-community', 'boot.log'), line) } catch { /* ditto */ }
     try { this.ctx.logger?.info?.(`agent-community: ${line.trim()}`) } catch { /* ditto */ }
