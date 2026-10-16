@@ -368,11 +368,36 @@ export class LedgerProjector {
         const rid = (e as { runId?: string }).runId
         if (rid !== undefined && e.type === 'bot-text') byRun.set(rid, e)
       }
+      // A live streaming row can carry NO runId: it is created on the attempt's first frame,
+      // sometimes before `runIdFor` can name the run. Keying the merge on runId alone therefore
+      // missed exactly those rows, and the seeded copy (which HAS a runId but no reasoning)
+      // survived beside it — the user's 'one reply with 思考过程 and one without'. Rows without a
+      // runId are matched by their bot instead, so the live row wins and the copy is dropped.
+      // A live streaming row can carry NO runId: it is created on the attempt's first frame,
+      // sometimes before `runIdFor` can name the run. Keying the merge on runId alone therefore
+      // missed exactly those rows, and the seeded copy (which HAS a runId but no reasoning)
+      // survived beside it — the user's 'one reply with 思考过程 and one without'.
+      //
+      // Matched by (bot, identical text), NOT by bot alone: dropping every seeded row of a bot
+      // that happens to own a runId-less row would erase that bot's earlier messages from the
+      // view. Only the very copy being duplicated is removed, and the live row (which carries the
+      // reasoning) is kept.
+      const keyOf = (bid: unknown, text: unknown): string => `${String(bid)}\u0000${String(text)}`
+      const liveNoRun = new Set<string>()
+      for (const e of live) {
+        const rid = (e as { runId?: string }).runId
+        const bid = (e as { botId?: string }).botId
+        if (e.type === 'bot-text' && rid === undefined && bid !== undefined)
+          liveNoRun.add(keyOf(bid, (e as { text?: string }).text))
+      }
       const merged = list.filter((e) => {
         const rid = (e as { runId?: string }).runId
-        return !(e.type === 'bot-text' && rid !== undefined && byRun.has(rid))
+        const bid = (e as { botId?: string }).botId
+        if (e.type !== 'bot-text') return true
+        if (rid !== undefined && byRun.has(rid)) return false
+        if (bid !== undefined && liveNoRun.has(keyOf(bid, (e as { text?: string }).text))) return false
+        return true
       })
-      // Every row in `byRun` was filtered out of `merged` above, so pushing them back cannot dupe.
       for (const e of byRun.values()) merged.push(e)
       this.byRoom.set(roomId, merged as LedgerEntry[])
       return merged.length
