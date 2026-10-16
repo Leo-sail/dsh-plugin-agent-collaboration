@@ -105,6 +105,11 @@ check(groupRefusal.allow === false, 'Bot 在群里建群 → 拒绝')
 check(groupRefusal.reason.includes('界面'), '拒绝理由指向让用户在界面新建', groupRefusal.reason)
 check(screenRoomCreation({ directBotId: 'botB' }, asBotInDm).allow === true, 'Bot 建单聊房间 → 允许（不是团队决策）')
 check(screenRoomCreation({ memberIds: ['botA'] }, asBotInDm).allow === true, 'Bot 建只有一个成员的房间 → 允许')
+// 实测（2026-10-16）：界面能建出 0 成员的群，而那种群永远没有 leader、没人能回答 —— 在这里拦掉
+const emptyRoom = screenRoomCreation({ memberIds: [] }, asUser)
+check(emptyRoom.allow === false, '0 成员的群 → 拒绝创建')
+check(String(emptyRoom.reason).includes('至少'), '拒绝理由说明要有成员', String(emptyRoom.reason))
+check(screenRoomCreation({ memberIds: ['botA'] }, asUser).allow === true, '1 个成员的群仍然允许')
 
 // ── 1b. cross-room isolation (「不能将 A 群聊的任务发到 B 群聊中」) ──────────
 check(crossRoomError('roomA', 'roomA') === undefined, 'Bot 在自己房间里操作 → 放行')

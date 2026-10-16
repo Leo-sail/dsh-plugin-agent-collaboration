@@ -53,7 +53,19 @@ export function screenRoomCreation(
   request: RoomCreationRequest,
   actor: RoomCreationActor,
 ): RoomCreationDecision {
-  if (actor.kind === 'user') return { allow: true }
+  if (actor.kind === 'user') {
+    // ── A GROUP WITH NOBODY IN IT CAN NEVER BE USED ───────────────────────────
+    //
+    // Measured through the UI (2026-10-16): the 新建群聊 dialog happily created a group with
+    // zero members ticked. Such a room has no leader (`leaderOfRoom` falls back to the first
+    // member, and there is none), so no message can ever be routed or answered — the user gets a
+    // room that silently does nothing. The UI is where it was created, but this is the one place
+    // both the UI and any future caller pass through, so the rule lives here.
+    if (request.memberIds !== undefined && request.memberIds.length === 0) {
+      return { allow: false, reason: '群聊至少要有一个成员：请至少勾选一个 Bot 再创建。' }
+    }
+    return { allow: true }
+  }
   if (!isGroupCreation(request)) return { allow: true }
   return {
     allow: false,
