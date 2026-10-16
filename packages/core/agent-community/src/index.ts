@@ -3091,8 +3091,24 @@ export class AgentCommunityService extends TypertRemoteService {
     // texts are equal after normalisation or one contains the other — and only for texts long
     // enough that a repeat cannot be a normal short acknowledgement ("好的", "收到").
     const normalise = (text: string): string => text.replace(/\s+/g, ' ').trim().toLowerCase()
+    const trigrams = (text: string): Set<string> => {
+      const out = new Set<string>()
+      for (let i = 0; i + 3 <= text.length; i++) out.add(text.slice(i, i + 3))
+      return out
+    }
+    /** Character 3-grams, so the check works the same for Chinese and English. */
+    const similarity = (a: string, b: string): number => {
+      const setA = trigrams(a); const setB = trigrams(b)
+      if (setA.size === 0 || setB.size === 0) return 0
+      let shared = 0
+      for (const gram of setA) if (setB.has(gram)) shared++
+      return shared / (setA.size + setB.size - shared)
+    }
     const candidate = normalise(input.text)
-    if (candidate.length >= 24 && senderBot !== undefined) {
+    // Thresholds measured on the report that prompted this: two completion summaries of the same
+    // task scored 0.62 against each other, while every other pair of bot messages in that room
+    // scored at most 0.16. Requiring 80+ characters keeps short acknowledgements out of scope.
+    if (candidate.length >= 80 && senderBot !== undefined) {
       const cutoff = Date.now() - 120_000
       const previous = [...this.state.messages]
         .reverse()
@@ -3100,11 +3116,15 @@ export class AgentCommunityService extends TypertRemoteService {
           && m.sender.kind === 'bot'
           && m.sender.botId === senderBot.id
           && Date.parse(m.createdAt) >= cutoff)
-      const earlier = previous === undefined ? '' : normalise(previous.text)
-      if (earlier.length >= 24 && (earlier === candidate || earlier.includes(candidate) || candidate.includes(earlier))) {
-        // Returning the existing message keeps the caller idempotent, and returning early also
-        // skips the wake-up below: the target already received this text.
-        return previous as BotMessage
+      if (previous !== undefined) {
+        const earlier = normalise(previous.text)
+        const duplicate = earlier.length >= 80
+          && (earlier.includes(candidate) || candidate.includes(earlier) || similarity(earlier, candidate) >= 0.55)
+        if (duplicate) {
+          // Returning the existing message keeps the caller idempotent, and returning early also
+          // skips the wake-up below: the target already received this text.
+          return previous as BotMessage
+        }
       }
     }
     const msg: BotMessage = {
