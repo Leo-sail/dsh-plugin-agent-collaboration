@@ -1227,7 +1227,9 @@ export class AgentCommunityService extends TypertRemoteService {
             // the leader's own stage report ("已安排 X 执行 …，等它完成后我汇总"), not as a
             // separate line. A member's message to the leader is that member's contribution in
             // the group — it IS its group reply and must be visible.
-            internal: senderIsLeader,
+            // No blanket hiding: a member's message to the leader is that member's contribution in
+            // the group and belongs on screen, and the leader's own word to a member is visible
+            // too — what it must not do is start a run that nothing asked for.
           })
           return { ok: true }
         } catch (error: unknown) {
@@ -3159,8 +3161,7 @@ export class AgentCommunityService extends TypertRemoteService {
       // the user saw. The team path is the richer one (it carries the report), so a message
       // addressed to the room's own leader does not also create an `a2a` run.
       const leaderRef = room.team?.leader
-      const targetIsLeader = leaderRef?.kind === 'bot' && leaderRef.botId === targetBot?.id
-      if (targetBot !== undefined && answeringPeer !== true && targetIsLeader !== true) {
+      if (targetBot !== undefined && answeringPeer !== true) {
         // Create a queued run for the target bot to process the message
         const run: BotRun = {
           id: brandId<BotRunId>(randomUUID()),
