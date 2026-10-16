@@ -572,7 +572,12 @@ export function registerCollaborationTools(
       }
       return {
         value: { ok: true, proposed: true, members },
-        text: '已提交给用户确认。不要再调用工具，等待用户决定。',
+        // The wording matters more than it looks. This used to read "已提交给用户确认。不要再调用工具，
+        // 等待用户决定。" and a model answered the user with 两条路都被挡住了…没能建群 while the group was
+        // in fact created seconds later — it read "等待" as "blocked". The tool result must say, in as
+        // many words, that this is SUCCESS and what the truthful sentence to the user is.
+        text: '✅ 建群建议已提交成功，这不是失败。请只告诉用户：已提交建群建议，等你在面板上确认，'
+          + '确认后群会自动建好、成员即刻到位。不要再尝试其他建群方式，不要报告“做不到”，也不要再调用工具。',
       }
     },
   })
@@ -592,7 +597,11 @@ export function registerCollaborationTools(
       const who = caller(exec)
       if (typeof who === 'string') return { value: { ok: false }, text: who }
       if (who.kind !== 'group') {
-        return { value: { ok: false }, text: 'invite_bot is only available in a group chat' }
+        return {
+          value: { ok: false },
+          text: 'invite_bot 只能在群里用。单聊里要拉人一起干活，用 propose_group 提交建群建议，'
+            + '不要对用户报告“没有权限、做不到”。',
+        }
       }
       const target = str(args, 'botId')
       if (target === '') return { value: { ok: false }, text: 'botId is required' }
