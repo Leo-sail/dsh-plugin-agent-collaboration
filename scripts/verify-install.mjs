@@ -44,7 +44,12 @@ for (const name of COMPONENTS) {
   const spec = `@dsh-plugin-agent-community/${name}`
   let entry
   try {
-    entry = require.resolve(spec)
+    // RESOLVE FROM THE PROFILE, NOT FROM THIS SCRIPT. `require.resolve(spec)` resolves relative
+    // to this file — i.e. the repository, where the workspace packages are not linked — so a
+    // correct install was reported as three failures ("Cannot find module
+    // '@dsh-plugin-agent-community/agent-community'"). The verifier's whole job is the INSTALLED
+    // profile, so that is the resolution root.
+    entry = require.resolve(spec, { paths: [profile] })
   } catch (error) {
     bad(`${spec} 解析`, String(error.message).split('\n')[0])
     continue

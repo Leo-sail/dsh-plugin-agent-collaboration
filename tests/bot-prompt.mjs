@@ -38,7 +38,7 @@ const empty = botPromptSections({ botName: 'X', botDescription: '   ', isLeader:
 check(!empty[0].text.includes('\n\n'), '描述为空时不留下空行')
 
 check(named('bots:room').text.includes('自动发布'), 'room 段说明答复会自动发布')
-check(named('bots:room').text.includes('不要再用 agent_community_post_message'), 'room 段禁止重复 post')
+check(named('bots:room').text.includes('不要再用别的工具把同一内容往房间里发一遍') && named('bots:room').text.includes('message_member'), 'room 段禁止重复 post，并指向 message_member')
 check(named('bots:room').text.includes('@all'), 'room 段写明 @all 会唤醒全员')
 check(named('bots:room').text.includes('只有 leader 会被唤醒'), 'room 段写明没点名时只有 leader')
 
@@ -132,6 +132,25 @@ check(memberText.includes('message_member'), '成员知道做完要汇报')
 const toolsText = asLeader.find(s => s.name === 'bots:tools').text
 check(toolsText.includes('list_agents') && toolsText.includes('Agent Teams'),
   '明确警告不要用 Agent Teams 工具判断房间成员')
+
+
+// ── 提示词只能提真实存在的工具 ───────────────────────────────────────────────
+//
+// 两次真实事故都出在这里：提示词让成员用 `task_report`（从来没这个工具），又教 Bot 用
+// `agent_community_post_message`（那是主会话包的工具，Bot 作用域里没有）。模型只能照着提示词
+// 去调工具，提到一个不存在的名字就等于让 Bot 在群里"试着做但做不到"。这条断言把提示词里出现的
+// 工具名与到真实注册表对齐：注册表里的、以及明确"不要用"的那几个（Agent Teams）之外，一律不允许。
+{
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../packages/core/agent-community/src/collaboration-tools.ts', import.meta.url), 'utf8')
+  const registered = new Set([...src.matchAll(/name: '([a-z_]+)'/g)].map(m => m[1]))
+  // 提示词里被点名"不要用"的宿主工具（Agent Teams / 计划模式等），提到它们是**为了禁止**
+  const forbidden = new Set(['list_agents', 'send_message', 'interrupt_agent', 'create_goal', 'update_goal',
+    'exit_plan_mode', 'subagent', 'subagent_fork', 'workflow', 'present', 'get_goal', 'agent_community_post_message'])
+  const mentioned = new Set([...all.matchAll(/\b(agent_community_[a-z_]+|message_member|assign_task|finish_task|invite_bot|remove_bot|propose_group|task_report)\b/g)].map(m => m[1]))
+  const unknown = [...mentioned].filter(n => !registered.has(n) && !forbidden.has(n))
+  check(unknown.length === 0, '提示词提到的工具都真实存在', unknown.join(','))
+}
 
 console.log(`\n[bot-prompt] ${pass}/${total} 通过`)
 process.exit(pass === total ? 0 : 1)

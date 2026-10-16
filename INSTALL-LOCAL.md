@@ -117,3 +117,13 @@ for (const m of ["agent-community","tool-agent-community","ui-agent-community"])
 
 安装前的 profile 备份：`/tmp/ac-profile-backup-*.tar.gz`（含 `package.json`、`cordis.patch.yml`、
 `pnpm-lock.yaml`、旧的 `node_modules/@dsh-plugin` 与 bundle 副本）。要回退就解开覆盖回去，然后重启 DSH。
+
+## 主会话工具（tool-agent-community）默认关闭
+
+`cordis.patch.yml` 里 `plugin-tool-agent-community` 那一行**默认是注释掉的**：它给**用户自己的主会话**
+装上 `agent_community_post_message` / `task_decompose` / `submit_final` / `create_bot` 等工具，
+等于让主会话也能指挥房间，和"房间由 leader 协调"重复。需要恢复时把那行取消注释即可。
+
+Bot 侧的协作工具不受影响：`agent_community_dispatch` / `assign_task` / `message_member` / `finish_task` / `invite_bot` / `remove_bot` / `propose_group` 由核心包注册进
+**每个 Bot 自己的作用域**。
+

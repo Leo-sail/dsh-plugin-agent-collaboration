@@ -885,6 +885,10 @@ export class SessionRunner {
           `agent-community: bot tool mask room=${roomId} bot=${botId} `
           + `applied=[${mask.applied.join(',')}] skipped=[${mask.skipped.join(',')}]`,
         )
+        this.noteToolMask(
+          `initial room=${roomId} bot=${botId} applied=[${mask.applied.join(',')}] `
+          + `skipped=[${mask.skipped.join(',')}]`,
+        )
       }
       // Collaboration tools are installed AFTER the mask on purpose: they are scoped
       // registrations, and DSH keeps those visible through a global deny — which is what
@@ -1137,12 +1141,11 @@ export class SessionRunner {
     const result = restrictGlobalTools(agentCtx, pending)
     for (const name of result.applied) applied.add(name)
     this.maskApplied.set(key, applied)
-    if (result.applied.length > 0) {
+    if (result.applied.length > 0 || result.skipped.length > 0) {
       // ONE LINE OF TRUTH about a late registration: without it, "the tool is still there" has no
       // trace at all and looks like the mask is broken rather than early.
-      this.ctx.logger?.info?.(
-        `agent-community: bot tool mask re-applied late applied=[${result.applied.join(',')}] `
-        + `still-skipped=[${result.skipped.join(',')}]`,
+      this.noteToolMask(
+        `re-apply applied=[${result.applied.join(',')}] still-skipped=[${result.skipped.join(',')}]`,
       )
     }
   }
@@ -1212,6 +1215,28 @@ export class SessionRunner {
    * shipped without giving any bot a single new tool. One line per attempt, capped, in
    * the plugin's own data directory.
    */
+  /**
+   * Record what the tool mask actually did, in a file a human can read.
+   *
+   * WHY. The acceptance checklist asks a reviewer to confirm "the bot's catalog no longer lists X"
+   * by reading a log line — and that line went to the plugin's logger, which this deployment does
+   * not surface anywhere (measured: nothing from `agent-community:` reaches the host's stdout or
+   * `~/Library/Logs`). The mask therefore had NO readable trace at all, which is exactly the state
+   * in which "the tool is still there" cannot be told apart from "the restriction was skipped
+   * because DSH keeps scope-local registrations visible".
+   *
+   * Same file-and-append shape as {@link notePresetMount}: diagnostics must never break a run.
+   */
+  private noteToolMask(line: string): void {
+    const dir = this.opts.presetLogDir
+    if (dir === undefined) return
+    try {
+      appendFileSync(join(dir, 'tool-mask.log'), `${new Date().toISOString()} ${line}\n`)
+    } catch {
+      // Diagnostics must never break a run.
+    }
+  }
+
   private notePresetMount(line: string): void {
     const dir = this.opts.presetLogDir
     if (dir === undefined) return

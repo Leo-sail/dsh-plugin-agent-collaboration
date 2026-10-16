@@ -99,7 +99,7 @@ export function botPromptSections(identity: BotPromptIdentity): readonly BotProm
       order: BASE + 1,
       text: [
         '你的正文答复会在本回合结束时自动发布到房间，用户直接就能看到。',
-        '不要再用 agent_community_post_message 把同一内容发一遍——那会让用户看到两遍；那个工具只用于把一条消息明确发给房间里的另一个 Bot（带 to_bot_name）。',
+        '不要再用别的工具把同一内容往房间里发一遍——那会让用户看到两遍。要把一条消息明确发给**某一个成员**（比如向 leader 汇报、或找同伴对齐接口）就用 message_member。',
         '',
         '群里"谁被唤醒"由系统按消息内容决定，你不需要判断"这条是不是给我的"：',
         '· 消息 @ 了你、或直接写出了你的名字 → 只有你会被唤醒并回答；',
