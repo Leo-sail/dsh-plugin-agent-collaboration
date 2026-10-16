@@ -12,6 +12,8 @@
 # Usage:  npm login          (once, with the account that owns @dsh-plugin-agent-community)
 #         scripts/publish-release.sh [--dry-run]
 set -euo pipefail
+# `NPM_OTP` is optional, and `set -u` would otherwise reject the expansion in OTP_ARGS above.
+NPM_OTP="${NPM_OTP:-}"
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
@@ -24,6 +26,12 @@ DRY_RUN=0
 # account problem and is really a registry one. Publishing to the mirror would also put the package
 # somewhere the marketplace does not read.
 REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org}"
+
+# This account has two-factor authentication enabled, so a publish can be challenged for a one-time
+# password even when the CLI is logged in. Pass a fresh code as NPM_OTP=<6 digits> and every publish
+# below carries it; leave it unset when the registry does not ask.
+OTP_ARGS=()
+[ -n "${NPM_OTP:-}" ] && OTP_ARGS=(--otp "$NPM_OTP")
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -77,12 +85,12 @@ echo "── publishing components ───────────────
 for dir in "${COMPONENTS[@]}"; do
   name=$(node -e "console.log(require('./$dir/package.json').name)")
   echo "  → $name"
-  (cd "$dir" && npm publish --access public --registry="$REGISTRY")
+  (cd "$dir" && npm publish --access public --registry="$REGISTRY" "${OTP_ARGS[@]}")
 done
 
 echo "── publishing the bundle ────────────────────────────────────────────────────"
 TGZ="$(ls "$STAGE"/*.tgz | head -1)"
-npm publish "$TGZ" --access public --registry="$REGISTRY"
+npm publish "$TGZ" --access public --registry="$REGISTRY" "${OTP_ARGS[@]}"
 
 echo
 echo "done. Users install with:"
