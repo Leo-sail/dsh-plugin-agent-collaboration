@@ -145,7 +145,7 @@ export class GroupTaskDriver {
     state.stalledRounds = 0
     this.save(input.roomId, state)
 
-    if (state.finished !== undefined && !this.finishedIsStale(state)) return { leaderRuns: false }
+    if (state.finished !== undefined && !this.finishedIsStale(input.roomId, state)) return { leaderRuns: false }
 
     // Only integrate once the whole fan-out has settled — otherwise the leader runs
     // once per member and re-plans against a half-finished picture.
@@ -171,7 +171,7 @@ export class GroupTaskDriver {
     const state = this.ensure(input.roomId)
     state.runningBotIds.delete(this.accessor.leaderOf(input.roomId) ?? '')
 
-    if (state.finished !== undefined && !this.finishedIsStale(state)) return { stalled: false, stalledRounds: 0 }
+    if (state.finished !== undefined && !this.finishedIsStale(input.roomId, state)) return { stalled: false, stalledRounds: 0 }
 
     const moved =
       input.producedText ||
@@ -348,11 +348,18 @@ export class GroupTaskDriver {
    * integration in that room was blocked. Comparing epochs is exact; comparing times is not,
    * because that write happens after the new instruction.
    */
-  private finishedIsStale(state: GroupTaskState): boolean {
-    const done = state.finished
-    if (done === undefined) return false
-    return done.epoch !== state.instructionAt
-  }
+    private finishedIsStale(roomId: string, state: GroupTaskState): boolean {
+      const done = state.finished
+      if (done === undefined) return false
+      // Epoch mismatch: the finish belongs to a different instruction.
+      if (done.epoch !== state.instructionAt) return true
+      // Or it is simply older than the instruction now being served. This second test is what
+      // makes the check work even when no epoch was recorded: measured on a room whose finish
+      // was written at 13:58 while the next instruction arrived at 14:45 — forty-seven minutes
+      // earlier, yet it still blocked every integration because both epochs were undefined.
+      const latest = this.accessor.lastUserMessageAt(roomId)
+      return latest !== undefined && done.at < latest
+    }
 
   /** The leader's integrate prompt, with what came back since it last ran. */
   private integratePrompt(roomId: string, state: GroupTaskState): string {
