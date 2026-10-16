@@ -25,7 +25,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # `@dsh-plugin-agent-community` when the components were published under this account's own scope,
 # and the copy target has to follow: files left in the old directory are never mounted, because
 # nothing names them any more.
-PROFILE_DIR="$HOME/.dsh/profiles/$PROFILE"
+# ── WHICH DSH HOME THIS INSTALL TARGETS ──────────────────────────────────────
+#
+# `DSH_HOME` decides, because a machine can hold several DSH installations side by side — measured
+# here: the app's runtime (0.2.0-rc.2, ~/.dsh), a second DSH app (0.2.1-alpha.3, ~/.aeoth) and the
+# npx CLI (0.1.2-rc.1). Hard-coding ~/.dsh made an install into any other home impossible, which is
+# exactly what a multi-version smoke test needs — and what a user with two DSH apps needs too.
+DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
+PROFILE_DIR="$DSH_HOME_DIR/profiles/$PROFILE"
 DEST="$PROFILE_DIR/node_modules/@dsh-plugin-agent-community"
 
 # The PROFILE is what must exist — that is the typo guard. The scope directory is created here
@@ -174,7 +181,7 @@ done
 # edit that would silently never arrive. Missing bundle dir is not fatal (a profile may
 # mount the @dsh-plugin rows directly), but a stale patch is.
 BUNDLE_SRC="$ROOT/packages/bundle/agent-collaboration/cordis.patch.yml"
-BUNDLE_DIR="$HOME/.dsh/profiles/$PROFILE/node_modules/dsh-plugin-agent-collaboration"
+BUNDLE_DIR="$DSH_HOME_DIR/profiles/$PROFILE/node_modules/dsh-plugin-agent-collaboration"
 if [ ! -d "$BUNDLE_DIR" ]; then
   # Silently skipping this used to leave the profile running the OLD patch — the failure mode the
   # header above admits. Refuse unless the caller explicitly says the bundle is mounted elsewhere.
@@ -241,7 +248,7 @@ echo "install-profile: all checks passed."
 # any bundle. A host that cannot find it degrades to the deployment default — the plugin never
 # requires this file to exist.
 PRESET_SRC="$ROOT/packages/bundle/agent-collaboration/agent-presets/bot"
-PRESET_DEST="${DSH_HOME:-$HOME/.dsh}/.agent-presets/bot"
+PRESET_DEST="$DSH_HOME_DIR/.agent-presets/bot"
 if [ -d "$PRESET_SRC" ]; then
   mkdir -p "$PRESET_DEST"
   for f in preset.yml agent.cordis.yml; do
