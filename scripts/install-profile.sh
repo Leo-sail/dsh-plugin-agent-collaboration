@@ -183,6 +183,31 @@ done
 BUNDLE_SRC_DIR="$ROOT/packages/bundle/agent-collaboration"
 BUNDLE_SRC="$BUNDLE_SRC_DIR/cordis.patch.yml"
 BUNDLE_DIR="$DSH_HOME_DIR/profiles/$PROFILE/node_modules/dsh-plugin-agent-collaboration"
+
+  # ── THE BUNDLE DIR MUST BE A REAL COPY OF THIS CHECKOUT ──────────────────────
+  #
+  # Two failure modes, one fix. (1) With a `link:` dependency pnpm materialises the directory as a
+  # SYMLINK, and Node then resolves the bundle's own module names from the target tree — so the
+  # components that load are that checkout's, not the ones installed here, and reinstalling appears
+  # to change nothing. (2) After an uninstall the directory is simply missing, and pnpm does not
+  # always recreate it offline. In both cases the directory is rebuilt from this checkout.
+  if [ -L "$BUNDLE_DIR" ] || [ ! -d "$BUNDLE_DIR" ]; then
+    if [ -L "$BUNDLE_DIR" ]; then
+      echo "  bundle dir is a symlink → replacing with a real copy"
+    else
+      echo "  bundle dir missing → creating it from this checkout"
+    fi
+    rm -rf "$BUNDLE_DIR"
+    mkdir -p "$BUNDLE_DIR"
+    cp -R "$BUNDLE_SRC_DIR/." "$BUNDLE_DIR/"
+    # The checkout's own node_modules must NOT travel with it: those entries are links back into
+    # the checkout (and, for a dev dependency tree, can contain @deepseek-ai packages). Either one
+    # would change which components — or which host packages — resolution finds from here, which is
+    # the exact failure this block exists to prevent. The components this bundle mounts live in the
+    # profile's own scope directory.
+    rm -rf "$BUNDLE_DIR/node_modules"
+  fi
+
 if [ ! -d "$BUNDLE_DIR" ]; then
   # Silently skipping this used to leave the profile running the OLD patch — the failure mode the
   # header above admits. Refuse unless the caller explicitly says the bundle is mounted elsewhere.
@@ -193,22 +218,10 @@ if [ ! -d "$BUNDLE_DIR" ]; then
     exit 1
   fi
 fi
-  # ── A SYMLINKED BUNDLE DIR MUST BECOME A REAL COPY ────────────────────────────
-  #
-  # When the profile's dependency is `link:<somewhere>`, pnpm materialises the bundle directory as
-  # a SYMLINK. Node then resolves the bundle's own module names from the TARGET tree, so the three
-  # components are loaded from that checkout instead of the copies installed here — a restart keeps
-  # running stale code no matter how many times the profile is reinstalled. Observed: every
-  # diagnostic added to the installed components never executed, because the host was reading the
-  # other tree.
-  #
-  # Replacing the symlink with a real directory makes the resolution local and unambiguous.
-  if [ -L "$BUNDLE_DIR" ]; then
-    echo "  replacing symlinked bundle dir with a real copy"
-    rm -f "$BUNDLE_DIR"
-    mkdir -p "$BUNDLE_DIR"
-    cp -R "$BUNDLE_SRC_DIR/." "$BUNDLE_DIR/" 2>/dev/null || true
-  fi
+# Unconditional, because the directory can also be left over from an earlier install: a checkout's
+# node_modules holds links back into the checkout (and can hold @deepseek-ai packages), either of
+# which changes what resolution finds from here.
+rm -rf "$BUNDLE_DIR/node_modules" 2>/dev/null || true
 
 if [ -d "$BUNDLE_DIR" ]; then
   if [ ! -s "$BUNDLE_SRC" ]; then
