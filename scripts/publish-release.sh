@@ -16,6 +16,15 @@ set -euo pipefail
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
+# ── THE OFFICIAL REGISTRY, ALWAYS ─────────────────────────────────────────────
+#
+# A machine can point npm at a mirror (this one defaults to registry.npmmirror.com). Mirrors serve
+# reads fine, which is why a `npm view` looks healthy, but they refuse logins and publishes —
+# `npm login` against one fails with "Public registration is not allowed", which reads like an npm
+# account problem and is really a registry one. Publishing to the mirror would also put the package
+# somewhere the marketplace does not read.
+REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org}"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
@@ -32,12 +41,14 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 if [ "$DRY_RUN" = "0" ]; then
-  if ! whoami_out=$(npm whoami 2>/dev/null); then
-    echo "publish-release: not logged in to npm. Run 'npm login' with the account that owns the" >&2
-    echo "                @dsh-plugin-agent-community scope, then run this again." >&2
+  if ! whoami_out=$(npm whoami --registry="$REGISTRY" 2>/dev/null); then
+    echo "publish-release: not logged in to $REGISTRY for the account that owns the" >&2
+    echo "                @dsh-plugin-agent-community scope. Authenticate against THAT registry —" >&2
+    echo "                a mirror refuses logins with 'Public registration is not allowed':" >&2
+    echo "                  npm login --registry=$REGISTRY --auth-type=web" >&2
     exit 1
   fi
-  echo "npm user: $whoami_out"
+  echo "npm user: $whoami_out  (registry: $REGISTRY)"
 fi
 
 # The build gate runs first: it refuses to build when sources are uncommitted, so reaching the
@@ -66,12 +77,12 @@ echo "── publishing components ───────────────
 for dir in "${COMPONENTS[@]}"; do
   name=$(node -e "console.log(require('./$dir/package.json').name)")
   echo "  → $name"
-  (cd "$dir" && npm publish --access public)
+  (cd "$dir" && npm publish --access public --registry="$REGISTRY")
 done
 
 echo "── publishing the bundle ────────────────────────────────────────────────────"
 TGZ="$(ls "$STAGE"/*.tgz | head -1)"
-npm publish "$TGZ" --access public
+npm publish "$TGZ" --access public --registry="$REGISTRY"
 
 echo
 echo "done. Users install with:"
