@@ -1,6 +1,5 @@
 ## 0.2.1 — 真机验收后的修复（2026-10-16）
 
-真机（CDP 驱动真实界面）逐项验收 35 项清单时抓到的缺陷，全部修复并有夹具锁定。
 
 ### 修复
 - **`@all` 紧跟中文不再漏判**：`@all你好` 是全员广播，`@allow` 不是。
@@ -71,7 +70,6 @@
 
 - **压缩 = 折叠，不是删除**：原文留在转写里（可以往上翻），只有模型的窗口换成"1 条摘要 + 最近 N 条"。折叠区间记录在 `room.foldedSeqs`。
 - 不再 dispose 成员的 agent、不再清空 `roomAgentSessions`、不再 purge 会话日志、不再推进 `compactCount` —— Bot 自己的上下文窗口交给 DSH（`standard` 预设自带压缩）。
-- 折叠不影响未读计算（有夹具断言）。
 
 ### 修复
 
@@ -82,7 +80,6 @@
 
 ### 测试
 
-`pnpm test` 共 **281 条断言**、11 个夹具文件：routing 19、tool-mask 9、bot-prompt 42、room-goal 26、dispatch 20、memory-store 27、memory-promote 19、compact-window 14、unread-flash 26、group-dedupe 30、bot-memory 49。
 
 ## 0.1.2（已发布）
 
