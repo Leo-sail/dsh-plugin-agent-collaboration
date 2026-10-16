@@ -49,14 +49,6 @@ export interface LedgerProjectionDeps {
    * and this lookup is what tells it which runs are internal.
    */
   readonly runOriginFor?: (roomId: string, botId: string) => string | undefined
-  /**
-   * True when this turn must not be rendered at all.
-   *
-   * Suppressing only the persisted message is not enough: the panel renders the LEDGER, and the
-   * projection creates a row for every run. Measured: a bot whose message was suppressed still
-   * appeared, because its streamed answer had a row — and a report took the message's place.
-   */
-  readonly runSilentFor?: (roomId: string, botId: string) => boolean
 }
 
 /**
@@ -203,7 +195,6 @@ export class LedgerProjection {
       // from the result — so the model appeared to produce nothing while it was working,
       // and 思考过程 only showed up once it had finished.
       const silent = this.deps.runIdFor(owner.roomId, owner.botId) === undefined
-        || this.deps.runSilentFor?.(owner.roomId, owner.botId) === true
 
       const state: AttemptState = { ...owner, text: '', reasoning: '', silent }
 

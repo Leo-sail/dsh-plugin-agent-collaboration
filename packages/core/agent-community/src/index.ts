@@ -761,11 +761,6 @@ export class AgentCommunityService extends TypertRemoteService {
         // of a normal flow (create a group and greet) is exactly two replies: the bot that ran
         // it, and the bot that was pulled in. This is what tells the projection which turns are
         // internal so it creates no rows for them.
-        runSilentFor: (roomId, botId) => {
-          const run = this.state.runs.find(r => r.roomId === roomId && r.botId === botId
-            && (r.status === 'queued' || r.status === 'running'))
-          return run !== undefined && this.silentRuns.has(run.id)
-        },
         runOriginFor: (roomId, botId) => this.state.runs
           .find(r => r.roomId === roomId && r.botId === botId
             && (r.status === 'queued' || r.status === 'running'))?.origin,
@@ -837,9 +832,6 @@ export class AgentCommunityService extends TypertRemoteService {
           return fromRoomTaskState(room?.taskState)
         },
       })
-      // Runs whose turn was suppressed: the room must not show them AT ALL — suppressing only the
-      // persisted message left the run's streamed answer in the ledger, which is what the
-      // panel renders, so the reply still appeared (and a report appeared instead of it).
       this.executor = new RunExecutor(ctx, this, {
         // ── GROUP MEMBERS RUN TOGETHER ─────────────────────────────────────────
         //
@@ -2552,18 +2544,7 @@ export class AgentCommunityService extends TypertRemoteService {
     // model emitted only reasoning) must not persist an empty bot message: the
     // panel renders it as a bot with no content, which reads as a hung reply.
     const replyText = input.reply?.text ?? ''
-    // One message per bot per instruction; see postBotMessage.
-    const instructionAt = this.state.messages
-      .filter(m => m.roomId === prev.roomId && m.sender.kind === 'user')
-      .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
-    const alreadySpoke = instructionAt !== '' && this.state.messages.some(m => m.roomId === prev.roomId
-      && m.sender.kind === 'bot' && m.sender.botId === prev.botId && m.createdAt > instructionAt)
-    if (alreadySpoke) {
-      this.silentRuns.add(prev.id)
-      // Its rows were created when the run STARTED; the verdict only exists now.
-      this.ledger.dropRunRows(String(prev.roomId), prev.id)
-    }
-    if (!alreadySpoke && input.reply !== undefined && replyText.trim() !== '') {
+    if (input.reply !== undefined && replyText.trim() !== '') {
       // B-2: use the real session id from roomAgentSessions rather than
       // prev.sessionId, which is often a stale UUID that has no session directory.
       const realSessionId = this.state.roomAgentSessions.find(
@@ -3097,9 +3078,6 @@ export class AgentCommunityService extends TypertRemoteService {
   }
 
   /** Post a message from a Bot, with optional a2a direct delivery. */
-  /** Run ids whose turn must not be rendered at all. */
-  private readonly silentRuns = new Set<string>()
-
   async postBotMessage(input: PostBotMessageRequest & { internal?: boolean }): Promise<BotMessage> {
     const room = requireRoom(this.state, input.roomId)
     // Resolve sender bot from session id
@@ -3124,40 +3102,10 @@ export class AgentCommunityService extends TypertRemoteService {
       )
     }
     const senderName = senderBot?.name ?? 'bot'
-    // ── ONE MESSAGE PER BOT PER USER INSTRUCTION ───────────────────────────────
-    //
-    // The product rule, in the user's words: a room with N bots answers one instruction with N
-    // messages — one each. Measured violations: two bots, four messages (a completion bulletin
-    // per bot and a report from the member on top of its own reply). This is strategy, not a text
-    // guard: a bot has either spoken since the user's latest message or it has not, whatever it
-    // would say next. The one message it does send carries everything — progress, what it
-    // delegated, the result — and for a task the leader's is the aggregate.
-    const instructionAt = [...this.state.messages]
-      .filter(m => m.roomId === input.roomId && m.sender.kind === 'user')
-      .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
     let suppressMessage = false
-    if (senderBot !== undefined && instructionAt !== '') {
-      const said = this.state.messages.some(m => m.roomId === input.roomId
-        && m.sender.kind === 'bot' && m.sender.botId === senderBot.id
-        && m.createdAt > instructionAt)
-      if (said) {
-        // SUPPRESS THE MESSAGE, NEVER THE WAKE. Returning here once swallowed the delegation that
-        // follows: the leader had spoken, so its message_member call returned early and the member
-        // was never woken — the room then showed one reply and the leader waited for ever.
-        suppressMessage = true
-        const current = this.state.runs.find(r => r.roomId === input.roomId
-          && r.botId === senderBot.id && (r.status === 'queued' || r.status === 'running'))
-        if (current !== undefined) {
-          this.silentRuns.add(current.id)
-          // Drop what this run has already rendered: the panel shows the ledger, and its
-          // rows exist from the moment it started.
-          this.ledger.dropRunRows(String(input.roomId), current.id)
-        }
-      }
-    }
-    // Internal coordination is delivered to the target below and never rendered in the room — but
-    // the delivery and the wake must still happen, which is why this is a flag and not an early
-    // return.
+    // Internal coordination is delivered to the target below and never rendered in the room —
+    // but the delivery and the wake must still happen, which is why this is a flag and not an
+    // early return. Suppressing the message must never suppress the hand-off.
     if (input.internal === true) suppressMessage = true
     const msg: BotMessage = {
       id: brandId<BotMessageId>(randomUUID()),
