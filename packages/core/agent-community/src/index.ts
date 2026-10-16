@@ -816,6 +816,9 @@ export class AgentCommunityService extends TypertRemoteService {
             streaming: false,
           } as never)
         },
+        lastUserMessageAt: (roomId) => [...this.state.messages]
+          .filter(m => m.roomId === roomId && m.sender.kind === 'user')
+          .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '') || undefined,
         saveTaskState: (roomId, taskState) => {
           this.state = {
             ...this.state,

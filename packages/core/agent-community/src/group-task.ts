@@ -52,7 +52,9 @@ export interface GroupTaskState {
   readonly runningBotIds: Set<string>
   /** Reports received since the leader last ran. */
   readonly pendingReports: Array<{ botId: string; text: string; ok: boolean }>
-  finished?: { report: string; at: string } | undefined
+  /** The user instruction this task belongs to, so a finish cannot outlive its task. */
+  instructionAt?: string | undefined
+  finished?: { report: string; at: string; epoch?: string | undefined } | undefined
 }
 
 /** What the driver needs from the community service. */
@@ -74,6 +76,8 @@ export interface GroupTaskAccessor {
   /** Persist coordination state. */
   saveTaskState(roomId: string, state: GroupTaskState): void
   /** Read persisted coordination state. */
+  /** When the room's newest user instruction arrived. */
+  lastUserMessageAt(roomId: string): string | undefined
   loadTaskState(roomId: string): GroupTaskState | undefined
 }
 
@@ -141,7 +145,7 @@ export class GroupTaskDriver {
     state.stalledRounds = 0
     this.save(input.roomId, state)
 
-    if (state.finished !== undefined) return { leaderRuns: false }
+    if (state.finished !== undefined && !this.finishedIsStale(state)) return { leaderRuns: false }
 
     // Only integrate once the whole fan-out has settled — otherwise the leader runs
     // once per member and re-plans against a half-finished picture.
@@ -167,7 +171,7 @@ export class GroupTaskDriver {
     const state = this.ensure(input.roomId)
     state.runningBotIds.delete(this.accessor.leaderOf(input.roomId) ?? '')
 
-    if (state.finished !== undefined) return { stalled: false, stalledRounds: 0 }
+    if (state.finished !== undefined && !this.finishedIsStale(state)) return { stalled: false, stalledRounds: 0 }
 
     const moved =
       input.producedText ||
@@ -198,6 +202,7 @@ export class GroupTaskDriver {
    */
   beginTask(roomId: string): void {
     const state = this.ensure(roomId)
+    state.instructionAt = this.accessor.lastUserMessageAt(roomId) ?? state.instructionAt
     if (state.finished === undefined) return
     state.finished = undefined
     state.pendingReports.length = 0
@@ -207,7 +212,7 @@ export class GroupTaskDriver {
 
   async finish(input: { roomId: string; report: string }): Promise<void> {
     const state = this.ensure(input.roomId)
-    state.finished = { report: input.report, at: new Date().toISOString() }
+    state.finished = { report: input.report, at: new Date().toISOString(), epoch: state.instructionAt }
     state.runningBotIds.clear()
     this.save(input.roomId, state)
 
@@ -324,6 +329,21 @@ export class GroupTaskDriver {
       '[用户消息]',
       userText,
     ].join('\n')
+  }
+
+  /**
+   * True when the finish belongs to an EARLIER instruction.
+   *
+   * `finished` marks the task as delivered, but a room can be finishing one task while the user
+   * has already started the next — measured: the leader completed the previous article's
+   * verification AFTER the new instruction arrived, set `finished` again, and every later
+   * integration in that room was blocked. Comparing epochs is exact; comparing times is not,
+   * because that write happens after the new instruction.
+   */
+  private finishedIsStale(state: GroupTaskState): boolean {
+    const done = state.finished
+    if (done === undefined) return false
+    return done.epoch !== state.instructionAt
   }
 
   /** The leader's integrate prompt, with what came back since it last ran. */
