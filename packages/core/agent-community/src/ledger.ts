@@ -468,6 +468,22 @@ export class LedgerProjector {
    * opened by the streaming projection, written by the final answer — is reused rather
    * than joined by a second row for the same turn.
    */
+  /**
+   * Remove every row belonging to one run.
+   *
+   * Needed because a turn can only be judged suppressible when it SETTLES, while its rows are
+   * created when it STARTS: by then the panel already has them. Measured on a group where two
+   * suppressed turns left two '已完成…' bulletins on screen that exist nowhere in the room's
+   * messages — the ledger was rendering runs the plugin had decided not to persist.
+   */
+  dropRunRows(roomId: string, runId: string): number {
+    const list = this.byRoom.get(roomId)
+    if (list === undefined) return 0
+    const kept = list.filter(e => (e as { runId?: string }).runId !== runId)
+    const removed = list.length - kept.length
+    if (removed > 0) this.byRoom.set(roomId, kept)
+    return removed
+  }
   botTextRowForRun(roomId: string, runId: string): string | undefined {
     const list = this.byRoom.get(roomId)
     if (list === undefined) return undefined
