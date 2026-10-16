@@ -3171,8 +3171,12 @@ export class AgentCommunityService extends TypertRemoteService {
       // already wakes the leader when a member's turn settles, and doing both produced two leader
       // runs — and two replies — for one member delivery (measured: 14:55:27 a2a and 14:55:30
       // 成员汇报, same content). Messages between members are unaffected.
-      const a2aLeaderRef = room.team?.leader
-      const targetIsLeader = a2aLeaderRef?.kind === 'bot' && a2aLeaderRef.botId === targetBot?.id
+      // The room's leader, resolved the same way the rest of the service resolves it.
+      //
+      // `room.team?.leader` was wrong here: a group created through the proposal flow can carry
+      // no `team` at all (measured on the room in question), so the test was always false and the
+      // a2a run was queued as well — two wakes for one member delivery, two leader replies.
+      const targetIsLeader = targetBot !== undefined && this.leaderOfRoom(String(input.roomId)) === targetBot.id
       if (targetBot !== undefined && answeringPeer !== true && targetIsLeader !== true) {
         // Create a queued run for the target bot to process the message
         const run: BotRun = {
