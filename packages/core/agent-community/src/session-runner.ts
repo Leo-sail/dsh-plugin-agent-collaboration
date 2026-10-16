@@ -221,6 +221,50 @@ const OWNED_SEP = ':'
  * NOTE: this list is a MASK, not an unmount. A name the scope does not know is skipped (see
  * `restrictGlobalTools`), so a deployment may trim it without breaking startup.
  */
+/**
+ * Tools that belong to DSH's own Agent Teams and must not be used from a room.
+ *
+ * WHY A GUARD AND NOT A RESTRICTION. These five are registered ON the bot agent's own scope by the
+ * profile's Agent Teams bundle — measured in a live session (38 tools, all five present). DSH's
+ * `tools.restrict()` is a GLOBAL-tool mask: it validates names against the scope's
+ * `restrictableNames` and throws for anything else, so a sibling scope-local registration cannot
+ * be hidden by it, from the plugin or anywhere else. Upstream documents the cause and defers it:
+ * "in-process one-shot children receive their subagent descriptor after publication. Team
+ * installation can therefore mistake them for Leads and expose Team policy and tools. Calls are
+ * rejected once the descriptor identifies them as non-members."
+ *
+ * What CAN be done from the plugin is `tools.guard()`, registered through the agent's own ctx:
+ * "Any matching guard may deny by returning a reason." The tools stay listed, but every call from
+ * a bot is refused with a reason the model reads — so a bot cannot spawn teammates, cannot message
+ * a "member" that is not in the room, and cannot interrupt one. For a room, `assign_task` /
+ * `message_member` / `finish_task` are the collaboration surface, and this makes that literal.
+ */
+export const AGENT_TEAMS_TOOLS: readonly string[] = [
+  'list_agents', 'send_message', 'interrupt_agent', 'spawn_teammate', 'wait_agent',
+  // Not Agent Teams, but the same class: mounted by another composition, not ours to remove, and
+  // meaningless in a bot's own workspace.
+  'load_workspace_dependencies',
+]
+
+/** The tool name a guard/interceptor was handed, whatever shape the runtime uses. */
+export function toolNameOf(exec: unknown): string | undefined {
+  if (exec === null || typeof exec !== 'object') return undefined
+  const e = exec as { toolName?: unknown; name?: unknown; call?: { name?: unknown }; tool?: { name?: unknown } }
+  for (const candidate of [e.toolName, e.name, e.call?.name, e.tool?.name]) {
+    if (typeof candidate === 'string' && candidate !== '') return candidate
+  }
+  return undefined
+}
+
+/** The refusal a room gives for an Agent Teams tool, or undefined when the call is allowed. */
+export function agentTeamsDenial(exec: unknown): string | undefined {
+  const name = toolNameOf(exec)
+  if (name === undefined || !AGENT_TEAMS_TOOLS.includes(name)) return undefined
+  return `${name} 属于 DSH 的 Agent Teams，不属于本房间。房间里的事只用 `
+    + 'agent_community_dispatch / assign_task / message_member / finish_task 这一套；'
+    + '要和其他成员说话就用 message_member。'
+}
+
 export const DEFAULT_DENIED_TOOLS: readonly string[] = [
   'plugin_manager',
   'ask_user_question',
@@ -385,6 +429,13 @@ export class SessionRunner {
   private disposed = false
 
   constructor(ctx: Context, accessor: SessionRunnerAccessor, opts: SessionRunnerOptions = {}) {
+    // ONE BOOT LINE, so the file explains itself even before the first bot turn: which names
+    // the plugin asks to deny, and which ones it guards instead (a restriction cannot hide a
+    // sibling scope-local registration — see AGENT_TEAMS_TOOLS).
+    this.noteToolMask(
+      `boot deny=[${(opts.deniedTools ?? []).join(',')}] guard=[${AGENT_TEAMS_TOOLS.join(',')}]`,
+    )
+
     this.ctx = ctx
     this.accessor = accessor
     // `setupAgent` has no default; spreading DEFAULTS over it would otherwise drop it.
@@ -876,6 +927,7 @@ export class SessionRunner {
     const setup = async (agentCtx: Context): Promise<void> => {
       this.installRequestOverride(agentCtx, key)
       if (mountPreset) await this.mountAgentPreset(agentCtx, preset)
+      this.installAgentTeamsGuard(agentCtx, key)
       const deny = this.opts.deniedTools
       if (deny !== undefined && deny.length > 0) {
         const mask = restrictGlobalTools(agentCtx, deny)
@@ -1147,6 +1199,35 @@ export class SessionRunner {
       this.noteToolMask(
         `re-apply applied=[${result.applied.join(',')}] still-skipped=[${result.skipped.join(',')}]`,
       )
+    }
+  }
+
+  /**
+   * Refuse the Agent Teams tools inside this bot's scope (§ see {@link AGENT_TEAMS_TOOLS}).
+   *
+   * Registered on the agent's own ctx, so it cannot affect the user's main session — which keeps
+   * Agent Teams exactly where it belongs.
+   */
+  private installAgentTeamsGuard(agentCtx: Context, key: string): void {
+    type GuardHost = { guard?(check: (exec: unknown) => string | undefined): unknown }
+    const tools = optionalService<GuardHost>(agentCtx, 'tools') ?? safeProperty<GuardHost>(agentCtx, 'tools')
+    if (tools?.guard === undefined) {
+      this.noteToolMask(`guard unavailable scope=${key} (no tools.guard on this runtime)`)
+      return
+    }
+    try {
+      tools.guard((exec) => {
+        const refusal = agentTeamsDenial(exec)
+        if (refusal !== undefined) {
+          // A refusal is worth a line: it is the difference between "the model found another way"
+          // and "the model tried the wrong tool and was told why".
+          this.noteToolMask(`denied tool=${toolNameOf(exec) ?? '?'} scope=${key}`)
+        }
+        return refusal
+      })
+      this.noteToolMask(`guard installed deny=[${AGENT_TEAMS_TOOLS.join(',')}] scope=${key}`)
+    } catch (error: unknown) {
+      this.noteToolMask(`guard FAILED scope=${key} error=${String(error)}`)
     }
   }
 

@@ -12,7 +12,7 @@
  *
  * Usage: node tests/tool-mask.mjs
  */
-import { restrictGlobalTools, DEFAULT_DENIED_TOOLS }
+import { restrictGlobalTools, DEFAULT_DENIED_TOOLS, agentTeamsDenial, toolNameOf, AGENT_TEAMS_TOOLS }
   from '../packages/core/agent-community/src/session-runner.ts'
 
 let pass = 0
@@ -83,6 +83,22 @@ check(none.applied.length === 0 && none.skipped.length === DEFAULT_DENIED_TOOLS.
 // ── 5. 空表 ──────────────────────────────────────────────────────────────────
 const empty = restrictGlobalTools(ctxWith(makeRegistry({ global: [] })), [])
 check(empty.applied.length === 0 && empty.skipped.length === 0, '空 deny 表 → 什么都不做')
+
+
+// ── Agent Teams 的调用守卫 ───────────────────────────────────────────────────
+//
+// 实测：Bot 目录里有 5 个团队工具（list_agents/send_message/interrupt_agent/spawn_teammate/
+// wait_agent）+ load_workspace_dependencies。DSH 的 restrict 是"全局工具掩码"，管不到别的插件注册在
+// 同一作用域里的工具（源码里 `restrictableNames` 校验会直接抛错），上游也把"修正安装时机"列为 deferred。
+// 插件能做的是 tools.guard：**调用即被拒**。这条断言保证那 6 个名字真的会被拒，别的不会被误伤。
+for (const name of AGENT_TEAMS_TOOLS) {
+  check(typeof agentTeamsDenial({ toolName: name }) === 'string', `${name} 会被守卫拒绝`)
+}
+check(agentTeamsDenial({ toolName: 'assign_task' }) === undefined, '房间自己的工具不受影响（assign_task）')
+check(agentTeamsDenial({ toolName: 'message_member' }) === undefined, '房间自己的工具不受影响（message_member）')
+check(agentTeamsDenial({ call: { name: 'send_message' } }) !== undefined, '换一种 exec 形状也能识别（call.name）')
+check(toolNameOf({ tool: { name: 'list_agents' } }) === 'list_agents', 'toolNameOf 认得 tool.name')
+check(toolNameOf({}) === undefined, '没有名字时返回 undefined')
 
 console.log(`\n[tool-mask] ${pass}/${total} 通过`)
 process.exit(pass === total ? 0 : 1)
