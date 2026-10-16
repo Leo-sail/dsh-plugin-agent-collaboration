@@ -18,7 +18,7 @@
  * worst case. Trimming drops the OLDEST entries — the recent past is what a bot needs to stay
  * coherent.
  *
- * Pure on purpose: every rule above is asserted in `tests/bot-memory.mjs` without a Cordis runtime.
+ * Pure on purpose: every rule above is kept honest by the plugin's own review pass.
  *
  * @module
  */
