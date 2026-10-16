@@ -74,16 +74,14 @@ Restart DSH and refresh the page — **Bots团队** appears in the sidebar.
 
 ### Installing the release tarball instead
 
+The archive attached to each release is the same build that is published to npm — use it when you
+would rather not install through a registry. The line below points at the latest public release;
+see [CHANGELOG.md](CHANGELOG.md) for what a newer version changes.
+
 ```bash
 dsh plugin --profile <your-profile> add \
-  > NOTE: this repository is at **0.2.0, not released yet**. The link below points at the last
-  > public release (v0.1.2); see [CHANGELOG.md](CHANGELOG.md) for what 0.2.0 changes and
-  > [ACCEPTANCE.zh-CN.md](ACCEPTANCE.zh-CN.md) for the steps to verify it after installing.
-
   https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
 ```
-
-The same archive, attached to the release for anyone who would rather not go through npm.
 
 ### Installing from a checkout instead
 
