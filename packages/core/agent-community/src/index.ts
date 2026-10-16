@@ -3167,7 +3167,13 @@ export class AgentCommunityService extends TypertRemoteService {
       // the user saw. The team path is the richer one (it carries the report), so a message
       // addressed to the room's own leader does not also create an `a2a` run.
       const leaderRef = room.team?.leader
-      if (targetBot !== undefined && answeringPeer !== true) {
+      // A message addressed to the room's own leader does NOT queue an a2a run: the team layer
+      // already wakes the leader when a member's turn settles, and doing both produced two leader
+      // runs — and two replies — for one member delivery (measured: 14:55:27 a2a and 14:55:30
+      // 成员汇报, same content). Messages between members are unaffected.
+      const a2aLeaderRef = room.team?.leader
+      const targetIsLeader = a2aLeaderRef?.kind === 'bot' && a2aLeaderRef.botId === targetBot?.id
+      if (targetBot !== undefined && answeringPeer !== true && targetIsLeader !== true) {
         // Create a queued run for the target bot to process the message
         const run: BotRun = {
           id: brandId<BotRunId>(randomUUID()),

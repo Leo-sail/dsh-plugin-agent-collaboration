@@ -354,6 +354,29 @@ export class LedgerProjector {
         })
       }
     }
+    // ── A SEEDED MESSAGE REUSES ITS RUN'S ROW ───────────────────────────────────
+    //
+    // Seeding rebuilds the room from the persisted messages, but the row a run already owns
+    // carries what a message does not: its reasoning and its tool activity. Replacing the room
+    // wholesale therefore showed every answer twice once the panel refetched — one row with
+    // 思考过程 and one without (measured: four leader replies where one was expected). A seeded
+    // bot-text row whose run already has a row takes that row's place instead of adding a copy.
+    const live = this.byRoom.get(roomId) ?? []
+    if (live.length > 0) {
+      const byRun = new Map<string, LedgerEntry>()
+      for (const e of live) {
+        const rid = (e as { runId?: string }).runId
+        if (rid !== undefined && e.type === 'bot-text') byRun.set(rid, e)
+      }
+      const merged = list.filter((e) => {
+        const rid = (e as { runId?: string }).runId
+        return !(e.type === 'bot-text' && rid !== undefined && byRun.has(rid))
+      })
+      // Every row in `byRun` was filtered out of `merged` above, so pushing them back cannot dupe.
+      for (const e of byRun.values()) merged.push(e)
+      this.byRoom.set(roomId, merged as LedgerEntry[])
+      return merged.length
+    }
     this.byRoom.set(roomId, list as LedgerEntry[])
     return list.length
   }
