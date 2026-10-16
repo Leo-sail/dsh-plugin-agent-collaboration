@@ -21,7 +21,7 @@
     "type": "git",
     "url": "git+https://github.com/Leo-sail/dsh-plugin-agent-collaboration.git"
   },
-  "author": "Leo-sail",
+  "author": "leochang <leochang@gmail.com>",
   "homepage": "https://github.com/Leo-sail/dsh-plugin-agent-collaboration#readme",
   "bugs": {
     "url": "https://github.com/Leo-sail/dsh-plugin-agent-collaboration/issues"
