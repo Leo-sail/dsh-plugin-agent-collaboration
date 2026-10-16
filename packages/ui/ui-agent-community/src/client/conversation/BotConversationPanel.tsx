@@ -620,6 +620,7 @@ function SessionHeader({
   isRunning: boolean
   onStop: () => void
   onClear: () => void
+  onExport?: (() => void) | undefined
 }) {
   const iconBtn: CSSProperties = {
     width: 28, height: 28, flexShrink: 0,
