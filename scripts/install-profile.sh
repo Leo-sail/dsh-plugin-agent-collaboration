@@ -180,7 +180,8 @@ done
 # profile running the OLD config — the maxConcurrentRuns change is exactly the kind of
 # edit that would silently never arrive. Missing bundle dir is not fatal (a profile may
 # mount the @dsh-plugin rows directly), but a stale patch is.
-BUNDLE_SRC="$ROOT/packages/bundle/agent-collaboration/cordis.patch.yml"
+BUNDLE_SRC_DIR="$ROOT/packages/bundle/agent-collaboration"
+BUNDLE_SRC="$BUNDLE_SRC_DIR/cordis.patch.yml"
 BUNDLE_DIR="$DSH_HOME_DIR/profiles/$PROFILE/node_modules/dsh-plugin-agent-collaboration"
 if [ ! -d "$BUNDLE_DIR" ]; then
   # Silently skipping this used to leave the profile running the OLD patch — the failure mode the
@@ -192,6 +193,23 @@ if [ ! -d "$BUNDLE_DIR" ]; then
     exit 1
   fi
 fi
+  # ── A SYMLINKED BUNDLE DIR MUST BECOME A REAL COPY ────────────────────────────
+  #
+  # When the profile's dependency is `link:<somewhere>`, pnpm materialises the bundle directory as
+  # a SYMLINK. Node then resolves the bundle's own module names from the TARGET tree, so the three
+  # components are loaded from that checkout instead of the copies installed here — a restart keeps
+  # running stale code no matter how many times the profile is reinstalled. Observed: every
+  # diagnostic added to the installed components never executed, because the host was reading the
+  # other tree.
+  #
+  # Replacing the symlink with a real directory makes the resolution local and unambiguous.
+  if [ -L "$BUNDLE_DIR" ]; then
+    echo "  replacing symlinked bundle dir with a real copy"
+    rm -f "$BUNDLE_DIR"
+    mkdir -p "$BUNDLE_DIR"
+    cp -R "$BUNDLE_SRC_DIR/." "$BUNDLE_DIR/" 2>/dev/null || true
+  fi
+
 if [ -d "$BUNDLE_DIR" ]; then
   if [ ! -s "$BUNDLE_SRC" ]; then
     echo "install-profile: MISSING $BUNDLE_SRC" >&2; exit 1
