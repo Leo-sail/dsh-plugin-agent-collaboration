@@ -2544,7 +2544,13 @@ export class AgentCommunityService extends TypertRemoteService {
     // model emitted only reasoning) must not persist an empty bot message: the
     // panel renders it as a bot with no content, which reads as a hung reply.
     const replyText = input.reply?.text ?? ''
-    if (input.reply !== undefined && replyText.trim() !== '') {
+    // One message per bot per instruction; see postBotMessage.
+    const instructionAt = this.state.messages
+      .filter(m => m.roomId === prev.roomId && m.sender.kind === 'user')
+      .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
+    const alreadySpoke = instructionAt !== '' && this.state.messages.some(m => m.roomId === prev.roomId
+      && m.sender.kind === 'bot' && m.sender.botId === prev.botId && m.createdAt > instructionAt)
+    if (!alreadySpoke && input.reply !== undefined && replyText.trim() !== '') {
       // B-2: use the real session id from roomAgentSessions rather than
       // prev.sessionId, which is often a stale UUID that has no session directory.
       const realSessionId = this.state.roomAgentSessions.find(
@@ -3102,6 +3108,27 @@ export class AgentCommunityService extends TypertRemoteService {
       )
     }
     const senderName = senderBot?.name ?? 'bot'
+    // ── ONE MESSAGE PER BOT PER USER INSTRUCTION ───────────────────────────────
+    //
+    // The product rule, in the user's words: a room with N bots answers one instruction with N
+    // messages — one each. Measured violations: two bots, four messages (a completion bulletin
+    // per bot and a report from the member on top of its own reply). This is strategy, not a text
+    // guard: a bot has either spoken since the user's latest message or it has not, whatever it
+    // would say next. The one message it does send carries everything — progress, what it
+    // delegated, the result — and for a task the leader's is the aggregate.
+    const instructionAt = [...this.state.messages]
+      .filter(m => m.roomId === input.roomId && m.sender.kind === 'user')
+      .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
+    if (senderBot !== undefined && instructionAt !== '') {
+      const said = this.state.messages.some(m => m.roomId === input.roomId
+        && m.sender.kind === 'bot' && m.sender.botId === senderBot.id
+        && m.createdAt > instructionAt)
+      if (said) {
+        const last = [...this.state.messages].reverse().find(m => m.roomId === input.roomId
+          && m.sender.kind === 'bot' && m.sender.botId === senderBot.id)
+        return last as BotMessage
+      }
+    }
     if (input.internal === true) {
       // Handed to the target below; never rendered in the room. Returning a shaped message keeps
       // every caller's contract unchanged. Coordination between bots is not conversation with the
