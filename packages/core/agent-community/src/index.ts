@@ -1841,7 +1841,18 @@ export class AgentCommunityService extends TypertRemoteService {
     // room's transcript stays in memory and can reappear.
     this.ledger.clearRoom(roomId)
     this.ledgerHydrated.delete(roomId)
-    await this.archiveRoomMemory(roomId, memberIds)
+    // ── ARCHIVE THE ROOM'S HISTORY, NOT JUST ITS ROSTER ───────────────────────
+    //
+    // `memberIds` alone was not enough: a bot kicked before the room was deleted kept its
+    // partition in the live tree forever — the room was gone, and no archive entry was written
+    // for it either. Measured on 2026-10-16 with a temp group whose kicked member still had a
+    // 535-byte memory file after the group was deleted. The user's rule is that deleting a room
+    // keeps what the bots learned there, which is about the room's history rather than about who
+    // happened to be a member at the end.
+    const rememberedBots = this.memoryStore === undefined
+      ? []
+      : await this.memoryStore.botsWithRoom(roomId)
+    await this.archiveRoomMemory(roomId, [...new Set([...memberIds, ...rememberedBots])])
     await this.flushNow()
     await this.maintenance.purgeRoomArtifacts(roomId, sessions)
     await this.maintenance.purgeProjectionCache(sessions)

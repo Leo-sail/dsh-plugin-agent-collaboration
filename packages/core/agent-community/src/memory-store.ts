@@ -27,7 +27,7 @@
  *
  * @module
  */
-import { mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { BotMemoryEntry, BotMemoryRecord } from './types.ts'
 import { appendEntry, clip, entriesFor, MAX_ENTRY_CHARS } from './bot-memory.ts'
@@ -249,6 +249,38 @@ export class MemoryStore {
       }
     }
     return moved
+  }
+
+  /**
+   * Every bot that has a partition for this room, membership notwithstanding.
+   *
+   * WHY THIS EXISTS. Deleting a room used to archive only the rooms's CURRENT members, so a bot
+   * that had been kicked earlier kept its partition in the live tree forever: the room was gone
+   * (unreachable), yet no `_archive/<roomId>/` entry was written for it. Measured on 2026-10-16:
+   * a temp group with fghj's partition was deleted AFTER fghj was kicked, and his 535-byte memory
+   * file survived in `memory/<botId>/rooms/<roomId>.md` while the archive stayed empty.
+   *
+   * The rule the user set is "deleting a room keeps what the bots learned there" — that is about
+   * the room's history, not about who happened to still be a member at the end.
+   */
+  async botsWithRoom(roomId: string): Promise<readonly string[]> {
+    const found: string[] = []
+    let entries: readonly string[]
+    try {
+      entries = await readdir(this.root)
+    } catch {
+      return found
+    }
+    for (const botId of entries) {
+      if (botId === '_archive') continue
+      try {
+        const info = await stat(join(this.root, botId, 'rooms', `${roomId}.md`))
+        if (info.size > 0) found.push(botId)
+      } catch {
+        // No partition for this pair.
+      }
+    }
+    return found
   }
 
   /** Delete a bot's own memory. The caller archives its GROUP partitions first. */

@@ -83,6 +83,27 @@ check(!await exists(memoryPaths(root, 'botA', 'x').botDir), 'Bot 自己的记忆
 check(await exists(memoryPaths(root, 'botA', 'roomG').archiveFile), '它在群里的分区仍在归档里（不被连带删除）')
 
 // ── 7. 索引：派生、可重建 ────────────────────────────────────────────────────
+// ── 被踢成员的分区：删群时也必须归档 ────────────────────────────────────────
+//
+// 实测（2026-10-16）：临时群里先踢掉 fghj，再删群 —— 群没了、归档目录空的，而 fghj 的分区
+// 还留在 memory/<botId>/rooms/<roomId>.md。原因是删群只归档"当时的成员"。规则是"删群保留
+// 大家在这里学到的东西"，这讲的是房间的历史，不是最后还剩谁。
+const roomK = 'room-kick'
+const metaK = (botId) => ({ roomId: roomK, roomName: '临时群', botId, kind: 'group' })
+await store.append({ meta: metaK('botA'), entry: entry('2026-10-16T04:00:00.000Z', '任务：a → 结果：done', 'rk1'), maxEntries: 12, now: '2026-10-16T04:00:00.000Z' })
+await store.append({ meta: metaK('botK'), entry: entry('2026-10-16T04:00:01.000Z', '任务：k → 结果：done', 'rk2'), maxEntries: 12, now: '2026-10-16T04:00:01.000Z' })
+const remembered = await store.botsWithRoom(roomK)
+check(remembered.includes('botA') && remembered.includes('botK'), 'botsWithRoom 找到两个有分区的 Bot', remembered.join(','))
+check((await store.botsWithRoom('room-does-not-exist')).length === 0, '没有分区的房间返回空')
+// 旧行为：只归档当时的成员 → 被踢的那个留在活跃目录（这正是缺陷）
+await store.archiveRoom(roomK, ['botA'])
+check(await exists(join(root, 'botK', 'rooms', `${roomK}.md`)), '只传成员时，被踢者的分区会残留（缺陷现场）')
+// 新行为：按"有分区的 Bot"归档
+const stillLive = await store.botsWithRoom(roomK)
+await store.archiveRoom(roomK, stillLive)
+check(!(await exists(join(root, 'botK', 'rooms', `${roomK}.md`))), '按分区归档后，被踢者的活跃文件已移走')
+check(await exists(join(root, '_archive', roomK, 'botK.md')), '被踢者的记忆进了 _archive/<roomId>/', join('_archive', roomK, 'botK.md'))
+
 const store2 = new MemoryStore(root)
 await store2.append({ meta: { roomId: 'roomI', roomName: '索引群', botId: 'botZ', kind: 'group' }, entry: entry('2026-10-15T13:00:00.000Z', '任务：x → 结果：y', 'rz'), maxEntries: 12, now: '2026-10-15T13:00:00.000Z' })
 const index = await readFile(memoryPaths(root, 'botZ', 'x').indexPath, 'utf8')
