@@ -202,8 +202,16 @@ export class GroupTaskDriver {
    */
   beginTask(roomId: string): void {
     const state = this.ensure(roomId)
-    state.instructionAt = this.accessor.lastUserMessageAt(roomId) ?? state.instructionAt
-    if (state.finished === undefined) return
+    const at = this.accessor.lastUserMessageAt(roomId)
+    // The epoch must be PERSISTED even when there is nothing else to reset: this early return
+    // used to skip the save, so `instructionAt` stayed undefined while a stale `finished` (whose
+    // epoch is also undefined) compared equal to it and kept blocking every later task.
+    const epochChanged = at !== undefined && at !== state.instructionAt
+    if (epochChanged) state.instructionAt = at
+    if (state.finished === undefined) {
+      if (epochChanged) this.save(roomId, state)
+      return
+    }
     state.finished = undefined
     state.pendingReports.length = 0
     state.stalledRounds = 0
