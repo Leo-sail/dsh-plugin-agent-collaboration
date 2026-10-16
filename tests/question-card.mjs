@@ -60,6 +60,11 @@ console.log(`\n[question-card] ${pass}/${total} 通过`)
   else console.log('PASS 导出转写有真实调用点')
   if (!/onExport/.test(panel) || !/导出/.test(panel)) { console.error('FAIL 面板里没有导出按钮'); process.exitCode = 1 }
   else console.log('PASS 面板里有导出按钮')
+  // 声明了 prop 不等于用上了它：第一版就漏了把 onExport 传给 SessionHeader，于是按钮永远不渲染，
+  // 而"文件里有导出"这类断言照样通过。这一条盯住真正的传参。
+  const headerUse = /<SessionHeader[\s\S]{0,3000}?onExport=\{/.test(panel)
+  if (!headerUse) { console.error('FAIL SessionHeader 没有收到 onExport（按钮不会渲染）'); process.exitCode = 1 }
+  else console.log('PASS SessionHeader 收到了 onExport')
 }
 process.exit(pass === total ? 0 : 1)
 

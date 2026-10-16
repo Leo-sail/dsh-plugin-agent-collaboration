@@ -211,7 +211,7 @@ function byTimeThenSequence(a: LedgerEntry, b: LedgerEntry): number {
 
 export function BotConversationPanel({
   roomId, roomName, isGroup, bots, runs, modelGroups, skills, onLoadSkill, onListSkillFiles, skillsError,
-  onSend, onStop, onApprove, onReject, onAnswerQuestion, onSkipQuestion, onCommand, onClear, listLedger, onFork, tasks, round,
+  onSend, onStop, onApprove, onReject, onAnswerQuestion, onSkipQuestion, onCommand, onClear, onExport, listLedger, onFork, tasks, round,
 }: BotConversationPanelProps) {
   const [entries, setEntries] = useState<LedgerEntry[]>([])
   const [hasEarlier, setHasEarlier] = useState(false)
@@ -463,6 +463,12 @@ export function BotConversationPanel({
         isGroup={isGroup}
         isRunning={isRunning}
         onStop={handleStop}
+        // WITHOUT THIS LINE THE BUTTON NEVER RENDERS. `onExport` was declared in the props type,
+        // destructured, and read inside SessionHeader — but never passed, so it was `undefined` at
+        // runtime and the「导出」button stayed hidden no matter how often the app restarted.
+        // Measured by driving the real panel: the bar showed 清空消息 only, while both installed
+        // copies of the bundle already contained the button.
+        onExport={onExport}
         onClear={() => {
           // Reset the local view and the poll cursor FIRST: the cursor is derived
           // from the last known sequence, so clearing entries makes the next poll

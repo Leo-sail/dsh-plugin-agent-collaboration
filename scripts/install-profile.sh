@@ -255,3 +255,28 @@ if [ -d "$PRESET_SRC" ]; then
   done
   echo "install-profile: bot agent preset → $PRESET_DEST"
 fi
+
+# ── pnpm's `.ignored` COPY IS THE ONE THE HOST ACTUALLY LOADS ─────────────────
+#
+# Measured 2026-10-16: the plugin's client bundle was installed (and verified) under
+# node_modules/@dsh-plugin-agent-community/ui-agent-community, while the running host served
+# node_modules/.ignored/@dsh-plugin-agent-community/ui-agent-community — a STALE copy — so a
+# working 「导出」 button never appeared in the panel and the UI looked untouched. pnpm parks a
+# package under `.ignored/` when it decides not to link it, and the profile's resolver can still
+# end up there. An install that writes only one of the two locations silently does nothing.
+#
+# Explicit pairs rather than a discovery loop: the mapping from package to source tree is fixed,
+# and a loop that matches nothing fails silently — which is exactly what the first version of this
+# block did.
+for pair in \
+  "core/agent-community:agent-community" \
+  "tools/tool-agent-community:tool-agent-community" \
+  "ui/ui-agent-community:ui-agent-community"; do
+  src="$ROOT/packages/${pair%%:*}/lib"
+  dst="$DEST/node_modules/.ignored/@dsh-plugin-agent-community/${pair##*:}/lib"
+  [ -d "$src" ] && [ -d "$dst" ] || continue
+  if ! diff -rq "$src" "$dst" >/dev/null 2>&1; then
+    cp -R "$src/." "$dst/"
+    echo "  refreshed .ignored copy: ${pair##*:}"
+  fi
+done
