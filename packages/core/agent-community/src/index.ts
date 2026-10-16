@@ -2558,14 +2558,6 @@ export class AgentCommunityService extends TypertRemoteService {
       )?.sessionId ?? prev.sessionId
       const reply: BotMessage = {
         id: brandId<BotMessageId>(randomUUID()),
-        // ── THE MESSAGE *IS* THE RUN'S ROW ──────────────────────────────────────
-        //
-        // Without this id the ledger cannot tell that the persisted message and the run's streamed
-        // text are the same answer, so the panel rendered both: the user saw every bot reply twice
-        // and reported it as duplicate messages. The ledger merges rows by run id — the projection
-        // already reserves a row per run (`botTextRowForRun`) — so tagging the message with its run
-        // is what makes one turn one row.
-        runId: prev.id,
         roomId: prev.roomId,
         sender: {
           kind: 'bot',
