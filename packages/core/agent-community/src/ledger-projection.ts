@@ -194,9 +194,7 @@ export class LedgerProjection {
       // only after the turn settled, when `patchRunText`/`patchRunReasoning` wrote them
       // from the result — so the model appeared to produce nothing while it was working,
       // and 思考过程 only showed up once it had finished.
-      const origin = this.deps.runOriginFor?.(owner.roomId, owner.botId)
       const silent = this.deps.runIdFor(owner.roomId, owner.botId) === undefined
-        || (origin !== undefined && INTERNAL_RUN_ORIGINS.has(origin))
 
       const state: AttemptState = { ...owner, text: '', reasoning: '', silent }
 

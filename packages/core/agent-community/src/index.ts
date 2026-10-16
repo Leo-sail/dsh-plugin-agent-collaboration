@@ -2535,17 +2535,7 @@ export class AgentCommunityService extends TypertRemoteService {
     // model emitted only reasoning) must not persist an empty bot message: the
     // panel renders it as a bot with no content, which reads as a hung reply.
     const replyText = input.reply?.text ?? ''
-    // Internal turns do not speak to the user. Their text is the bot's reply to a peer or a report
-    // to the leader; rendering it is what produced five messages for one instruction, three of them
-    // the same bot announcing completion. The user-facing deliverable travels through `finish_task`.
-    const internalTurn = prev.origin === 'a2a' || prev.origin === 'bot-message' || prev.origin === 'team-report'
-    // One reply per bot per instruction; see postBotMessage.
-    const instructionAt = this.state.messages
-      .filter(m => m.roomId === prev.roomId && m.sender.kind === 'user')
-      .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
-    const spokeThisTurn = instructionAt !== '' && this.state.messages.some(m => m.roomId === prev.roomId
-      && m.sender.kind === 'bot' && m.sender.botId === prev.botId && m.createdAt > instructionAt)
-    if (!internalTurn && !spokeThisTurn && input.reply !== undefined && replyText.trim() !== '') {
+    if (input.reply !== undefined && replyText.trim() !== '') {
       // B-2: use the real session id from roomAgentSessions rather than
       // prev.sessionId, which is often a stale UUID that has no session directory.
       const realSessionId = this.state.roomAgentSessions.find(
@@ -3103,27 +3093,6 @@ export class AgentCommunityService extends TypertRemoteService {
       )
     }
     const senderName = senderBot?.name ?? 'bot'
-    // ── ONE REPLY PER BOT PER INSTRUCTION ──────────────────────────────────────
-    //
-    // The product rule: a group of N bots answers one instruction with N replies — one each.
-    // This is not a text guard; a bot has either spoken since the user's latest message or it
-    // has not. Whatever it says next, however differently worded, is a second voice in the same
-    // turn — which is what turned one instruction into five messages (two completion bulletins,
-    // a member report, and a duplicate greeting). The deliverable is unaffected: the leader's
-    // single message IS the delivery, and the prompt says so.
-    const instructionAt = [...this.state.messages]
-      .filter(m => m.roomId === input.roomId && m.sender.kind === 'user')
-      .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
-    if (senderBot !== undefined && instructionAt !== '') {
-      const spoke = this.state.messages.some(m => m.roomId === input.roomId
-        && m.sender.kind === 'bot' && m.sender.botId === senderBot.id
-        && m.createdAt > instructionAt)
-      if (spoke) {
-        const last = [...this.state.messages].reverse().find(m => m.roomId === input.roomId
-          && m.sender.kind === 'bot' && m.sender.botId === senderBot.id)
-        return last as BotMessage
-      }
-    }
     if (input.internal === true) {
       // Handed to the target below; never rendered in the room. Returning a shaped message keeps
       // every caller's contract unchanged. Coordination between bots is not conversation with the
