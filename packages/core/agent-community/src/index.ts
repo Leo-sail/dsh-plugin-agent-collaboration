@@ -3159,7 +3159,16 @@ export class AgentCommunityService extends TypertRemoteService {
         .slice(-1)[0]
       const answeringPeer = senderRun?.origin === 'a2a'
       const targetBot = findBotByName(this.state, input.toBotName)
-      if (targetBot !== undefined && answeringPeer !== true) {
+      // ── A MEMBER'S REPORT WAKES THE LEADER ONCE, NOT TWICE ──────────────────
+      //
+      // Measured on a greeting: one member message queued an `a2a` run for the leader here, while
+      // the team layer independently queued a `bot-message` run carrying 「[成员汇报]」 for the same
+      // event. The leader therefore ran twice, and answered twice — two of the four extra messages
+      // the user saw. The team path is the richer one (it carries the report), so a message
+      // addressed to the room's own leader does not also create an `a2a` run.
+      const leaderRef = room.team?.leader
+      const targetIsLeader = leaderRef?.kind === 'bot' && leaderRef.botId === targetBot?.id
+      if (targetBot !== undefined && answeringPeer !== true && targetIsLeader !== true) {
         // Create a queued run for the target bot to process the message
         const run: BotRun = {
           id: brandId<BotRunId>(randomUUID()),
