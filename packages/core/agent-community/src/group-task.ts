@@ -114,6 +114,14 @@ export class GroupTaskDriver {
     botId: string
     text: string
     ok: boolean
+    /**
+     * True when this member's turn was started by the leader — whatever tool carried it.
+     *
+     * Measured: the leader handed work over with `message_member` instead of `assign_task`, so no
+     * assignment record existed and this driver refused to integrate — the member delivered 814
+     * words and the leader was never woken to report them.
+     */
+    fromLeader?: boolean
   }): Promise<{ leaderRuns: boolean }> {
     const state = this.ensure(input.roomId)
     // ── NO HAND-OFF, NO INTEGRATION ─────────────────────────────────────────────
@@ -123,10 +131,12 @@ export class GroupTaskDriver {
     // mentioned bot replies" — waking the leader afterwards would add a model call per
     // mention and produce a second answer to the same message.
     const assignment = [...state.assignments].reverse().find((a) => a.botId === input.botId && a.status === 'running')
-    if (assignment === undefined) return { leaderRuns: false }
+    if (assignment === undefined && input.fromLeader !== true) return { leaderRuns: false }
     state.runningBotIds.delete(input.botId)
-    assignment.status = input.ok ? 'done' : 'failed'
-    assignment.result = input.text
+    if (assignment !== undefined) {
+      assignment.status = input.ok ? 'done' : 'failed'
+      assignment.result = input.text
+    }
     state.pendingReports.push({ botId: input.botId, text: input.text, ok: input.ok })
     state.stalledRounds = 0
     this.save(input.roomId, state)

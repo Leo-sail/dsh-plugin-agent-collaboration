@@ -4087,11 +4087,16 @@ export class AgentCommunityService extends TypertRemoteService {
     if (room.directBotId === undefined) {
       const leader = this.leaderOfRoom(run.roomId)
       if (leader !== undefined && leader !== run.botId) {
+        // A hand-off is a hand-off whichever tool carried it: the leader's `message_member`
+        // reaches the member as `[来自 <leader>] …`, which is what marks this turn as given work.
+        const leaderName = this.state.bots.find(b => b.id === leader)?.name
+        const fromLeader = leaderName !== undefined && (run.prompt ?? '').startsWith(`[来自 ${leaderName}]`)
         void this.groupTask?.onMemberFinished({
           roomId: run.roomId,
           botId: run.botId,
           text: replyText,
           ok: status === 'completed',
+          fromLeader,
         })
       }
     }
