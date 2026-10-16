@@ -249,6 +249,14 @@ export interface SeedRoomItem {
 export class LedgerProjector {
   private readonly svc: LedgerStateAccessor
   private readonly byRoom = new Map<string, LedgerEntry[]>()
+  /**
+   * Runs whose rows were dropped on purpose.
+   *
+   * A tombstone, because removal alone does not survive: `patchRunText` recreates (or
+   * adopts) a row when it cannot find one for the run, and it runs after the verdict that
+   * suppressed the turn. Dropped runs therefore refuse all later writes.
+   */
+  private readonly droppedRuns = new Set<string>()
   private seq = 0
   private readonly subscribers = new Map<string, Set<(batch: LedgerEntry[]) => void>>()
   private pendingBatch = new Map<string, LedgerEntry[]>()
@@ -367,6 +375,12 @@ export class LedgerProjector {
    * variants at once and legitimate fields like `botId` were rejected.
    */
   push(entry: LedgerEntryInput): LedgerEntry {
+    // A dropped run's rows are dropped for good — see `droppedRuns`. Late frames (tool rows
+    // arriving after the verdict) must not put one back.
+    const droppedRunId = (entry as { runId?: string }).runId
+    if (droppedRunId !== undefined && this.droppedRuns.has(droppedRunId)) {
+      return { ...entry, id: `dropped:${droppedRunId}` as never, sequence: -1 } as unknown as LedgerEntry
+    }
     const { randomUUID } = require('node:crypto') as typeof import('node:crypto')
     const full = {
       ...entry,
@@ -482,6 +496,7 @@ export class LedgerProjector {
     const kept = list.filter(e => (e as { runId?: string }).runId !== runId)
     const removed = list.length - kept.length
     if (removed > 0) this.byRoom.set(roomId, kept)
+    this.droppedRuns.add(runId)
     return removed
   }
   botTextRowForRun(roomId: string, runId: string): string | undefined {
@@ -520,6 +535,9 @@ export class LedgerProjector {
     text: string,
     identity?: { botId: string; botName: string },
   ): void {
+    // Refuse anything for a run whose rows were dropped: `patchRunText` recreates a row when it
+    // cannot find one, and it runs after the verdict that suppressed the turn.
+    if (this.droppedRuns.has(runId)) return
     const list = this.byRoom.get(roomId)
     if (list === undefined) {
       // No ledger for the room yet. The answer still has to land, so open one — the
