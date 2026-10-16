@@ -340,6 +340,15 @@ export class LedgerProjector {
           ok: item.ok ?? true,
           output: item.output ?? '',
         })
+      } else if (item.runId === undefined) {
+        // ── A COORDINATION POST IS NOT A REPLY ─────────────────────────────────────
+        //
+        // Every real answer is persisted by `settleRun`, which always records the run it came
+        // from. A bot message without one is a `message_member` post — coordination between
+        // bots that the room should never have shown. Those written before the fix are still in
+        // the state, so they are skipped here rather than displayed: the user's data is left
+        // untouched, and the transcript shows one reply per turn.
+        continue
       } else {
         list.push({
           ...base,

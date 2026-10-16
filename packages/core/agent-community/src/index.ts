@@ -1230,9 +1230,14 @@ export class AgentCommunityService extends TypertRemoteService {
             // the leader's own stage report ("已安排 X 执行 …，等它完成后我汇总"), not as a
             // separate line. A member's message to the leader is that member's contribution in
             // the group — it IS its group reply and must be visible.
-            // No blanket hiding: a member's message to the leader is that member's contribution in
-            // the group and belongs on screen, and the leader's own word to a member is visible
-            // too — what it must not do is start a run that nothing asked for.
+            // ── COORDINATION IS NOT CONVERSATION ────────────────────────────────────
+            //
+            // Measured field by field: every `message_member` post appeared in the room as a
+            // message with NO runId and NO reasoning — rsfa's report to the leader beside its actual
+            // answer, so the user saw two replies where one was expected and asked, rightly, why a
+            // message without 思考过程 exists at all. It is delivered to the target and wakes it;
+            // it is not part of the room's transcript.
+            internal: true,
           })
           return { ok: true }
         } catch (error: unknown) {
