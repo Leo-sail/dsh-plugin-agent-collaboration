@@ -188,6 +188,23 @@ export class GroupTaskDriver {
   }
 
   /** The leader declared the task complete. */
+  /**
+   * A new instruction starts a new task.
+   *
+   * `finished` records that THIS task was delivered — it is not a property of the room. Left set,
+   * it outlives its task and every later instruction in that room is never integrated: measured on
+   * two consecutive writing tasks whose deliverables sat in the group with no report, because the
+   * guard `state.finished !== undefined` kept returning early.
+   */
+  beginTask(roomId: string): void {
+    const state = this.ensure(roomId)
+    if (state.finished === undefined) return
+    state.finished = undefined
+    state.pendingReports.length = 0
+    state.stalledRounds = 0
+    this.save(roomId, state)
+  }
+
   async finish(input: { roomId: string; report: string }): Promise<void> {
     const state = this.ensure(input.roomId)
     state.finished = { report: input.report, at: new Date().toISOString() }

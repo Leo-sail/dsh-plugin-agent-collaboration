@@ -1276,6 +1276,9 @@ export class AgentCommunityService extends TypertRemoteService {
   }
 
   private queueRoomRun(roomId: string, botId: string, prompt: string, origin: BotRun['origin']): BotRun {
+    // A user instruction begins a task; the previous task's completion must not outlive it.
+    if (origin === 'user') this.groupTask?.beginTask(roomId)
+
     const run: BotRun = {
       id: brandId<BotRunId>(randomUUID()),
       botId: brandId<BotId>(botId),
