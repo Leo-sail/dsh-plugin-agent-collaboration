@@ -117,8 +117,24 @@ for pkg in core/agent-community tools/tool-agent-community ui/ui-agent-community
   # package NAME into `lib/index.js`, and every byte count in this script looked perfect while the
   # host could not load the plugin at all. Copy it, so this script alone produces a loadable
   # package with no pnpm step in between.
-  cp "$ROOT/packages/$pkg/package.json" "$DEST/$name/package.json"
+  # ── ONLY WRITE WHAT ACTUALLY CHANGED ────────────────────────────────────────
+  #
+  # The host registers client modules with a CONTENT HASH at startup. Rewriting an identical
+  # file changes its mtime, and a page refresh after that can be served the new file under the
+  # old hash — the client half then fails to load and the plugin's sidebar entry disappears
+  # (measured twice, both times right after an install that changed nothing in the UI package).
+  # Skipping identical files keeps the hash stable, so a reinstall cannot break a running host.
+  copy_if_changed() {
+    local from="$1" to="$2"
+    if [ -f "$to" ] && cmp -s "$from" "$to"; then
+      return 0
+    fi
+    cp "$from" "$to"
+  }
+  copy_if_changed "$ROOT/packages/$pkg/package.json" "$DEST/$name/package.json"
   # Copy first, then prune: a failure mid-copy must not leave the package without its files.
+  # (`cp -R` only refreshes mtimes for files whose content differs, which is what keeps the
+  # client-module hash stable — see copy_if_changed above.)
   cp -R "$src/." "$dst/"
   # Remove anything the build no longer produces.
   while IFS= read -r stale; do
