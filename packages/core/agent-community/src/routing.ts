@@ -75,8 +75,12 @@ export interface RouteInput {
  * offers a 所有人 row) and the only ones a user can type by hand, so the set stays closed.
  */
 export function mentionsEveryone(text: string): boolean {
-  // `@all` must not be a prefix of a longer latin word (`@allow` is not a broadcast).
-  if (/@all(?![\p{L}\p{N}])/iu.test(text)) return true
+  // `@all` must not be a prefix of a longer LATIN word (`@allow` is not a broadcast) — but a CJK
+  // character right after it is ordinary text, not part of the token. Measured through the UI:
+  // `@all say hi` arrived as `@all撒盐hi` (an input-method artefact, and exactly how a user typing
+  // Chinese would produce it) and the room-wide mention was missed, so only the leader answered.
+  // The lookahead therefore excludes Latin letters and digits only.
+  if (/@all(?![\p{Script=Latin}\p{N}])/iu.test(text)) return true
   // Chinese has no word boundaries, so the two room-wide spellings are matched literally.
   return text.includes('@所有人') || text.includes('@全体')
 }

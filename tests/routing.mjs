@@ -48,6 +48,10 @@ check(ids(dm) === 'a' && dm.reason === 'direct', '单聊 → 该 Bot（reason=di
 check(mentionsEveryone('@all 大家各说一句') === true, '识别 @all')
 check(mentionsEveryone('@所有人 各说一句') === true, '识别 @所有人')
 check(mentionsEveryone('@allow 这个不是广播') === false, '@all 不是 @allow 的前缀')
+// 中文紧跟其后时仍是广播（实测：`@all say hi` 经输入法变成 `@all撒盐hi`，旧规则漏判）
+check(mentionsEveryone('@all撒盐hi') === true, '@all 紧跟中文也算广播')
+check(mentionsEveryone('@all大家') === true, '@all 紧跟中文（无空格）也算广播')
+check(mentionsEveryone('@allow') === false, '纯拉丁单词仍然排除')
 check(mentionsEveryone('大家看一下这个设计') === false, '普通文本"大家"不触发全员')
 const all = route('@所有人 各说一句', { allMentioned: true })
 check(ids(all) === 'a,b,c' && all.reason === 'all', '@所有人 → 全员（reason=all）')
