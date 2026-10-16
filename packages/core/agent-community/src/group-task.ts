@@ -136,20 +136,11 @@ export class GroupTaskDriver {
     // Only integrate once the whole fan-out has settled — otherwise the leader runs
     // once per member and re-plans against a half-finished picture.
     if (state.runningBotIds.size > 0) return { leaderRuns: false }
+    
+    const ok = this.accessor.enqueueRun(input.roomId, leader, this.integratePrompt(input.roomId, state))
 
     const leader = this.accessor.leaderOf(input.roomId)
     if (leader === undefined) return { leaderRuns: false }
-    // ── NO AUTOMATIC LEADER RUN ─────────────────────────────────────────────
-    //
-    // This used to enqueue an integrate run for the leader as soon as every assigned member
-    // had settled. Measured on a one-line greeting that produced a whole extra leader turn —
-    // a '搞定 ✅' bulletin with a table — which the user counted as a duplicate reply and,
-    // correctly, said should never have run: the member's answer already was the result.
-    //
-    // The leader is woken by a member's own report (message_member) instead. That is the
-    // hand-off the prompt asks members for, and it carries the leader's attention only when a
-    // member actually has something to hand over.
-    const ok = false
     if (ok) state.runningBotIds.add(leader)
     this.save(input.roomId, state)
     return { leaderRuns: ok }
