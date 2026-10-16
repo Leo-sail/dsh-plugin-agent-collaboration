@@ -557,6 +557,13 @@ export class AgentCommunityService extends TypertRemoteService {
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'agentCommunity')
+    // ── THE FIRST THING THE CONSTRUCTOR DOES ────────────────────────────────────
+    //
+    // Startup used to be instrumented only AFTER an `await`, which made a rejected await
+    // indistinguishable from code that never loaded: everything below it — including
+    // `executor.start()` — silently did not run, runs queued for ever, and no log existed to say
+    // why. The trace now begins before any await and records each step.
+    this.bootTrace('constructor entered')
     this.cfg = {
       maxBots: config.maxBots ?? 32,
       maxRooms: config.maxRooms ?? 64,
@@ -849,27 +856,23 @@ export class AgentCommunityService extends TypertRemoteService {
       // executor's VisibilityController (hiding means detach + archive, and that
       // controller owns the pairing), while no agent may start before the sweep has
       // hidden what earlier runs left behind.
-      await this.maintenance.sweepPluginSessions()
+      // A failing cleanup must never prevent the executor from starting: without it every run the
+      // user creates queues for ever, which is exactly the state this trace was written to find.
+      try {
+        await this.maintenance.sweepPluginSessions()
+      } catch (error: unknown) {
+        this.bootTrace(`sweep FAILED (continuing): ${error instanceof Error ? error.message : String(error)}`)
+      }
+      this.bootTrace(`executor=${this.executor === undefined ? 'missing' : 'created'}`)
 
       void this.executor.start()
+      this.bootTrace('executor started')
       // ── PROOF OF LIFE ────────────────────────────────────────────────────────
       //
       // One line at mount time, in a file a human can read. A queued run that never starts has two
       // possible causes that look identical from outside: this code is not what the host loaded,
       // or the executor was never created. This line separates them — it is written the moment the
       // service is constructed and the executor exists.
-      // TWO DESTINATIONS ON PURPOSE. The first attempt wrote only under the plugin's own home and
-      // produced no file at all — and a `try/catch` around a diagnostic cannot tell "the write
-      // failed" from "this code never ran". One line goes to /tmp unconditionally (no `join`, no
-      // home resolution) and carries the resolved home with it, so a single start answers both
-      // questions: is this build alive, and where does it think its data lives.
-      {
-        const line = `${new Date().toISOString()} boot pid=${String(process.pid)} `
-          + `home=${String(this.home)} cwd=${process.cwd()} executor=${this.executor === undefined ? 'missing' : 'created'}\n`
-        try { appendFileSync('/tmp/ac-boot.log', line) } catch { /* nothing can be done here */ }
-        try { appendFileSync(join(this.home, 'agent-community', 'boot.log'), line) } catch { /* ditto */ }
-        try { this.ctx.logger?.info?.(`agent-community: ${line.trim()}`) } catch { /* ditto */ }
-      }
 
       // A proposal nobody answers must still resolve (§5.4): the panel has its own
       // countdown, this covers the closed-tab case.
@@ -3973,6 +3976,21 @@ export class AgentCommunityService extends TypertRemoteService {
         `agent-community: archived group memor(ies) of bot ${botId} from ${groupRooms.length} room(s) before deletion`,
       )
     }
+  }
+
+  /**
+   * One line per startup step, written where it cannot be swallowed.
+   *
+   * `/tmp` first (no path resolution that could fail), then the plugin's home, then the logger.
+   * This exists because a half-initialised service is invisible from outside: the RPC surface works,
+   * the panel looks fine, and the only symptom is that nothing ever runs.
+   */
+  private bootTrace(step: string): void {
+    const line = `${new Date().toISOString()} boot pid=${String(process.pid)} ${step}\n`
+    const home = this.home
+    try { appendFileSync('/tmp/ac-boot.log', line) } catch { /* nothing else to do */ }
+    try { appendFileSync(join(home, 'agent-community', 'boot.log'), line) } catch { /* ditto */ }
+    try { this.ctx.logger?.info?.(`agent-community: ${line.trim()}`) } catch { /* ditto */ }
   }
 
   /** The bot's own workspace, used when a bot record has none. */
