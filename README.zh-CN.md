@@ -60,7 +60,7 @@ dsh plugin --profile <你的profile> add dsh-plugin-agent-collaboration
 
 ```bash
 dsh plugin --profile <你的profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.0/dsh-plugin-agent-collaboration-0.2.0.tgz
 ```
 
 同一份产物，附在 release 上——不想经过 npm 就直接用它。
@@ -86,7 +86,7 @@ ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/
 > **注意**：仓库里的当前版本是 **0.2.0，尚未发布**。下面的链接指向最近一次公开发布（v0.1.2）；
 > 0.2.0 的改动见 [CHANGELOG.md](CHANGELOG.md)，装好后的自测步骤见 [ACCEPTANCE.zh-CN.md](ACCEPTANCE.zh-CN.md)。
 
-把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.1.2/dsh-plugin-agent-collaboration-0.1.2.tgz
+把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.0/dsh-plugin-agent-collaboration-0.2.0.tgz
 把本插件装进目标 DSH profile，重启 DSH，并确认侧栏出现「Bots团队」。
 ```
 
