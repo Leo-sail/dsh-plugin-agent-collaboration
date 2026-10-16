@@ -10,6 +10,10 @@ const dir = join(root, 'packages/bundle/agent-collaboration/agent-presets/bot')
 const yml = readFileSync(join(dir, 'agent.cordis.yml'), 'utf8')
 const meta = readFileSync(join(dir, 'preset.yml'), 'utf8')
 const indexSrc = readFileSync(join(root, 'packages/core/agent-community/src/index.ts'), 'utf8')
+// THIS deployment declares presets as plugin rows, not as .agent-presets directories: the row in
+// the bundle patch is what the roster actually sees, so the fixture has to judge it too.
+const patch = readFileSync(join(root, 'packages/bundle/agent-collaboration/cordis.patch.yml'), 'utf8')
+const patchRow = patch.slice(patch.indexOf('id: preset-bot'))
 
 let pass = 0
 const check = (ok, label, extra) => {
@@ -49,5 +53,21 @@ check(/agentPreset:\s*config\.botAgentPreset \?\? 'bot'/.test(indexSrc), "插件
 check(/botAgentPreset:\s*z\.string\(\)\.default\('bot'\)/.test(indexSrc), "配置 schema 默认 = 'bot'")
 check(!/botAgentPreset:\s*z\.string\(\)\.default\('standard'\)/.test(indexSrc), "schema 默认不再是 'standard'")
 check(!/agentPreset:\s*config\.botAgentPreset \?\? 'standard'/.test(indexSrc), "不再默认 'standard'")
+
+// ── the row the HOST reads ──────────────────────────────────────────────────
+check(patchRow.length > 0, 'bundle patch 里有 preset-bot 行')
+check(/id:\s*bot\b/.test(patchRow), "行内 id 为 bot")
+check(/name:\s*'@deepseek-ai\/dsh-agent-preset'/.test(patchRow), '用 dsh-agent-preset 声明')
+for (const name of [
+  '@deepseek-ai/dsh-tool-bash', '@deepseek-ai/dsh-tool-fs', '@deepseek-ai/dsh-tool-fs-search',
+  '@deepseek-ai/dsh-tool-skill', '@deepseek-ai/dsh-skill-filesystem', '@deepseek-ai/dsh-tool-todo',
+  '@deepseek-ai/dsh-tool-web', '@deepseek-ai/dsh-compaction-basic',
+]) check(patchRow.includes(name), `行内保留 ${name}`)
+for (const name of [
+  '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-command-goal', '@deepseek-ai/dsh-plan-mode',
+  '@deepseek-ai/dsh-tool-subagent', '@deepseek-ai/dsh-tool-subagent-control',
+  '@deepseek-ai/dsh-tool-workflow', '@deepseek-ai/dsh-tool-ralph', '@deepseek-ai/dsh-tool-ask-user',
+]) check(!patchRow.includes(name), `行内不含 ${name}`)
+check(/isolate:/.test(patchRow), '行内 compaction 组带 isolate realm')
 
 console.log(`[bot-preset] ${pass} 通过`)

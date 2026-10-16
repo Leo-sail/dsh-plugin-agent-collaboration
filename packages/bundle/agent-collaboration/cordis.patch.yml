@@ -64,3 +64,85 @@
     # The legacy `agent-team` fork's rows used to live here. Its three packages were removed on
     # 2026-10-14 (never mounted, never built — see pnpm-workspace.yaml), so there is nothing left to
     # enable: this bundle mounts the Community packages only.
+
+# ── THE BOT AGENT PRESET ─────────────────────────────────────────────────────
+#
+# This deployment declares agent presets as PLUGIN ROWS (`@deepseek-ai/dsh-agent-preset` with
+# `config.plugins`), not as directories under <DSH_HOME>/.agent-presets — that directory belongs
+# to `dsh-agent-presets`, which this deployment does not mount. Measured: with the directory in
+# place the mount still failed with `RemoteError: Unknown agent preset: bot`, because the roster
+# never looked there.
+#
+# Why a bot needs its OWN preset at all: under the deployment's `standard` preset a bot's catalog
+# carries `workflow`, `subagent`/`subagent_fork`, `create_goal`/`update_goal`, `present`,
+# `exit_plan_mode`, `list_agents`, `send_message` and `interrupt_agent`. The plugin tried to hide
+# them with `ctx.tools.restrict({deny})` and could not — DSH keeps a scope-local registration
+# visible through a global deny, and a preset mounts these per agent. Measured: 11 of them
+# survived; only `plugin_manager` (a host tool) went away.
+#
+# What a bot keeps: files, shell, search, skills, todos, web, session compaction. What is
+# deliberately absent: every goal row, plan mode, the whole delegation group, `tool-ralph`, and
+# `tool-ask-user` — the plugin registers its OWN `ask_user_question` that draws the in-panel
+# question card, and two registrations of one name is the collision that silently dropped tools
+# earlier in this project. Collaboration reaches the model through the plugin's own tools
+# (`agent_community_*`, `assign_task`, `task_report`, `finish_task`, `invite_bot`, `remove_bot`,
+# `propose_group`), which it registers into the agent's scope and which need no row here.
+- insert:
+    - id: preset-bot
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: bot
+        order: 5
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a member of the user's bot team, powered by the {{model}} model.
+              suffix: Your working directory is {{cwd}}.
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
