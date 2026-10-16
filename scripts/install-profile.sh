@@ -133,9 +133,14 @@ for pkg in core/agent-community tools/tool-agent-community ui/ui-agent-community
   }
   copy_if_changed "$ROOT/packages/$pkg/package.json" "$DEST/$name/package.json"
   # Copy first, then prune: a failure mid-copy must not leave the package without its files.
-  # (`cp -R` only refreshes mtimes for files whose content differs, which is what keeps the
-  # client-module hash stable — see copy_if_changed above.)
-  cp -R "$src/." "$dst/"
+  #
+  # ONLY WHEN SOMETHING DIFFERS. BSD `cp -R` exits 1 on an identical tree ("are identical (not
+  # copied)"), and under `set -e` that aborted the rest of the install — the bot agent preset at
+  # the end of this file never ran because of it. `diff -rq` is the check that also keeps a real
+  # copy failure visible.
+  if ! diff -rq "$src" "$dst" >/dev/null 2>&1; then
+    cp -R "$src/." "$dst/"
+  fi
   # Remove anything the build no longer produces.
   while IFS= read -r stale; do
     [ -n "$stale" ] || continue
@@ -184,7 +189,12 @@ if [ -d "$BUNDLE_DIR" ]; then
   if [ ! -s "$BUNDLE_SRC" ]; then
     echo "install-profile: MISSING $BUNDLE_SRC" >&2; exit 1
   fi
-  cp "$BUNDLE_SRC" "$BUNDLE_DIR/cordis.patch.yml"
+  # BSD `cp` EXITS 1 when source and destination are identical, and this script runs under
+  # `set -e`: an unconditional copy aborted everything after it, which is how the preset install
+  # at the end of this file silently never ran. Copy only when the bytes differ.
+  if ! cmp -s "$BUNDLE_SRC" "$BUNDLE_DIR/cordis.patch.yml" 2>/dev/null; then
+    cp "$BUNDLE_SRC" "$BUNDLE_DIR/cordis.patch.yml"
+  fi
   if ! cmp -s "$BUNDLE_SRC" "$BUNDLE_DIR/cordis.patch.yml"; then
     echo "  MISMATCH cordis.patch.yml" >&2; exit 1
   fi
@@ -197,7 +207,9 @@ if [ -d "$BUNDLE_DIR" ]; then
   BUNDLE_LIB_SRC="$ROOT/packages/bundle/agent-collaboration/lib"
   if [ -d "$BUNDLE_LIB_SRC" ]; then
     mkdir -p "$BUNDLE_DIR/lib"
-    cp -R "$BUNDLE_LIB_SRC/." "$BUNDLE_DIR/lib/"
+    if ! diff -rq "$BUNDLE_LIB_SRC" "$BUNDLE_DIR/lib" >/dev/null 2>&1; then
+      cp -R "$BUNDLE_LIB_SRC/." "$BUNDLE_DIR/lib/"
+    fi
     while IFS= read -r stale; do
       [ -n "$stale" ] || continue
       echo "  prune ${stale#"$BUNDLE_DIR/lib"/}  (no longer built)"
