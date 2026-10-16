@@ -187,6 +187,19 @@ export class GroupFlowService {
     // refresh — the dialog holds the OLD proposal id, and confirming it then failed with
     // "Group proposal … not found". An expired proposal is resolved first (that is the same
     // "refused" the user would get by ignoring it), then a fresh one may be recorded.
+    // ── ONE MESSAGE PRODUCES AT MOST ONE GROUP ──────────────────────────────
+    //
+    // Measured: a single direct-chat message produced two groups with the same name, eighty
+    // seconds apart, each running the whole flow (leader, member, replies). The room already
+    // keeps the proposal whose confirmation created the group, including its sourceMessageId,
+    // but nothing compared it with the message being proposed again — and two writers reach
+    // this method: the panel's post-send analysis and the bot's own propose_group tool.
+    if (room.pendingGroupProposal !== undefined
+      && room.pendingGroupProposal.sourceMessageId === input.messageId
+      && room.pendingGroupProposal.status !== 'pending') {
+      return undefined
+    }
+
     const existing = room.pendingGroupProposal
     if (existing !== undefined && existing.status === 'pending') {
       if (!this.expired(existing)) return this.toProposal(existing)
