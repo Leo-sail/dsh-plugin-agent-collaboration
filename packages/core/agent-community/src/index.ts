@@ -1210,15 +1210,24 @@ export class AgentCommunityService extends TypertRemoteService {
       // (`toBotName` → a mailbox entry with origin 'a2a'), so this is only the tool-side adapter:
       // the sender's session is derived from the pair, never from the model.
       messageMember: async (input) => {
+        // Leadership is the room's own record (`team.leader`), so this needs no guessing: the
+        // bot that created the team is the one whose orders are folded into its stage report.
+        const room = this.state.rooms.find(r => r.id === input.roomId)
+        const leader = room?.team?.leader
+        const senderIsLeader = leader?.kind === 'bot' && leader.botId === input.botId
         try {
           await this.postBotMessage({
             roomId: brandId<BotRoomId>(input.roomId),
             senderSessionId: this.sessionIdFor(input.roomId, input.botId),
             text: input.text,
             toBotName: input.toName,
-            // Coordination, not conversation: the text reaches the recipient's run (and wakes it)
-            // but is not rendered in the room. Member reports and peer alignments are internal.
-            internal: true,
+            // ── WHO IS SPEAKING DECIDES WHETHER THE ROOM SEES IT ───────────────────
+            //
+            // The leader's message to a member is a work order: the room should read it inside
+            // the leader's own stage report ("已安排 X 执行 …，等它完成后我汇总"), not as a
+            // separate line. A member's message to the leader is that member's contribution in
+            // the group — it IS its group reply and must be visible.
+            internal: senderIsLeader,
           })
           return { ok: true }
         } catch (error: unknown) {
