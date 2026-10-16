@@ -3079,6 +3079,34 @@ export class AgentCommunityService extends TypertRemoteService {
       )
     }
     const senderName = senderBot?.name ?? 'bot'
+    // ── THE SAME BOT MUST NOT SAY THE SAME THING TWICE IN A ROW ─────────────────
+    //
+    // A bot's turn posts its final answer to the room, and the same bot may ALSO call
+    // `message_member` with the same body — so the user reads it twice, and the member is woken for
+    // a message it has already seen. Reported from a group where one instruction produced four
+    // near-identical "task complete" reports. The prompt tells the model not to do this; the model
+    // does it anyway, so the plugin refuses the duplicate instead of relying on the prompt.
+    //
+    // Deliberately narrow: only the SAME bot, SAME room, within two minutes, and only when the two
+    // texts are equal after normalisation or one contains the other — and only for texts long
+    // enough that a repeat cannot be a normal short acknowledgement ("好的", "收到").
+    const normalise = (text: string): string => text.replace(/\s+/g, ' ').trim().toLowerCase()
+    const candidate = normalise(input.text)
+    if (candidate.length >= 24 && senderBot !== undefined) {
+      const cutoff = Date.now() - 120_000
+      const previous = [...this.state.messages]
+        .reverse()
+        .find(m => m.roomId === input.roomId
+          && m.sender.kind === 'bot'
+          && m.sender.botId === senderBot.id
+          && Date.parse(m.createdAt) >= cutoff)
+      const earlier = previous === undefined ? '' : normalise(previous.text)
+      if (earlier.length >= 24 && (earlier === candidate || earlier.includes(candidate) || candidate.includes(earlier))) {
+        // Returning the existing message keeps the caller idempotent, and returning early also
+        // skips the wake-up below: the target already received this text.
+        return previous as BotMessage
+      }
+    }
     const msg: BotMessage = {
       id: brandId<BotMessageId>(randomUUID()),
       roomId: brandId<BotRoomId>(input.roomId),
