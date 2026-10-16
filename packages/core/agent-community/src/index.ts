@@ -858,14 +858,17 @@ export class AgentCommunityService extends TypertRemoteService {
       // possible causes that look identical from outside: this code is not what the host loaded,
       // or the executor was never created. This line separates them — it is written the moment the
       // service is constructed and the executor exists.
-      try {
-        appendFileSync(
-          join(this.home, 'agent-community', 'boot.log'),
-          `${new Date().toISOString()} boot pid=${String(process.pid)} home=${this.home} `
-          + `executor=${this.executor === undefined ? 'missing' : 'created'}\n`,
-        )
-      } catch {
-        // Diagnostics must never break startup.
+      // TWO DESTINATIONS ON PURPOSE. The first attempt wrote only under the plugin's own home and
+      // produced no file at all — and a `try/catch` around a diagnostic cannot tell "the write
+      // failed" from "this code never ran". One line goes to /tmp unconditionally (no `join`, no
+      // home resolution) and carries the resolved home with it, so a single start answers both
+      // questions: is this build alive, and where does it think its data lives.
+      {
+        const line = `${new Date().toISOString()} boot pid=${String(process.pid)} `
+          + `home=${String(this.home)} cwd=${process.cwd()} executor=${this.executor === undefined ? 'missing' : 'created'}\n`
+        try { appendFileSync('/tmp/ac-boot.log', line) } catch { /* nothing can be done here */ }
+        try { appendFileSync(join(this.home, 'agent-community', 'boot.log'), line) } catch { /* ditto */ }
+        try { this.ctx.logger?.info?.(`agent-community: ${line.trim()}`) } catch { /* ditto */ }
       }
 
       // A proposal nobody answers must still resolve (§5.4): the panel has its own
