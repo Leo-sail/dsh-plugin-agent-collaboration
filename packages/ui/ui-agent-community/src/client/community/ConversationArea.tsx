@@ -10,7 +10,6 @@
  */
 import type { BotCommunitySnapshot, BotIdentity, BotRoom, BotRun } from '@dsh-plugin/agent-community'
 import { useState } from 'react'
-import { exportTranscript } from './exportTranscript.ts'
 import type { CommunityRemote, ModelGroup } from './types.ts'
 import { describe } from './types.ts'
 import { css } from '../styles.ts'
@@ -276,8 +275,6 @@ export function ConversationArea({
 
             onNotice(`「${cmdId}」这个命令还没有实现。`)
           }}
-          // The export entry point: the transcript as JSON, straight from the ledger.
-          onExport={() => exportTranscript(remote, roomId!)}
           onClear={(_roomId) => {
             remote.clearMessages(roomId!).catch(() => undefined)
           }}

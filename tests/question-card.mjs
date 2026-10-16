@@ -10,7 +10,6 @@
  *
  * Usage: node tests/question-card.mjs
  */
-import { readFileSync } from 'node:fs'
 import { resolveAnswer, canSubmit }
   from '../packages/ui/ui-agent-community/src/client/conversation/answerSelection.ts'
 
@@ -47,24 +46,5 @@ check(resolveAnswer({ picked: 'A/B 或 C（二选一）', text: '' }) === 'A/B �
 
 console.log(`\n[question-card] ${pass}/${total} 通过`)
 
-// ── 导出转写必须真的有入口 ───────────────────────────────────────────────────
-//
-// 实测（2026-10-16）：`exportTranscript.ts` 写好了、被 ConversationArea import 了，却从没被调用
-// —— 面板里没有任何"导出"控件，全仓也搜不到"导出"二字。功能存在但用户够不到。这条断言把
-// "接线"钉住：import 之外必须至少有一次真实调用，且面板里必须有那个按钮。
-{
-  const area = readFileSync(new URL('../packages/ui/ui-agent-community/src/client/community/ConversationArea.tsx', import.meta.url), 'utf8')
-  const panel = readFileSync(new URL('../packages/ui/ui-agent-community/src/client/conversation/BotConversationPanel.tsx', import.meta.url), 'utf8')
-  const calls = (area.match(/exportTranscript\(/g) ?? []).length
-  if (calls === 0) { console.error('FAIL 导出转写没有任何调用点（死功能）'); process.exitCode = 1 }
-  else console.log('PASS 导出转写有真实调用点')
-  if (!/onExport/.test(panel) || !/导出/.test(panel)) { console.error('FAIL 面板里没有导出按钮'); process.exitCode = 1 }
-  else console.log('PASS 面板里有导出按钮')
-  // 声明了 prop 不等于用上了它：第一版就漏了把 onExport 传给 SessionHeader，于是按钮永远不渲染，
-  // 而"文件里有导出"这类断言照样通过。这一条盯住真正的传参。
-  const headerUse = /<SessionHeader[\s\S]{0,3000}?onExport=\{/.test(panel)
-  if (!headerUse) { console.error('FAIL SessionHeader 没有收到 onExport（按钮不会渲染）'); process.exitCode = 1 }
-  else console.log('PASS SessionHeader 收到了 onExport')
-}
 process.exit(pass === total ? 0 : 1)
 
