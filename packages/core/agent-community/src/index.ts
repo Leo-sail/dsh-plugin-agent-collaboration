@@ -753,6 +753,17 @@ export class AgentCommunityService extends TypertRemoteService {
       this.sessionRunner = runner
       this.ledgerProjection = new LedgerProjection({
         ledger: this.ledger,
+        // ── WHICH RUNS MAY SPEAK IN THE ROOM ───────────────────────────────────
+        //
+        // A turn woken by a peer message or a member's report is coordination: the user did not
+        // ask for it and cannot act on it. Rendering it produced five bot messages for one
+        // instruction — three of them the same bot announcing completion. The expected outcome
+        // of a normal flow (create a group and greet) is exactly two replies: the bot that ran
+        // it, and the bot that was pulled in. This is what tells the projection which turns are
+        // internal so it creates no rows for them.
+        runOriginFor: (roomId, botId) => this.state.runs
+          .find(r => r.roomId === roomId && r.botId === botId
+            && (r.status === 'queued' || r.status === 'running'))?.origin,
         botName: (botId) => this.state.bots.find(b => b.id === botId)?.name ?? botId,
         // ── ANY UNFINISHED RUN, NOT JUST `running` ─────────────────────────────
         //
