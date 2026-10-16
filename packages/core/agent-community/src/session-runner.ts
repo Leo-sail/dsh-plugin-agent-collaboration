@@ -429,17 +429,23 @@ export class SessionRunner {
   private disposed = false
 
   constructor(ctx: Context, accessor: SessionRunnerAccessor, opts: SessionRunnerOptions = {}) {
-    // ONE BOOT LINE, so the file explains itself even before the first bot turn: which names
-    // the plugin asks to deny, and which ones it guards instead (a restriction cannot hide a
-    // sibling scope-local registration — see AGENT_TEAMS_TOOLS).
-    this.noteToolMask(
-      `boot deny=[${(opts.deniedTools ?? []).join(',')}] guard=[${AGENT_TEAMS_TOOLS.join(',')}]`,
-    )
-
     this.ctx = ctx
     this.accessor = accessor
     // `setupAgent` has no default; spreading DEFAULTS over it would otherwise drop it.
     this.opts = { ...DEFAULTS, ...opts }
+
+    // ONE BOOT LINE, so the file explains itself even before the first bot turn: which names
+    // the plugin asks to deny, and which ones it guards instead (a restriction cannot hide a
+    // sibling scope-local registration — see AGENT_TEAMS_TOOLS).
+    //
+    // IT MUST COME AFTER THE ASSIGNMENTS. Written first, it read `this.opts` while it was still
+    // undefined and threw — and because the throw happened inside `new SessionRunner(...)`, it
+    // aborted the rest of the service constructor, the executor was never created, and every run
+    // the user created queued for ever with the panel showing 排队中 and no error anywhere. A
+    // diagnostic that can break construction is worse than no diagnostic.
+    this.noteToolMask(
+      `boot deny=[${(opts.deniedTools ?? []).join(',')}] guard=[${AGENT_TEAMS_TOOLS.join(',')}]`,
+    )
   }
 
   /**
@@ -1309,7 +1315,9 @@ export class SessionRunner {
    * Same file-and-append shape as {@link notePresetMount}: diagnostics must never break a run.
    */
   private noteToolMask(line: string): void {
-    const dir = this.opts.presetLogDir
+    // Optional chaining on purpose: this is a diagnostic, and it must stay harmless even when
+    // called before the fields exist.
+    const dir = this.opts?.presetLogDir
     if (dir === undefined) return
     try {
       appendFileSync(join(dir, 'tool-mask.log'), `${new Date().toISOString()} ${line}\n`)
@@ -1319,7 +1327,7 @@ export class SessionRunner {
   }
 
   private notePresetMount(line: string): void {
-    const dir = this.opts.presetLogDir
+    const dir = this.opts?.presetLogDir
     if (dir === undefined) return
     try {
       appendFileSync(join(dir, 'preset-mount.log'), `${new Date().toISOString()} ${line}\n`)
