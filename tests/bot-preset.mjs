@@ -44,6 +44,10 @@ check(groups >= 1, 'compaction 组带 isolate realm', String(groups))
 check(/order:\s*\d+/.test(meta), 'preset.yml 有 order')
 check(meta.includes('name:'), 'preset.yml 有展示名')
 check(/agentPreset:\s*config\.botAgentPreset \?\? 'bot'/.test(indexSrc), "插件默认 agentPreset = 'bot'")
+// A SCHEMA default always supplies a value, so the runtime fallback is dead code without this:
+// the preset switch is the schema default, and it silently stayed 'standard' until measured.
+check(/botAgentPreset:\s*z\.string\(\)\.default\('bot'\)/.test(indexSrc), "配置 schema 默认 = 'bot'")
+check(!/botAgentPreset:\s*z\.string\(\)\.default\('standard'\)/.test(indexSrc), "schema 默认不再是 'standard'")
 check(!/agentPreset:\s*config\.botAgentPreset \?\? 'standard'/.test(indexSrc), "不再默认 'standard'")
 
 console.log(`[bot-preset] ${pass} 通过`)

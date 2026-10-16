@@ -229,7 +229,11 @@ export const Config: z<Config> = z.object({
    * Agent preset every bot session runs under. `standard` is the deployment's normal
    * session profile, so bots see the same tool families the user does.
    */
-  botAgentPreset: z.string().default('standard'),
+  // The DEFAULT matters more than the runtime expression below: a schema default always
+  // supplies a value, so `config.botAgentPreset ?? 'bot'` never fell through and every bot kept
+  // mounting `standard` (measured: the mount log said `ok preset=standard` after the switch was
+  // supposedly in place). This field is the switch.
+  botAgentPreset: z.string().default('bot'),
   /**
    * Global tools a bot must never see. `plugin_manager` can disable or uninstall plugins
    * (this one included); `ask_user_question` waits on a UI a hidden bot session does not
@@ -565,7 +569,7 @@ export class AgentCommunityService extends TypertRemoteService {
       hardLimit: config.hardLimit ?? 24,
       historyMessagesInPrompt: config.historyMessagesInPrompt ?? 10,
       a2aMinIntervalMs: config.a2aMinIntervalMs ?? 3_000,
-      botAgentPreset: config.botAgentPreset ?? 'standard',
+      botAgentPreset: config.botAgentPreset ?? 'bot',
       botDeniedTools: config.botDeniedTools ?? [...DEFAULT_DENIED_TOOLS],
       memoryEntriesPerRoom: config.memoryEntriesPerRoom ?? 12,
       memoryPromptEntries: config.memoryPromptEntries ?? 8,
