@@ -39,7 +39,26 @@ export interface LedgerProjectionDeps {
   readonly botName: (botId: string) => string
   /** The run currently driving a pair, so rows land inside the right turn. */
   readonly runIdFor: (roomId: string, botId: string) => string | undefined
+  /**
+   * Why the current run exists.
+   *
+   * COORDINATION IS NOT CONVERSATION. A turn woken by another bot's report or acknowledgement is
+   * internal machinery: the user did not ask for it and cannot act on it, and rendering it fills
+   * the room with bulletins ("✅ 完成：…", "已按派工完成：…") that repeat what the transcript already
+   * shows. Its rows must therefore not be created — the existing `silent` gate does exactly that,
+   * and this lookup is what tells it which runs are internal.
+   */
+  readonly runOriginFor?: (roomId: string, botId: string) => string | undefined
 }
+
+/**
+ * Runs that exist to move work between bots, never to speak to the user.
+ *
+ * `a2a` and `bot-message` are peer messages; `team-report` is a member's report reaching the
+ * leader. The leader's deliverable does not depend on any of them being rendered: it is posted by
+ * `finish_task`, and a user-triggered turn renders normally.
+ */
+const INTERNAL_RUN_ORIGINS = new Set(['a2a', 'bot-message', 'team-report'])
 
 /** One in-flight model attempt, keyed by its attempt id. */
 interface AttemptState {
@@ -175,7 +194,9 @@ export class LedgerProjection {
       // only after the turn settled, when `patchRunText`/`patchRunReasoning` wrote them
       // from the result — so the model appeared to produce nothing while it was working,
       // and 思考过程 only showed up once it had finished.
+      const origin = this.deps.runOriginFor?.(owner.roomId, owner.botId)
       const silent = this.deps.runIdFor(owner.roomId, owner.botId) === undefined
+        || (origin !== undefined && INTERNAL_RUN_ORIGINS.has(origin))
 
       const state: AttemptState = { ...owner, text: '', reasoning: '', silent }
 

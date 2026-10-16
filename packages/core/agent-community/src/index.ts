@@ -1205,6 +1205,9 @@ export class AgentCommunityService extends TypertRemoteService {
             senderSessionId: this.sessionIdFor(input.roomId, input.botId),
             text: input.text,
             toBotName: input.toName,
+            // Coordination, not conversation: the text reaches the recipient's run (and wakes it)
+            // but is not rendered in the room. Member reports and peer alignments are internal.
+            internal: true,
           })
           return { ok: true }
         } catch (error: unknown) {
@@ -2521,7 +2524,11 @@ export class AgentCommunityService extends TypertRemoteService {
     // model emitted only reasoning) must not persist an empty bot message: the
     // panel renders it as a bot with no content, which reads as a hung reply.
     const replyText = input.reply?.text ?? ''
-    if (input.reply !== undefined && replyText.trim() !== '') {
+    // Internal turns do not speak to the user. Their text is the bot's reply to a peer or a report
+    // to the leader; rendering it is what produced five messages for one instruction, three of them
+    // the same bot announcing completion. The user-facing deliverable travels through `finish_task`.
+    const internalTurn = prev.origin === 'a2a' || prev.origin === 'bot-message' || prev.origin === 'team-report'
+    if (!internalTurn && input.reply !== undefined && replyText.trim() !== '') {
       // B-2: use the real session id from roomAgentSessions rather than
       // prev.sessionId, which is often a stale UUID that has no session directory.
       const realSessionId = this.state.roomAgentSessions.find(
@@ -3055,7 +3062,7 @@ export class AgentCommunityService extends TypertRemoteService {
   }
 
   /** Post a message from a Bot, with optional a2a direct delivery. */
-  async postBotMessage(input: PostBotMessageRequest): Promise<BotMessage> {
+  async postBotMessage(input: PostBotMessageRequest & { internal?: boolean }): Promise<BotMessage> {
     const room = requireRoom(this.state, input.roomId)
     // Resolve sender bot from session id
     const senderEntry = this.state.roomAgentSessions.find(s => s.sessionId === input.senderSessionId)
@@ -3079,53 +3086,23 @@ export class AgentCommunityService extends TypertRemoteService {
       )
     }
     const senderName = senderBot?.name ?? 'bot'
-    // ── THE SAME BOT MUST NOT SAY THE SAME THING TWICE IN A ROW ─────────────────
-    //
-    // A bot's turn posts its final answer to the room, and the same bot may ALSO call
-    // `message_member` with the same body — so the user reads it twice, and the member is woken for
-    // a message it has already seen. Reported from a group where one instruction produced four
-    // near-identical "task complete" reports. The prompt tells the model not to do this; the model
-    // does it anyway, so the plugin refuses the duplicate instead of relying on the prompt.
-    //
-    // Deliberately narrow: only the SAME bot, SAME room, within two minutes, and only when the two
-    // texts are equal after normalisation or one contains the other — and only for texts long
-    // enough that a repeat cannot be a normal short acknowledgement ("好的", "收到").
-    const normalise = (text: string): string => text.replace(/\s+/g, ' ').trim().toLowerCase()
-    const trigrams = (text: string): Set<string> => {
-      const out = new Set<string>()
-      for (let i = 0; i + 3 <= text.length; i++) out.add(text.slice(i, i + 3))
-      return out
-    }
-    /** Character 3-grams, so the check works the same for Chinese and English. */
-    const similarity = (a: string, b: string): number => {
-      const setA = trigrams(a); const setB = trigrams(b)
-      if (setA.size === 0 || setB.size === 0) return 0
-      let shared = 0
-      for (const gram of setA) if (setB.has(gram)) shared++
-      return shared / (setA.size + setB.size - shared)
-    }
-    const candidate = normalise(input.text)
-    // Thresholds measured on the report that prompted this: two completion summaries of the same
-    // task scored 0.62 against each other, while every other pair of bot messages in that room
-    // scored at most 0.16. Requiring 80+ characters keeps short acknowledgements out of scope.
-    if (candidate.length >= 80 && senderBot !== undefined) {
-      const cutoff = Date.now() - 120_000
-      const previous = [...this.state.messages]
-        .reverse()
-        .find(m => m.roomId === input.roomId
-          && m.sender.kind === 'bot'
-          && m.sender.botId === senderBot.id
-          && Date.parse(m.createdAt) >= cutoff)
-      if (previous !== undefined) {
-        const earlier = normalise(previous.text)
-        const duplicate = earlier.length >= 80
-          && (earlier.includes(candidate) || candidate.includes(earlier) || similarity(earlier, candidate) >= 0.55)
-        if (duplicate) {
-          // Returning the existing message keeps the caller idempotent, and returning early also
-          // skips the wake-up below: the target already received this text.
-          return previous as BotMessage
-        }
-      }
+    if (input.internal === true) {
+      // Handed to the target below; never rendered in the room. Returning a shaped message keeps
+      // every caller's contract unchanged. Coordination between bots is not conversation with the
+      // user, and rendering it is what filled a room with five messages for one instruction.
+      return {
+        id: brandId<BotMessageId>(randomUUID()),
+        roomId: brandId<BotRoomId>(input.roomId),
+        sender: {
+          kind: 'bot',
+          ...(senderBot?.id !== undefined ? { botId: senderBot.id } : {}),
+          name: senderName,
+        },
+        text: input.text,
+        mentions: [],
+        createdAt: nowIso(),
+        sequence: this.state.messages.filter(m => m.roomId === input.roomId).length,
+      } as BotMessage
     }
     const msg: BotMessage = {
       id: brandId<BotMessageId>(randomUUID()),
