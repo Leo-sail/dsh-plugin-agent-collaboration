@@ -34,7 +34,7 @@ bundle 的 `cordis.patch.yml` 用**模块名**挂载三行：
 
 ```
 parameter codec is not backed by a zod v4 schema
-    at requireStrictCodec (file:///Users/changhao/.npm/_npx/1e7f6d9597241db0/node_modules/...)
+    at requireStrictCodec (file://<host-prefix>/…/node_modules/…)
 ```
 
 连带症状：**无法创建原生会话、无法在原生会话发消息**，而且 Agent Teams 的行被挂载两次 →

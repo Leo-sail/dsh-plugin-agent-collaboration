@@ -56,7 +56,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "author": "leochang <leochang@gmail.com>",
+  "author": "Leo-sail",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Leo-sail/dsh-plugin-agent-collaboration.git",
