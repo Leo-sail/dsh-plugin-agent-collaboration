@@ -1961,7 +1961,19 @@ export class AgentCommunityService extends TypertRemoteService {
       if (bot === undefined) return false
       if (message.mentions.length > 0 && !message.mentions.includes(botId)) return false
       const mentionOnly = bot.mentionOnly === true || room.mentionOnly
-      if (mentionOnly && !message.mentions.includes(botId)) return false
+      if (mentionOnly && !message.mentions.includes(botId)) {
+        // ── A NAME IN THE TEXT IS A DIRECTIVE TOO ────────────────────────────────
+        //
+        // Measured through the UI (2026-10-16): with 仅在被 @ 时响应 on, a user who TYPES
+        // `@fghj 你看一下` got silence — the composer only produces `message.mentions` when the
+        // mention is picked from the menu, so a hand-typed @name arrives as plain text and this
+        // filter dropped it. The router itself treats a written name as targeted (its own name
+        // step runs before the leader fallback), and the acceptance checklist expects exactly
+        // this: 「群里发 @B 你看一下 → 只有 B 回复」. Being stricter than the router here made the
+        // room look broken rather than quiet.
+        const named = namedBotIdsIn(message.text, this.state.bots.map(b => ({ id: b.id, name: b.name })))
+        if (!named.includes(botId)) return false
+      }
       return true
     }
 

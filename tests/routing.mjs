@@ -148,6 +148,17 @@ check(namedBotIdsIn('把 小毕 拉进群', MEMBERS.map(m => ({ id: m.id, name: 
   'namedBotIdsIn 认得写出名字的成员')
 check(namedBotIdsIn('把 outsider 拉进群', [{ id: 'x', name: 'outsider' }]).join(',') === 'x',
   'namedBotIdsIn 也认得不在房间里的 Bot（拉人场景）')
+// 「仅在被 @ 时响应」也必须认手写的名字。
+//
+// 实测（2026-10-16）：群设为仅被 @ 时响应后，用户手打 `@fgj` 发出去得到的是**沉默** —— 输入框
+// 只有在从菜单里选人时才会产生结构化的 mentions，手打的名字落成纯文本，被那条过滤直接丢掉。
+// 路由器本身把"写出名字"当成定向指令，验收清单也写着「群里发 @B 你看一下 → 只有 B 回复」，
+// 所以这条路径必须认得名字；否则房间看起来是坏的，而不是"安静"。
+const MENTION_ONLY_ROOM = [{ id: 'b', name: '小毕' }, { id: 'c', name: '小策' }]
+check(namedBotIdsIn('@小毕 你看一下', MENTION_ONLY_ROOM).join(',') === 'b',
+  '仅被@时响应：手打 @名字 能命中该成员')
+check(namedBotIdsIn('今天天气不错', MENTION_ONLY_ROOM).length === 0,
+  '仅被@时响应：没写名字的消息仍然不命中任何人（房间保持安静）')
 
 console.log(`\n[routing] ${pass}/${total} 通过`)
 process.exit(pass === total ? 0 : 1)
