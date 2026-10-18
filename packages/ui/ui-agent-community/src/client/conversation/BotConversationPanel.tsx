@@ -212,6 +212,17 @@ export function BotConversationPanel({
 }: BotConversationPanelProps) {
   const [entries, setEntries] = useState<LedgerEntry[]>([])
   const [preview, setPreview] = useState<PreviewRequest | undefined>(undefined)
+  // The cards live deep inside the transcript but the dock is a sibling of the
+  // conversation column, so the request travels as one window event. (Without this
+  // listener the click dispatched into the void — the first "nothing happens" report.)
+  useEffect(() => {
+    const onRequest = (event: Event): void => {
+      const detail = (event as CustomEvent<PreviewRequest>).detail
+      if (detail !== undefined && typeof detail === 'object') setPreview(detail)
+    }
+    window.addEventListener(PREVIEW_EVENT, onRequest)
+    return () => { window.removeEventListener(PREVIEW_EVENT, onRequest) }
+  }, [])
   const [hasEarlier, setHasEarlier] = useState(false)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [queue, setQueue] = useState<InFlightMessage[]>([])
