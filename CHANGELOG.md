@@ -18,7 +18,14 @@
 0.3.2 上两场景均在 ≤3s 内清零；未选中房间的未读角标仍正常显示；无请求风暴、无 console/pageerror。
 
 ### 发布说明
-- 版本：`ui-agent-community` / bundle 升到 0.3.2；core / `tool-agent-community` 本版无改动，保持 0.3.1。
+- npm 上实际发布的版本：bundle **0.3.2**、`ui-agent-community` **0.3.8**、`agent-community` 0.3.1、
+  `tool-agent-community` 0.3.1（本版 core/tools 无改动）。`bundle@0.3.2` 依赖 `ui ^0.3.2`，由 0.3.8 满足；
+  `npm install dsh-plugin-agent-collaboration@0.3.2` 的依赖解析已实测通过。
+- **ui 为什么是 0.3.8 而不是 0.3.2**：npm 对「bypass-2FA token 发布较大包」会转入 staged 审批，且直发时会出现
+  publish 打印成功但版本不可见、重发报 `409 Cannot publish over previously staged version` 的登记错误
+  （[npm/cli#9889](https://github.com/npm/cli/issues/9889)）。0.3.2 起的多个直发版本被 npm 占用；最终用
+  `npm stage publish` 暂存、在 npmjs.com 以 2FA 批准，发布为 **0.3.8**。功能内容与 0.3.2 构建完全一致
+  （`client.js` 3,321,934 B / md5 `6630f17b…`），仅版本号不同。
 - 客户端产物大小不变（仍是 3.32 MB / gzip 913 KB）。
 
 ## 0.3.1 — 面板内自绘预览：PDF / Word / Excel
