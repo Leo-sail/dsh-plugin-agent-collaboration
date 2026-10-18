@@ -10,6 +10,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react'
 import type { CommunityRemote } from '../community/types.ts'
 import type { DeliveredFile } from './types.ts'
 import { Markdown } from './Markdown.tsx'
+import { PREVIEW_EVENT } from './PreviewDock.tsx'
 
 /** Matches DSH's own collapse threshold for delivery cards. */
 const COLLAPSED_COUNT = 4
@@ -256,9 +257,10 @@ function DeliverableCard({ file, onPreview, roomId, runId, index, remote }: {
    * without the right Sidebar.
    */
   const openPreview = (): void => {
-    // The preview docks INSIDE the plugin page (the DSH right Sidebar only exists while
-    // the main Conversation surface is mounted, and this panel replaces it).
-    onPreview()
+    // The preview docks INSIDE the plugin page as a split right column (the DSH right
+    // Sidebar only exists while the main Conversation surface is mounted, and this panel
+    // replaces that surface).
+    window.dispatchEvent(new CustomEvent(PREVIEW_EVENT, { detail: { roomId, runId, index, file } }))
   }
 
   const toggleMenu = async (): Promise<void> => {

@@ -10,6 +10,7 @@ import {
   IconChevronDownOutlineRegular, IconPanelLeftOutlineRegular,
 } from './NativeIcons.tsx'
 import { TranscriptArea } from './TranscriptArea.tsx'
+import { PreviewDock, PREVIEW_EVENT, type PreviewRequest } from './PreviewDock.tsx'
 import type { CommunityRemote } from '../community/types.ts'
 import { ComposerArea } from './ComposerArea.tsx'
 import { QuestionComposer, pendingQuestion } from './QuestionComposer.tsx'
@@ -210,6 +211,7 @@ export function BotConversationPanel({
   onSend, onStop, onApprove, onReject, onAnswerQuestion, onSkipQuestion, onCommand, onClear, listLedger, onFork, tasks, round, remote,
 }: BotConversationPanelProps) {
   const [entries, setEntries] = useState<LedgerEntry[]>([])
+  const [preview, setPreview] = useState<PreviewRequest | undefined>(undefined)
   const [hasEarlier, setHasEarlier] = useState(false)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [queue, setQueue] = useState<InFlightMessage[]>([])
@@ -510,6 +512,7 @@ export function BotConversationPanel({
         flex: 1,
         minHeight: 0,
         display: 'flex',
+        flexDirection: 'row',
         position: 'relative',
         overflow: 'hidden',
       }}>
@@ -544,6 +547,13 @@ export function BotConversationPanel({
              rendered without its 用时 — the run record is the only authority then. */
           runStarts={runStartTimes(runs)}
         />
+        {preview !== undefined && (
+          <PreviewDock
+            request={preview}
+            remote={remote}
+            onClose={() => setPreview(undefined)}
+          />
+        )}
       </div>
 
       {/* Task dock (§ native `conversation.input.dock`): the room's CURRENT round plus each
