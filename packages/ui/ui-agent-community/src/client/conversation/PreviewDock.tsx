@@ -87,8 +87,17 @@ export function PreviewDock({ request, remote, onClose }: {
     if (v.kind === 'missing') return <div style={{ padding: 12, fontSize: 12, color: 'var(--dsw-alias-status-error, #c0392b)' }}>文件已不存在。</div>
     if (v.kind === 'data') {
       if (v.mime.startsWith('image/')) return <img src={v.dataUrl} alt={file.name} style={{ maxWidth: '100%', display: 'block', margin: '12px auto' }} />
-      // PDF: the browser's own viewer, same as DSH's document preview.
-      return <iframe src={v.dataUrl} title={file.name} style={{ flex: 1, width: '100%', border: 'none' }} />
+      // PDF (and converted Office): show the page content itself — the embedded viewer
+      // chrome is suppressed through the viewer's own fragment parameters, so the dock
+      // shows the document, not a browser-style frame around it.
+      return (
+        <embed
+          src={`${v.dataUrl}#toolbar=0&navpanes=0&scrollbar=0&view=FitH`}
+          type="application/pdf"
+          title={file.name}
+          style={{ flex: 1, width: '100%', minHeight: 0, border: 'none', background: '#fff' }}
+        />
+      )
     }
     if (v.kind === 'binary') return <div style={{ padding: 12, fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #8a929c)' }}>该类型不支持内嵌预览（{v.size.toLocaleString()} 字节）。请用「打开」。</div>
     if (htmlUrl !== undefined) return <iframe src={htmlUrl} title={file.name} sandbox="" style={{ flex: 1, width: '100%', border: 'none' }} />
