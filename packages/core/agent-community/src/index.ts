@@ -3642,6 +3642,73 @@ export class AgentCommunityService extends TypertRemoteService {
   }
 
   /**
+   * Convert one delivered Office document to PDF for the in-panel preview.
+   *
+   * The plugin's own page cannot host DSH's right Sidebar (the Sidebar exists only
+   * while a Session surface is mounted), so the preview renders inside the panel.
+   * Office fidelity comes from the Host's own `office-to-pdf` provider — the same
+   * engine DSH's document preview uses — addressed through the delivery record.
+   */
+  async renderDeliverableDocument(input: {
+    roomId: string
+    runId: string
+    index: number
+  }): Promise<{ ok: true; name: string; dataUrl: string } | { ok: false; error: string }> {
+    const rows = this.listLedger(input.roomId, { force: true })
+    const row = rows.find(
+      (entry): entry is Extract<LedgerEntry, { type: 'deliverable' }> =>
+        entry.type === 'deliverable' && entry.runId === input.runId,
+    )
+    const file = row?.files[Math.trunc(input.index)]
+    if (file === undefined) return { ok: false, error: '这个文件已不在交付记录里。' }
+    const extension = extname(file.path).slice(1).toLowerCase()
+    if (!OFFICE_RENDER_EXT.has(extension)) return { ok: false, error: '该类型不支持文档转换。' }
+    const provider = (this.ctx as unknown as {
+      get?: (name: string) => unknown
+      officeToPdf?: unknown
+    })
+    const office = (provider.get?.('officeToPdf') ?? provider.officeToPdf) as {
+      convert(request: {
+        source: {
+          key: string
+          version: string
+          bytes?: number
+          read(signal: AbortSignal, maxBytes: number): Promise<{ version: string; bytes: Uint8Array }>
+        }
+        extension: string
+        priority: 'foreground'
+      }, signal?: AbortSignal): Promise<{ pdf: Uint8Array }>
+    } | undefined
+    if (office === undefined) return { ok: false, error: '当前宿主没有 Office 转换服务。' }
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), 60_000)
+    try {
+      const info = await stat(file.path)
+      const version = `${info.size}:${Math.trunc(info.mtimeMs)}`
+      const result = await office.convert({
+        source: {
+          key: file.path,
+          version,
+          bytes: info.size,
+          read: async () => {
+            const bytes = await readFile(file.path)
+            return { version, bytes }
+          },
+        },
+        extension,
+        priority: 'foreground',
+      }, abort.signal)
+      const pdf = Buffer.from(result.pdf)
+      if (pdf.byteLength > PREVIEW_MAX_BYTES * 4) return { ok: false, error: '转换后的 PDF 过大，无法内嵌预览。' }
+      return { ok: true, name: file.name, dataUrl: `data:application/pdf;base64,${pdf.toString('base64')}` }
+    } catch (error: unknown) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
    * Read one declared deliverable for the panel's preview.
    *
    * Addressed by `(room, run, index)` and never by a client-supplied path: the only
@@ -4824,6 +4891,9 @@ const PREVIEW_IMAGE_MIME: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.pdf': 'application/pdf',
 }
+/** Office extensions the Host office-to-pdf provider can convert for the preview. */
+const OFFICE_RENDER_EXT = new Set(['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'])
+
 /** Formats with no in-panel viewer; the card offers the native app instead. */
 const PREVIEW_BINARY_EXT = new Set([
   '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx', '.xlsm', '.odt', '.ods', '.odp',
@@ -4874,6 +4944,8 @@ const REMOTE_METHODS = [
   'readDeliverablePreview',
   // Host desktop actions for a delivered file (applications / open / reveal).
   'deliverableFileAction',
+  // Office → PDF rendering for the in-panel preview (host office-to-pdf provider).
+  'renderDeliverableDocument',
   // P-clear: clear room messages + cancel stale failed runs
   'clearMessages',
   // Fork: copy a bot into a new bot + its own direct room

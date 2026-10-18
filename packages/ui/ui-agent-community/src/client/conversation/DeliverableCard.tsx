@@ -256,12 +256,9 @@ function DeliverableCard({ file, onPreview, roomId, runId, index, remote }: {
    * without the right Sidebar.
    */
   const openPreview = (): void => {
-    const pending = remote?.openFilePreview(file.path)
-    if (pending === undefined) {
-      onPreview()
-      return
-    }
-    void pending.then((opened) => { if (!opened) onPreview() }).catch(() => onPreview())
+    // The preview docks INSIDE the plugin page (the DSH right Sidebar only exists while
+    // the main Conversation surface is mounted, and this panel replaces it).
+    onPreview()
   }
 
   const toggleMenu = async (): Promise<void> => {
@@ -530,12 +527,23 @@ function DeliverablePreviewDialog({ file, roomId, runId, index, remote, onClose 
 
   useEffect(() => {
     let alive = true
+    const office = /[.](docx?|xlsx?|pptx?)$/iu.test(file.name)
     const load = async (): Promise<void> => {
       if (remote === undefined) {
         setState({ status: 'error', message: '当前宿主不支持内嵌预览，请用应用打开。' })
         return
       }
       try {
+        if (office) {
+          const converted = await remote.renderDeliverableDocument({ roomId, runId, index })
+          if (!alive) return
+          if (!converted.ok) {
+            setState({ status: 'error', message: converted.error })
+            return
+          }
+          setState({ status: 'ready', value: { kind: 'data', name: converted.name, mime: 'application/pdf', dataUrl: converted.dataUrl } })
+          return
+        }
         const value = await remote.readDeliverablePreview({ roomId, runId, index })
         if (alive) {
           setState({ status: 'ready', value })
@@ -547,7 +555,7 @@ function DeliverablePreviewDialog({ file, roomId, runId, index, remote, onClose 
     }
     void load()
     return () => { alive = false }
-  }, [remote, roomId, runId, index])
+  }, [remote, roomId, runId, index, file.name])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') onClose() }
@@ -587,24 +595,26 @@ function DeliverablePreviewDialog({ file, roomId, runId, index, remote, onClose 
       aria-label={`预览 ${file.name}`}
       style={{
         position: 'fixed',
-        inset: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
         zIndex: 200,
         display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'rgba(12, 16, 22, 0.42)',
+        alignItems: 'stretch',
+        justifyContent: 'flex-end',
+        background: 'rgba(12, 16, 22, 0.28)',
       }}
       onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}
     >
       <div style={{
-        width: 'min(780px, 88vw)',
-        maxHeight: '82vh',
+        width: 'min(620px, 92vw)',
+        height: '100%',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        borderRadius: 14,
+        borderLeft: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)',
         background: 'var(--dsw-alias-bg-elevated, #ffffff)',
-        boxShadow: '0 24px 60px rgba(10, 16, 26, 0.32)',
+        boxShadow: '-18px 0 48px rgba(10, 16, 26, 0.24)',
       }}>
         <div style={{
           display: 'flex',

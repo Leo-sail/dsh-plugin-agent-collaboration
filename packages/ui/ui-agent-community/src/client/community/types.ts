@@ -210,6 +210,12 @@ export interface CommunityRemote {
    * Host desktop actions for one delivered file: its associated applications, open it,
    * or reveal it. Addressed through the delivery record, never a client-supplied path.
    */
+  /** Host office→PDF conversion for the in-panel preview of Word/Excel/PPT files. */
+  renderDeliverableDocument(input: {
+    roomId: string
+    runId: string
+    index: number
+  }): Promise<{ ok: true; name: string; dataUrl: string } | { ok: false; error: string }>
   deliverableFileAction(input: {
     roomId: string
     runId: string

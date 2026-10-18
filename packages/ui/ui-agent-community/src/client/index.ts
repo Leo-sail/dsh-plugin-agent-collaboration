@@ -154,6 +154,7 @@ const contribution = {
     // Deliverable cards: preview one declared file (the host never accepts a bare path).
     descriptor('readDeliverablePreview', [param('input', obj('ReadDeliverablePreviewRequest'))]),
     descriptor('deliverableFileAction', [param('input', obj('DeliverableFileActionRequest'))]),
+    descriptor('renderDeliverableDocument', [param('input', obj('RenderDeliverableDocumentRequest'))]),
     descriptor('approveBotToolCall', [param('callId', str()), param('outcome', str())]),
     // A bot's question card answers back here: `answer` or `skip`.
     descriptor('answerBotQuestion', [param('input', obj('AnswerBotQuestionRequest'))]),
@@ -590,6 +591,7 @@ export function apply(ctx: ClientContext): void {
     // the card falls back to its in-panel dialog.
     openFilePreview: (path) => openFilePreview(path),
     deliverableFileAction: (input) => call('deliverableFileAction', input),
+    renderDeliverableDocument: (input) => call('renderDeliverableDocument', input),
     approveBotToolCall: (callId, outcome) => call('approveBotToolCall', callId, outcome),
     answerBotQuestion: (input) => call('answerBotQuestion', input),
     markRoomRead: (input) => call('markRoomRead', input),
