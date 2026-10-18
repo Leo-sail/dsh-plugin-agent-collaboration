@@ -153,6 +153,7 @@ const contribution = {
     descriptor('listLedger', [param('roomId', str()), param('opts', obj('LedgerPageOpts'))]),
     // Deliverable cards: preview one declared file (the host never accepts a bare path).
     descriptor('readDeliverablePreview', [param('input', obj('ReadDeliverablePreviewRequest'))]),
+    descriptor('deliverableFileAction', [param('input', obj('DeliverableFileActionRequest'))]),
     descriptor('approveBotToolCall', [param('callId', str()), param('outcome', str())]),
     // A bot's question card answers back here: `answer` or `skip`.
     descriptor('answerBotQuestion', [param('input', obj('AnswerBotQuestionRequest'))]),
@@ -277,10 +278,12 @@ export function apply(ctx: ClientContext): void {
       }, signal?: AbortSignal): Promise<{ opened: boolean }>
     } | undefined
     workspace: { pickDirectory(): Promise<string | null> } | undefined
+    /** The central-panel selector: `null` returns to the Conversation. */
+    layout: { selectPanel(id: string | null): void } | undefined
     /** The right Sidebar's navigation controller; only present while a Session is on screen. */
     sidebarRight: { openResource(address: string): void } | undefined
   }
-  const caps: Capabilities = { community: undefined, session: undefined, workspace: undefined, sidebarRight: undefined }
+  const caps: Capabilities = { community: undefined, session: undefined, workspace: undefined, sidebarRight: undefined, layout: undefined }
 
   // The mount promise is observed, never awaited blindly: a rejection is captured
   // for the diagnostic message, a stall is caught by the deadline below.
@@ -324,6 +327,12 @@ export function apply(ctx: ClientContext): void {
   })
   // The right Sidebar's navigation controller. Optional: a deployment without it simply
   // falls back to the in-panel preview dialog.
+  ctx.inject(['layout'], (scope) => {
+    caps.layout = (scope as unknown as {
+      layout?: { selectPanel(id: string | null): void }
+    }).layout
+    return () => { caps.layout = undefined }
+  })
   ctx.inject(['sidebarRight'], (scope) => {
     caps.sidebarRight = (scope as unknown as {
       sidebarRight?: { openResource(address: string): void }
@@ -396,16 +405,29 @@ export function apply(ctx: ClientContext): void {
    * cards do. Returns false when this deployment has no Session or no right Sidebar,
    * and the card then falls back to its in-panel preview.
    */
-  function openFilePreview(path: string): boolean {
+  async function openFilePreview(path: string): Promise<boolean> {
     const sessionId = currentViewSessionId()
     const right = caps.sidebarRight
     if (sessionId === undefined || right === undefined) return false
+    const address = fileAddress(sessionId, path)
+    // The right Sidebar only exists while a Session surface is mounted, and the
+    // plugin's own page replaces that surface. DSH's only route therefore starts by
+    // returning to the Conversation (`selectPanel(null)`), which mounts it again.
     try {
-      right.openResource(fileAddress(sessionId, path))
-      return true
+      caps.layout?.selectPanel(null)
     } catch {
-      return false
+      // Already on the Conversation — or a layout without panel switching.
     }
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+      try {
+        right.openResource(address)
+        return true
+      } catch {
+        await new Promise(resolve => setTimeout(resolve, 60))
+      }
+    }
+    return false
   }
 
   async function ensureNamespace(): Promise<RemoteFace> {
@@ -567,6 +589,7 @@ export function apply(ctx: ClientContext): void {
     // False means this deployment has no on-screen Session or no right Sidebar, and
     // the card falls back to its in-panel dialog.
     openFilePreview: (path) => openFilePreview(path),
+    deliverableFileAction: (input) => call('deliverableFileAction', input),
     approveBotToolCall: (callId, outcome) => call('approveBotToolCall', callId, outcome),
     answerBotQuestion: (input) => call('answerBotQuestion', input),
     markRoomRead: (input) => call('markRoomRead', input),

@@ -496,6 +496,10 @@ export class AgentCommunityService extends TypertRemoteService {
   // executor no longer materialises DSH Agents, so nothing it does creates a Session.
   static inject = [
     'sessions', 'agents', 'workspaceRegistry', 'approval', 'permissionPresets', 'llm',
+    // The Host desktop surface (open/reveal/list applications for one path). The
+    // service exposes no session identity in these calls, so it is safe to reach from
+    // the plugin's host half — this is the same implementation DSH's chat cards use.
+    'sessionController',
     // NOTE: `skills` is deliberately NOT listed here. Cordis only activates a
     // plugin once every injected service exists, so requiring it made the whole
     // plugin disappear whenever the skill packages were absent. It is read
@@ -3578,6 +3582,66 @@ export class AgentCommunityService extends TypertRemoteService {
   }
 
   /**
+   * Act on one declared deliverable with the Host desktop: list its OS applications,
+   * open it with one, or reveal it in the file manager.
+   *
+   * Addressed by (room, run, index) like the preview, so the only paths this can reach
+   * are the ones a Bot already delivered. The call goes through the Host's own
+   * `sessionController` service, which is the same implementation DSH's chat cards use
+   * from the browser — it does not depend on the client Remote surface.
+   */
+  async deliverableFileAction(input: {
+    roomId: string
+    runId: string
+    index: number
+    action: 'applications' | 'open' | 'reveal'
+    application?: string | undefined
+  }): Promise<
+    | { ok: true; applications?: Array<{ id: string; name: string; default: boolean; icon: string | null }> }
+    | { ok: false; error: string }
+  > {
+    const rows = this.listLedger(input.roomId, { force: true })
+    const row = rows.find(
+      (entry): entry is Extract<LedgerEntry, { type: 'deliverable' }> =>
+        entry.type === 'deliverable' && entry.runId === input.runId,
+    )
+    const file = row?.files[Math.trunc(input.index)]
+    if (file === undefined) return { ok: false, error: '这个文件已不在交付记录里。' }
+    const controller = (this.ctx as unknown as {
+      sessionController?: {
+        workspacePathApplications(request: { path: string }, signal?: AbortSignal): Promise<Array<{
+          id: string; name: string; default: boolean; icon: string | null
+        }>>
+        openWorkspacePath(request: {
+          path: string
+          action?: 'reveal'
+          application?: string
+        }, signal?: AbortSignal): Promise<{ opened: boolean }>
+      }
+    }).sessionController
+    if (controller === undefined) return { ok: false, error: '当前宿主没有可用的桌面打开能力。' }
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), 20_000)
+    try {
+      if (input.action === 'applications') {
+        const applications = await controller.workspacePathApplications({ path: file.path }, abort.signal)
+        return { ok: true, applications }
+      }
+      const request = input.action === 'reveal'
+        ? { path: file.path, action: 'reveal' as const }
+        : input.application !== undefined
+          ? { path: file.path, application: input.application }
+          : { path: file.path }
+      await controller.openWorkspacePath(request, abort.signal)
+      return { ok: true }
+    } catch (error: unknown) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
    * Read one declared deliverable for the panel's preview.
    *
    * Addressed by `(room, run, index)` and never by a client-supplied path: the only
@@ -4808,6 +4872,8 @@ const REMOTE_METHODS = [
   'listLedger', 'approveBotToolCall', 'getSessionVisibility', 'reconcileSessionVisibility',
   // Deliverable cards: in-panel preview of a declared file (never a client-supplied path).
   'readDeliverablePreview',
+  // Host desktop actions for a delivered file (applications / open / reveal).
+  'deliverableFileAction',
   // P-clear: clear room messages + cancel stale failed runs
   'clearMessages',
   // Fork: copy a bot into a new bot + its own direct room

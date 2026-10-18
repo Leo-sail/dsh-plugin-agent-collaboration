@@ -205,7 +205,21 @@ export interface CommunityRemote {
    * cards do. Returns false when there is no on-screen Session or no right Sidebar,
    * and the caller keeps its in-panel preview.
    */
-  openFilePreview(path: string): boolean
+  openFilePreview(path: string): Promise<boolean>
+  /**
+   * Host desktop actions for one delivered file: its associated applications, open it,
+   * or reveal it. Addressed through the delivery record, never a client-supplied path.
+   */
+  deliverableFileAction(input: {
+    roomId: string
+    runId: string
+    index: number
+    action: 'applications' | 'open' | 'reveal'
+    application?: string
+  }): Promise<
+    | { ok: true; applications?: Array<{ id: string; name: string; default: boolean; icon: string | null }> }
+    | { ok: false; error: string }
+  >
   /** Whether this host can open/reveal files in an OS application (desktop gate). */
   canOpenWorkspacePath(): Promise<boolean>
   /** Applications associated with one file on this machine, in OS preference order. */

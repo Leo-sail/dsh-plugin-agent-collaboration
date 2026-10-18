@@ -108,22 +108,6 @@ export interface DeliverableGroupProps {
 export function DeliverableGroup({ files, roomId, runId, remote }: DeliverableGroupProps): ReactElement | null {
   const [expanded, setExpanded] = useState(files.length <= COLLAPSED_COUNT)
   const [previewIndex, setPreviewIndex] = useState<number | undefined>(undefined)
-  const [desktopOk, setDesktopOk] = useState<boolean>(false)
-
-  // The OS-open menu is only shown when this host can actually open paths (macOS/Windows,
-  // or Linux with a display). Asking once per group keeps every card's action consistent.
-  useEffect(() => {
-    let alive = true
-    if (remote === undefined) {
-      setDesktopOk(false)
-      return undefined
-    }
-    void remote.canOpenWorkspacePath()
-      .then((ok) => { if (alive) setDesktopOk(ok) })
-      .catch(() => { if (alive) setDesktopOk(false) })
-    return () => { alive = false }
-  }, [remote])
-
   if (files.length === 0) return null
   const shown = expanded ? files : files.slice(0, COLLAPSED_COUNT)
   const hidden = files.length - shown.length
@@ -142,7 +126,9 @@ export function DeliverableGroup({ files, roomId, runId, remote }: DeliverableGr
             key={`${file.path}:${index}`}
             file={file}
             onPreview={() => setPreviewIndex(index)}
-            canOpen={desktopOk}
+            roomId={roomId}
+            runId={runId}
+            index={index}
             remote={remote}
           />
         ))}
@@ -180,12 +166,14 @@ export function DeliverableGroup({ files, roomId, runId, remote }: DeliverableGr
 
 // ── one card ─────────────────────────────────────────────────────────────────
 
-interface AppItem { readonly id: string; readonly name: string; readonly default: boolean }
+interface AppItem { readonly id: string; readonly name: string; readonly default: boolean; readonly icon?: string | null }
 
-function DeliverableCard({ file, onPreview, canOpen, remote }: {
+function DeliverableCard({ file, onPreview, roomId, runId, index, remote }: {
   readonly file: DeliveredFile
   readonly onPreview: () => void
-  readonly canOpen: boolean
+  readonly roomId: string
+  readonly runId: string
+  readonly index: number
   readonly remote?: CommunityRemote | undefined
 }): ReactElement {
   const [hover, setHover] = useState(false)
@@ -231,7 +219,11 @@ function DeliverableCard({ file, onPreview, canOpen, remote }: {
     setBusy(true)
     setNotice(undefined)
     try {
-      await remote.openWorkspacePath(application === undefined ? { path: file.path } : { path: file.path, application })
+      const result = await remote.deliverableFileAction({
+        roomId, runId, index, action: 'open',
+        ...(application === undefined ? {} : { application }),
+      })
+      if (!result.ok) throw new Error(result.error)
       setMenuOpen(false)
       flash('ok', '已打开')
     } catch (error: unknown) {
@@ -246,7 +238,8 @@ function DeliverableCard({ file, onPreview, canOpen, remote }: {
     setBusy(true)
     setNotice(undefined)
     try {
-      await remote.openWorkspacePath({ path: file.path, action: 'reveal' })
+      const result = await remote.deliverableFileAction({ roomId, runId, index, action: 'reveal' })
+      if (!result.ok) throw new Error(result.error)
       setMenuOpen(false)
       flash('ok', '已显示位置')
     } catch (error: unknown) {
@@ -263,8 +256,12 @@ function DeliverableCard({ file, onPreview, canOpen, remote }: {
    * without the right Sidebar.
    */
   const openPreview = (): void => {
-    if (remote?.openFilePreview?.(file.path) === true) return
-    onPreview()
+    const pending = remote?.openFilePreview(file.path)
+    if (pending === undefined) {
+      onPreview()
+      return
+    }
+    void pending.then((opened) => { if (!opened) onPreview() }).catch(() => onPreview())
   }
 
   const toggleMenu = async (): Promise<void> => {
@@ -272,8 +269,11 @@ function DeliverableCard({ file, onPreview, canOpen, remote }: {
     setMenuOpen(next)
     if (!next || apps !== undefined || remote === undefined) return
     try {
-      const list = await remote.workspacePathApplications(file.path)
-      setApps(list.map(app => ({ id: app.id, name: app.name, default: app.default })))
+      const result = await remote.deliverableFileAction({ roomId, runId, index, action: 'applications' })
+      if (!result.ok) throw new Error(result.error)
+      setApps((result.applications ?? []).map(app => ({
+        id: app.id, name: app.name, default: app.default, icon: app.icon,
+      })))
       setAppsError(undefined)
     } catch (error: unknown) {
       // Surface the reason: silently printing a generic line is what made the first
@@ -364,7 +364,7 @@ function DeliverableCard({ file, onPreview, canOpen, remote }: {
       </button>
 
       {/* Open / more-ways-to-open */}
-      {canOpen && (
+      {remote !== undefined && (
         <span style={{ display: 'flex', alignItems: 'center', gap: 0, flex: '0 0 auto' }}>
           <button
             type="button"
@@ -448,6 +448,9 @@ function DeliverableCard({ file, onPreview, canOpen, remote }: {
               onClick={() => void openWith(app.id)}
               style={menuItemStyle}
             >
+              {app.icon !== undefined && app.icon !== null && (
+                <img src={app.icon} alt="" width={14} height={14} style={{ marginRight: 6 }} />
+              )}
               {app.default ? `${app.name}（默认）` : app.name}
             </button>
           ))}
