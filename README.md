@@ -60,8 +60,11 @@ produced it is gone.
 - **Compaction that you can trigger.** `/compact` summarises the older part of a room with the room's own
   Bot model, keeps the newest messages verbatim, and retires the session that was carrying the old
   history — so the next answer continues from the summary instead of replaying the transcript.
-- **Unread state that survives compaction.** A read water mark records when you read, not just which
-  message, so a room that has been compacted can still tell you what is new.
+- **Unread state that follows what you actually see.** A read water mark records when you read, not
+  just which message, so a room that has been compacted can still tell you what is new. The room on
+  screen counts as read — its badge clears as soon as it is displayed, and a reply that lands while
+  you are looking at it clears immediately. Only messages that arrive while the DSH window is hidden
+  stay unread, so the count is right when you come back.
 
 ## Requirements
 

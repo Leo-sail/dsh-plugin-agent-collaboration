@@ -35,22 +35,36 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
   const [tab, setTab] = useState<ActiveTab>('bots')
   const [selectedId, setSelectedId] = useState<string>()
   /**
-   * The room the USER picked, as opposed to the one the snapshot auto-selected.
+   * Whether this panel is actually in front of the user.
    *
-   * Switching tabs re-points `selectedId` at the first room of the new tab, and marking
-   * that auto-selection as read cleared the dot the user never got to see — measured on a
-   * group with one unread reply: the 群聊 tab dot was on (nav badge 1), and the moment the
-   * 群聊 tab was opened the reply was marked read and the row badge never appeared.
+   * The panel is unmounted when another DSH panel is opened, so the only case left is a
+   * minimised/occluded window: a reply that lands while it is hidden stays unread, and the
+   * effects below run again when it becomes visible. `visibilityState` is used rather than
+   * `document.hasFocus()` because (a) the host is Chromium and a hidden window reports
+   * `hidden`, and (b) headless acceptance runs cannot be trusted for focus (0.3.2 note).
    */
-  const [userSelectedId, setUserSelectedId] = useState<string>()
+  const [viewportActive, setViewportActive] = useState(
+    () => typeof document === 'undefined' || document.visibilityState === 'visible',
+  )
+  useEffect(() => {
+    const update = (): void => setViewportActive(document.visibilityState === 'visible')
+    document.addEventListener('visibilitychange', update)
+    return () => document.removeEventListener('visibilitychange', update)
+  }, [])
   /**
-   * When the user opened that room.
+   * When each room most recently became the one on screen, while the panel was in front.
    *
-   * The watermark may only cover messages that existed by then: a reply that arrives while
-   * the room is on screen is still unread, and marking it read on the next poll is why the
-   * count appeared frozen 「切到 dsh 未读没有改变」.
+   * The water mark may only cover what existed at that instant. This used to be "when the user
+   * clicked the room", and the user's 0.3.1 report was exactly the cost of that rule: sitting in
+   * a conversation (including the auto-selected one) still showed its unread badge until they
+   * switched away and back. Being on screen is the criterion now — see `unread.ts` and the
+   * arrival effect below.
    */
-  const selectedAtRef = useRef<string | undefined>(undefined)
+  const viewingAtRef = useRef(new Map<string, string>())
+  useEffect(() => {
+    if (!viewportActive || selectedId === undefined) return
+    viewingAtRef.current.set(selectedId, new Date().toISOString())
+  }, [viewportActive, selectedId])
   const [busy, setBusy] = useState(false)
   const [formOpen, setFormOpen] = useState(false)
 
@@ -182,7 +196,7 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
     const plan = planMarkRead({
       messages: messagesRef.current,
       roomId,
-      openedAt: upTo === null ? selectedAtRef.current : undefined,
+      openedAt: upTo === null ? viewingAtRef.current.get(roomId) : undefined,
       upTo,
       lastMarkedAt: lastMarkedRef.current.get(roomId),
     })
@@ -242,21 +256,61 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
   // and depending on it re-fired the RPC for ever (the request storm behind the blinking badges).
   // A string only changes when the room's newest message does, which is exactly when a retry is
   // worth making; repeats are already suppressed by the planner's `lastMarkedAt` guard.
-  const selectedNewestAnchor = (() => {
-    if (selectedId === undefined) return ''
-    let newest: { readonly id: string; readonly createdAt: string } | undefined
+  const selectedNewest = (() => {
+    if (selectedId === undefined) return undefined
+    let newest: BotCommunitySnapshot['messages'][number] | undefined
     for (const m of snapshot?.messages ?? []) if (m.roomId === selectedId) newest = m
-    return newest === undefined ? '' : `${newest.id}@${newest.createdAt}`
+    return newest
   })()
+  const selectedNewestAnchor = selectedNewest === undefined
+    ? ''
+    : `${selectedNewest.id}@${selectedNewest.createdAt}`
 
+  /**
+   * The room on screen is READ — selected means read, whichever way it got selected.
+   *
+   * 0.3.1 required an explicit click here, and the user reported the cost: 「我明明在 bot 会话界面
+   * 或者群聊会话界面，依然显示未读消息，需要我切到其他地方再切回来」. Being displayed is the
+   * criterion now; the panel unmounts when the user opens another DSH panel, so "displayed" really
+   * means "in front of the user". A hidden/minimised window is handled by `viewportActive` and
+   * by this effect re-running when it becomes visible again.
+   *
+   * DEPENDENCIES ARE THE SELECTION, THE VISIBILITY AND THE NUMBER. `snapshot?.messages` used to be
+   * in this list, and since every poll parses a fresh snapshot it re-ran the effect (and its RPC)
+   * for ever — the request storm behind the blinking badges. Messages now reach `markReadRef`
+   * through a ref, which is what the planner needs and nothing more.
+   */
   useEffect(() => {
-    // Only a room the user actually opened counts as read. An auto-selected room is on
-    // screen, but the user never chose it — and marking it read is what made a group's
-    // unread reply disappear the instant its tab was opened.
-    if (selectedId === undefined || selectedId !== userSelectedId) return
+    if (!viewportActive || selectedId === undefined) return
     if (selectedUnread === 0) return
+    // `null` = "everything that existed when this room became the visible one". The planner
+    // reads that instant from viewingAtRef.
     markReadRef.current?.(selectedId, null)
-  }, [selectedId, userSelectedId, selectedUnread, selectedNewestAnchor])
+  }, [viewportActive, selectedId, selectedUnread, selectedNewestAnchor])
+
+  /**
+   * A reply that lands while its room is on screen is read too.
+   *
+   * Without this, the arrival was deliberately left unread (the 0.3.1 rule kept the count honest
+   * for a room the user had switched away from) and the working room kept a badge until they
+   * re-opened it — the second half of the user's 0.3.1 report. The new rule: once the room is
+   * visible, an arriving message is marked read as it lands; only messages that arrive while the
+   * panel is hidden stay unread, because the count must be right when the user comes back.
+   *
+   * The transcript auto-sticks to the bottom (`useStickToBottom`), so a newly arrived row is on
+   * screen when this runs. The planner's per-room `lastMarkedAt` guard still suppresses repeats,
+   * so this issues at most one RPC per new message and never on a poll that changed nothing.
+   */
+  useEffect(() => {
+    if (!viewportActive || selectedId === undefined || selectedNewest === undefined) return
+    if (selectedUnread === 0) return
+    const viewingAt = viewingAtRef.current.get(selectedId)
+    if (viewingAt === undefined) return
+    // The back-log path above owns everything that existed when the room appeared; only messages
+    // that arrived afterwards need the explicit target.
+    if (selectedNewest.createdAt <= viewingAt) return
+    markReadRef.current?.(selectedId, { id: selectedNewest.id, createdAt: selectedNewest.createdAt })
+  }, [viewportActive, selectedId, selectedUnread, selectedNewestAnchor])
 
   /**
    * Load the provider/model catalog for the SLASH MENU, not only for the form.
@@ -408,14 +462,14 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
       >
         <RoomList
           tab={tab}
-          onSelectTab={(next) => { setTab(next); setUserSelectedId(undefined); setSelectedId(undefined) }}
+          onSelectTab={(next) => { setTab(next); setSelectedId(undefined) }}
           bots={visibleBots}
           rooms={visibleRooms}
           selectedId={selectedId}
           unread={unread}
           directTabUnread={directTabUnread}
           groupTabUnread={groupTabUnread}
-          onSelectRoom={(id) => { selectedAtRef.current = new Date().toISOString(); setUserSelectedId(id); setSelectedId(id) }}
+          onSelectRoom={(id) => { setSelectedId(id) }}
           onCreate={openCreateForm}
           onEditBot={openEditForm}
           onOpenRoomSettings={openRoomSettings}
@@ -448,7 +502,7 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
             onMarkRead={onMarkRead}
             onDetectProposal={proposalFlow.detectProposal}
             onReload={load}
-            onOpenBotRoom={(id) => { setTab('bots'); selectedAtRef.current = new Date().toISOString(); setUserSelectedId(id); setSelectedId(id) }}
+            onOpenBotRoom={(id) => { setTab('bots'); setSelectedId(id) }}
           />
         </div>
     </div>

@@ -20,7 +20,13 @@
  * Observed on the real modules: ten poll cycles produced nineteen flips and ten local deletes,
  * where the fixed version produces none.
  *
- * Three rules kill that, and all three live here so they can be tested without a DOM:
+ * 0.3.2 KEEPS THE SAME ARITHMETIC AND CHANGES WHAT THE PANEL CONSIDERS SEEN. The room on screen
+ * is read as soon as it is displayed (auto-selected or clicked), and a reply that lands while its
+ * room is visible is passed in as an explicit target immediately. Only messages that arrive while
+ * the panel is hidden stay unread — they are the ones whose count has to be right when the user
+ * comes back. See `CommunityPage.tsx`'s two effects and `README` §17.
+ *
+ * Three rules kill the flicker, and all three live here so they can be tested without a DOM:
  *   · the water mark is issued at most once per (room, target time) — a target that is not newer
  *     than the last one issued for that room is `undefined`, not a plan;
  *   · the caller may drop the room's unread entry locally ONLY when the target is at/after every
@@ -58,10 +64,11 @@ export interface MarkReadPlan {
  *
  * @param input.messages - every message the panel holds, in stored order.
  * @param input.roomId - the room on screen.
- * @param input.openedAt - when the user opened that room (`undefined` = not opened by the user).
+ * @param input.openedAt - when that room most recently became the visible one (`undefined` =
+ *   the panel never displayed it while in front).
  * @param input.upTo - the message the user demonstrably saw, passed as the object the RPC returned
  *   (NOT looked up in the snapshot, which may not contain it yet); `null` means "everything up to
- *   the moment the room was opened".
+ *   the moment the room became visible". The arrival effect passes the new message explicitly.
  * @param input.lastMarkedAt - when this panel last asked the host to mark this room.
  * @returns the mark to issue, or `undefined` when there is nothing new to ask for.
  */
@@ -80,9 +87,10 @@ export function planMarkRead(input: {
   if (input.upTo !== null) {
     target = input.upTo
   } else if (input.openedAt !== undefined) {
-    // The newest message that existed when the room was opened: what the user has had on screen.
-    // Messages that arrive afterwards stay unread on purpose (README §17) — the count has to be
-    // right when they switch away.
+    // The newest message that existed when the room became visible: what the user has had on
+    // screen. Messages that arrive afterwards are passed in explicitly by the panel while the
+    // room stays visible; a hidden window leaves them unread on purpose, so the count is right
+    // when the user looks again.
     for (const m of mine) if (m.createdAt <= input.openedAt) target = m
   }
   // NO ANCHOR, NO CALL. An empty room (or one opened before its first message) has nothing the
