@@ -163,7 +163,7 @@ export function PreviewDock({ requests, active, remote, onSelect, onCloseTab, on
           </button>
         ))}
         <span style={{ flex: 1 }} />
-        <button type="button" onClick={openNative} style={{ height: 24, padding: '0 8px', border: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)', borderRadius: 6, background: 'transparent', fontSize: 11, cursor: 'pointer' }}>用应用打开</button>
+        <button type="button" onClick={openNative} style={{ flex: '0 0 auto', whiteSpace: 'nowrap', height: 24, padding: '0 8px', border: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)', borderRadius: 6, background: 'transparent', fontSize: 11, lineHeight: '22px', cursor: 'pointer' }}>用应用打开</button>
         <button type="button" onClick={onCloseAll} aria-label="关闭全部预览" title="关闭全部预览" style={{ width: 24, height: 24, border: 'none', background: 'transparent', fontSize: 16, cursor: 'pointer' }}>×</button>
       </header>
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>{body}</div>
