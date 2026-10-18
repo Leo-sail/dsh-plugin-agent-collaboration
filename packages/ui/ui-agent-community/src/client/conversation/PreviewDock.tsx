@@ -27,11 +27,15 @@ function ext(name: string): string {
 }
 
 /** One preview surface, chosen by the file's type. */
-export function PreviewDock({ request, remote, onClose }: {
-  readonly request: PreviewRequest
+export function PreviewDock({ requests, active, remote, onSelect, onClose }: {
+  /** Every file opened in this dock; the header tabs switch between them (DSH parity). */
+  readonly requests: ReadonlyArray<PreviewRequest>
+  readonly active: number
   readonly remote?: CommunityRemote | undefined
+  readonly onSelect: (index: number) => void
   readonly onClose: () => void
 }): ReactElement {
+  const request = requests[Math.min(Math.max(active, 0), requests.length - 1)]!
   const { file, roomId, runId, index } = request
   const [state, setState] = useState<State>({ status: 'loading' })
   const [htmlUrl, setHtmlUrl] = useState<string | undefined>(undefined)
@@ -129,8 +133,25 @@ export function PreviewDock({ request, remote, onClose }: {
 
   return (
     <section style={{ flex: '0 0 44%', minWidth: 320, maxWidth: '62%', display: 'flex', flexDirection: 'column', minHeight: 0, borderLeft: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)', background: 'var(--dsw-alias-bg-elevated, #fff)' }}>
-      <header style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)' }}>
-        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: 600 }}>{file.name}</span>
+      <header style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderBottom: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)', overflowX: 'auto' }}>
+        {requests.map((item, i) => (
+          <button
+            key={`${item.roomId}:${item.runId}:${item.index}`}
+            type="button"
+            onClick={() => onSelect(i)}
+            title={item.file.path}
+            style={{
+              flex: '0 0 auto', maxWidth: 180, height: 26, padding: '0 10px', borderRadius: 6,
+              border: '1px solid ' + (i === active ? 'var(--dsw-alias-border-strong, #b8c0cc)' : 'var(--dsw-alias-border-secondary, #e4e7eb)'),
+              background: i === active ? 'var(--dsw-alias-bg-secondary, #f2f4f7)' : 'transparent',
+              color: 'var(--dsw-alias-label-primary, #1b2129)', fontSize: 12, cursor: 'pointer',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
+            {item.file.name}
+          </button>
+        ))}
+        <span style={{ flex: 1 }} />
         <button type="button" onClick={openNative} style={{ height: 24, padding: '0 8px', border: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)', borderRadius: 6, background: 'transparent', fontSize: 11, cursor: 'pointer' }}>用应用打开</button>
         <button type="button" onClick={onClose} aria-label="关闭预览" style={{ width: 24, height: 24, border: 'none', background: 'transparent', fontSize: 16, cursor: 'pointer' }}>×</button>
       </header>

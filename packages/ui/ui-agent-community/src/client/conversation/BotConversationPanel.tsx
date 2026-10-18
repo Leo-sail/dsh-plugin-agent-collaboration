@@ -211,14 +211,26 @@ export function BotConversationPanel({
   onSend, onStop, onApprove, onReject, onAnswerQuestion, onSkipQuestion, onCommand, onClear, listLedger, onFork, tasks, round, remote,
 }: BotConversationPanelProps) {
   const [entries, setEntries] = useState<LedgerEntry[]>([])
-  const [preview, setPreview] = useState<PreviewRequest | undefined>(undefined)
+  const [previews, setPreviews] = useState<PreviewRequest[]>([])
+  const [activePreview, setActivePreview] = useState(0)
   // The cards live deep inside the transcript but the dock is a sibling of the
   // conversation column, so the request travels as one window event. (Without this
   // listener the click dispatched into the void — the first "nothing happens" report.)
   useEffect(() => {
     const onRequest = (event: Event): void => {
       const detail = (event as CustomEvent<PreviewRequest>).detail
-      if (detail !== undefined && typeof detail === 'object') setPreview(detail)
+      if (detail === undefined || typeof detail !== 'object') return
+      // Same file twice activates its existing tab instead of opening a duplicate.
+      setPreviews((previous) => {
+        const found = previous.findIndex(item =>
+          item.roomId === detail.roomId && item.runId === detail.runId && item.index === detail.index)
+        if (found >= 0) {
+          setActivePreview(found)
+          return previous
+        }
+        setActivePreview(previous.length)
+        return [...previous, detail]
+      })
     }
     window.addEventListener(PREVIEW_EVENT, onRequest)
     return () => { window.removeEventListener(PREVIEW_EVENT, onRequest) }
@@ -558,11 +570,19 @@ export function BotConversationPanel({
              rendered without its 用时 — the run record is the only authority then. */
           runStarts={runStartTimes(runs)}
         />
-        {preview !== undefined && (
+        {previews.length > 0 && (
           <PreviewDock
-            request={preview}
+            requests={previews}
+            active={activePreview}
             remote={remote}
-            onClose={() => setPreview(undefined)}
+            onSelect={setActivePreview}
+            onClose={() => {
+              setPreviews((previous) => {
+                const next = previous.filter((_, i) => i !== activePreview)
+                setActivePreview(Math.max(0, Math.min(activePreview, next.length - 1)))
+                return next
+              })
+            }}
           />
         )}
       </div>
