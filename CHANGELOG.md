@@ -1,3 +1,40 @@
+## 0.3.1 — 面板内自绘预览：PDF / Word / Excel
+
+交付卡片点击后，面板右侧栏现在用**真正的查看器**打开文件，而不是浏览器内嵌查看器或「不支持内嵌」提示：
+PDF 由 PDF.js 自绘（翻页 / 缩放 / 适应宽度），`.docx` 由 docx-preview 直接渲染（分页、正文可选中、适应宽度），
+`.xlsx` / `.csv` 由 SheetJS 渲染成可滚动的表格（多工作表、冻结表头、行/列上限）。PowerPoint 与旧版
+`.doc` / `.xls` 仍由宿主转成 PDF，再交给同一个 PDF 查看器。
+
+### 新增
+- **PDF 查看器（pdfjs-dist 6.3.289）。** canvas 自绘 + 工具栏（上一页/下一页、页码跳转输入、缩放 −/+/百分比、
+  适应宽度）；DPR 正确的背板尺寸；每个预览独占自己的 module Worker / loading task，切标签或卸载即取消渲染并终止。
+  PDF.js 的 worker 源码在构建期内联进客户端单文件产物，运行时用 Blob URL 启动——DSH 的工作机制是「每个插件一个脚本、
+  不读兄弟资源」，这是唯一可行的部署形态（也是本次唯一的硬阻塞，先用 POC 在无头 Chrome 验证后再落地）。
+- **`.docx` 直读（docx-preview 0.3.7）。** 直接渲染分页 DOM（正文可选中复制）、页宽自适应 + 缩放；渲染后按白名单
+  清理文档内链接（仅保留 http(s)/mailto，`javascript:` 等移除）；无显式页宽的文档补 A4 兜底，避免手搓文档缩成一团。
+- **`.xlsx` / `.csv`（SheetJS 0.18.5）。** 多工作表标签、冻结表头与行号、固定行高虚拟滚动（20 万行 / 100 列上限，
+  超出在状态栏提示）、列宽取自工作簿、日期/百分比/千分位按单元格格式显示、坏文件给中文错误态；CSV 与 xlsx 共用渲染。
+- **宿主预览 RPC 扩展。** `readDeliverablePreview` 对 `.docx` / `.xlsx` 返回原始字节（≤8 MB，超出仍回 `binary` 让用户
+  用本机应用打开），客户端因此能直接渲染；`renderDeliverableDocument` 保留给 PPT / 旧版 Office。
+- **预览加载路径收敛。** 新增 `preview/load.ts` + `preview/PreviewContent.tsx`：一个地方决定「字节 / 文本 / 图片 /
+  宿主转 PDF」，dock 只负责标签与加载态；卡片不再各自维护一份预览逻辑。
+
+### 移除
+- 交付卡里那条**不可达**的旧预览对话框（`DeliverablePreviewDialog` / `PreviewBody`）及其重复加载逻辑：右侧预览栏
+  是唯一预览路径（该对话框的触发函数从未被调用，属于死代码）。
+
+### 文档
+- 新增 `THIRD_PARTY_NOTICES.md`：PDF.js / docx-preview / JSZip / SheetJS 的许可证、打包方式与已知限制。
+- README（中英）：功能清单加入三个查看器，开发章节说明「查看器打进单文件浏览器产物」的原因与体积，tarball 链接
+  更新到 v0.3.1；`ACCEPTANCE.zh-CN.md` 新增「面板内预览查看器」验收节。
+
+### 发布说明
+- 版本：bundle / core / ui 升到 **0.3.1**；`tool-agent-community` 本版无改动，保持 0.3.1 不重发。
+- 客户端产物：`ui-agent-community/lib/client.js` 由 560 KB 变为 **3.32 MB**（gzip 168 KB → **913 KB**）。这是把三个
+  查看器 + PDF worker 内联进单文件产物的代价；`accepted` 验收记录里含冷启动对比（面板首次打开仍在百毫秒级）。
+- 验收：隔离 `$DSH_HOME` 实例 + 无头 Chrome 端到端 33/33（PDF canvas / docx 分页 / xlsx 冻结表头 / 其他类型回归），
+  `console.error` 与 `pageerror` 均为 0；0.3.0 基线同环境对照留存。
+
 ## 0.3.0 — Bot 交付的文件卡片
 
 Bot 现在可以把本轮产出的文件**交付给用户**：回复下方出现文件卡片，可在面板里预览、用本机关联应用打开、

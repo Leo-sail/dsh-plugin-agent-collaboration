@@ -1,7 +1,7 @@
 {
   "name": "@dsh-plugin-agent-community/ui-agent-community",
   "description": "Agent Community UI — Bot list, room list, chat panel, run status",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -49,10 +49,14 @@
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.0",
+    "docx-preview": "0.3.7",
+    "jszip": "3.10.2",
+    "pdfjs-dist": "6.3.289",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "tsdown": "^0.22.2",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "xlsx": "^0.18.5"
   },
   "publishConfig": {
     "access": "public"

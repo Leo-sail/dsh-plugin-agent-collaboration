@@ -207,15 +207,19 @@ export interface CommunityRemote {
    */
   openFilePreview(path: string): Promise<boolean>
   /**
-   * Host desktop actions for one delivered file: its associated applications, open it,
-   * or reveal it. Addressed through the delivery record, never a client-supplied path.
+   * Host office→PDF conversion for the in-panel preview. 0.3.1 keeps `.docx` in the
+   * browser (docx-preview) and `.xlsx` in the browser (SheetJS); this path remains for
+   * PowerPoint and the legacy binary formats (`.doc`, `.xls`).
    */
-  /** Host office→PDF conversion for the in-panel preview of Word/Excel/PPT files. */
   renderDeliverableDocument(input: {
     roomId: string
     runId: string
     index: number
   }): Promise<{ ok: true; name: string; dataUrl: string } | { ok: false; error: string }>
+  /**
+   * Host desktop actions for one delivered file: its associated applications, open it,
+   * or reveal it. Addressed through the delivery record, never a client-supplied path.
+   */
   deliverableFileAction(input: {
     roomId: string
     runId: string

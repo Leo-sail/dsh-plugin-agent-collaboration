@@ -3713,9 +3713,10 @@ export class AgentCommunityService extends TypertRemoteService {
    *
    * Addressed by `(room, run, index)` and never by a client-supplied path: the only
    * files this can read are the ones a bot already declared for the user. Text is
-   * paged and capped; images and PDFs are returned as data URLs under a byte cap;
-   * everything else reports its metadata so the card can hand it to a native app.
-   * Bot session ids never cross this boundary (the ledger's red line).
+   * paged and capped; images, PDF and the browser-rendered Word/Excel formats are
+   * returned as data URLs under a byte cap; everything else reports its metadata so
+   * the card can hand it to a native app. Bot session ids never cross this boundary
+   * (the ledger's red line).
    */
   async readDeliverablePreview(input: {
     roomId: string
@@ -3752,6 +3753,17 @@ export class AgentCommunityService extends TypertRemoteService {
       const bytes = await readFile(file.path)
       const mime = PREVIEW_IMAGE_MIME[ext]!
       return { kind: 'data', name: file.name, mime, dataUrl: `data:${mime};base64,${bytes.toString('base64')}` }
+    }
+    const documentMime = PREVIEW_DOCUMENT_MIME[ext]
+    if (documentMime !== undefined) {
+      if (info.size > PREVIEW_MAX_BYTES) return { kind: 'binary', name: file.name, size: info.size }
+      const bytes = await readFile(file.path)
+      return {
+        kind: 'data',
+        name: file.name,
+        mime: documentMime,
+        dataUrl: `data:${documentMime};base64,${bytes.toString('base64')}`,
+      }
     }
     if (PREVIEW_BINARY_EXT.has(ext)) return { kind: 'binary', name: file.name, size: info.size }
     const text = await readPreviewText(file.path, input.offset ?? 0)
@@ -4877,7 +4889,7 @@ function markRemote(prototype: object, method: string): void {
   ;(Remote as unknown as (m: unknown, c: unknown) => void)(fn, context)
 }
 
-/** Largest file whose bytes the in-panel preview returns (images and PDFs). */
+/** Largest file whose bytes the in-panel preview returns (images, PDF and the client-rendered Office formats). */
 const PREVIEW_MAX_BYTES = 8 * 1024 * 1024
 /** Largest text window the preview reads; the panel says so when it hits this. */
 const PREVIEW_TEXT_BYTES = 512 * 1024
@@ -4891,12 +4903,28 @@ const PREVIEW_IMAGE_MIME: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.pdf': 'application/pdf',
 }
+/**
+ * Office formats the panel renders in the browser from the original bytes (0.3.1).
+ *
+ * Word goes to docx-preview and Excel to SheetJS, so these are returned as `data`
+ * like images and PDF. PowerPoint and the legacy binary formats stay on the host
+ * office-to-pdf conversion path (`renderDeliverableDocument`).
+ */
+const PREVIEW_DOCUMENT_MIME: Record<string, string> = {
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+}
 /** Office extensions the Host office-to-pdf provider can convert for the preview. */
 const OFFICE_RENDER_EXT = new Set(['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'])
 
-/** Formats with no in-panel viewer; the card offers the native app instead. */
+/**
+ * Formats with no in-panel viewer; the card offers the native app instead.
+ *
+ * `.docx`/`.xlsx` are no longer listed: the panel renders them from bytes. Oversized
+ * ones still answer `binary` — that check runs before this set is consulted.
+ */
 const PREVIEW_BINARY_EXT = new Set([
-  '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx', '.xlsm', '.odt', '.ods', '.odp',
+  '.doc', '.ppt', '.pptx', '.xls', '.xlsm', '.odt', '.ods', '.odp',
   '.zip', '.gz', '.tgz', '.tar', '.rar', '.7z', '.jar',
   '.exe', '.dll', '.so', '.dylib', '.bin',
   '.mp3', '.wav', '.m4a', '.flac', '.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi',

@@ -1,4 +1,27 @@
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { defineConfig } from 'tsdown'
+
+const require = createRequire(import.meta.url)
+const RAW_SUFFIX = '?raw'
+
+/**
+ * Vite-style `?raw` imports for the browser build: the caller gets the file's text as
+ * a default export, which is how pdf.js's module worker source travels inside the
+ * single-file client bundle instead of as a sibling asset the DSH loader would never
+ * serve. TS declares the same modules in `src/client/preview/vendor.d.ts`.
+ */
+const rawAsset = {
+  name: 'raw-asset',
+  resolveId(source: string): string | null {
+    if (!source.endsWith(RAW_SUFFIX)) return null
+    return require.resolve(source.slice(0, -RAW_SUFFIX.length)) + RAW_SUFFIX
+  },
+  load(id: string): string | null {
+    if (!id.endsWith(RAW_SUFFIX)) return null
+    return `export default ${JSON.stringify(readFileSync(id.slice(0, -RAW_SUFFIX.length), 'utf8'))}`
+  },
+}
 
 export default defineConfig([
   // Node-side host half
@@ -21,6 +44,11 @@ export default defineConfig([
     outDir: 'lib',
     fixedExtension: false,
     platform: 'browser',
+    // The loader evaluates this bundle as a classic script, where `import.meta` is a
+    // syntax error. pdf.js touches `import.meta.url` only in its Node canvas branch;
+    // the worker source that legitimately uses it is a string, not module code.
+    define: { 'import.meta.url': '""' },
+    plugins: [rawAsset],
     external: [
       'react',
       'react-dom',

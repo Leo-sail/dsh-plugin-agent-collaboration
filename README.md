@@ -48,6 +48,13 @@ produced it is gone.
   `agent_community_deliver`; the turn then shows file cards below its reply — preview in the panel,
   open with the OS application association, or reveal in Finder. Files may live inside the Bot's
   workspace or at any absolute path.
+- **A preview dock with real viewers.** Clicking a card opens the split preview dock: **PDF** through a
+  bundled PDF.js (page navigation, zoom, fit width), **`.docx`** through docx-preview (paginated pages,
+  selectable text, fit width), **`.xlsx`/`.csv`** through SheetJS (sheet tabs, frozen header, virtual
+  scrolling). PowerPoint and legacy `.doc`/`.xls` go through the host's Office→PDF conversion into the
+  same PDF viewer. All viewers are bundled into the plugin's single browser artifact (3.3 MB, ~0.9 MB
+  gzipped) — the panel never fetches a viewer from the network. See
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for their licenses.
 - **Attachments.** Files and images can be added to a message. They are stored inside the receiving Bot's
   own workspace and appended to what the model sees; the bubble still shows exactly what you typed.
 - **Compaction that you can trigger.** `/compact` summarises the older part of a room with the room's own
@@ -87,7 +94,7 @@ see [CHANGELOG.md](CHANGELOG.md) for what a newer version changes.
 
 ```bash
 dsh plugin --profile <your-profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.0/dsh-plugin-agent-collaboration-0.3.0.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.1/dsh-plugin-agent-collaboration-0.3.1.tgz
 ```
 
 ### Installing from a checkout instead
@@ -111,7 +118,7 @@ ls -ld ~/.dsh/profiles/<your-profile>/node_modules/@dsh-plugin-agent-community/*
 
 ```text
 Install the DSH plugin at
-https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.0/dsh-plugin-agent-collaboration-0.3.0.tgz
+https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.1/dsh-plugin-agent-collaboration-0.3.1.tgz
 into my DSH profile, restart DSH, and confirm the "Bots团队" entry appears in the sidebar.
 ```
 
@@ -210,6 +217,13 @@ pnpm typecheck    # typecheck every package against the real DSH types, when the
 pnpm bundle       # build all packages and run the build-shape checks
 ```
 
+> **Browser bundle dependencies.** The panel's three viewers (PDF.js / docx-preview / SheetJS) are
+> bundled into `ui-agent-community/lib/client.js` at build time: the DSH client module system serves
+> exactly one script per plugin and re-reads no sibling assets, so the PDF worker and the viewers can
+> not ship as separate files. They are workspace devDependencies (root `package.json`), installed once
+> for the build; the artifact is 3.3 MB (~0.9 MB gzipped). Licenses:
+> [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 `pnpm bundle` runs [`scripts/check-build.mjs`](scripts/check-build.mjs) — every assertion in it maps to a
 bug this repo actually shipped (a bare-ESM client bundle, a package whose `files` omitted its own types, a
 stale `lib/`, dangling `exports` targets, duplicate CSS selectors). Installing a broken tree is worse than
@@ -224,8 +238,9 @@ To develop against a real runtime, install the bundle into a profile with
 packages/
   core/agent-community         the service: Bots, rooms, runs, sessions, the ledger
                                AgentCommunityService (ctx.agentCommunity), persists state.json
-  tools/tool-agent-community   the 14 model-facing tools (ctx.tools.register)
-  ui/ui-agent-community        the browser panel: sidebar entry, transcript, composer
+  tools/tool-agent-community   the 15 model-facing tools (ctx.tools.register)
+  ui/ui-agent-community        the browser panel: sidebar entry, transcript, composer,
+                               right-hand preview dock and the PDF/DOCX/spreadsheet viewers
   bundle/agent-collaboration   the installable entry (cordis.patch.yml)
 ```
 
@@ -238,3 +253,6 @@ presence).
 ## License
 
 [MIT](LICENSE)
+
+Third-party libraries bundled into the browser artifact (PDF.js, docx-preview, JSZip, SheetJS) are
+distributed under their own licenses — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

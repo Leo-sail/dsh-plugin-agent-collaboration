@@ -9,7 +9,6 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 import type { CommunityRemote } from '../community/types.ts'
 import type { DeliveredFile } from './types.ts'
-import { Markdown } from './Markdown.tsx'
 import { PREVIEW_EVENT } from './PreviewDock.tsx'
 
 /** Matches DSH's own collapse threshold for delivery cards. */
@@ -108,7 +107,6 @@ export interface DeliverableGroupProps {
 
 export function DeliverableGroup({ files, roomId, runId, remote }: DeliverableGroupProps): ReactElement | null {
   const [expanded, setExpanded] = useState(files.length <= COLLAPSED_COUNT)
-  const [previewIndex, setPreviewIndex] = useState<number | undefined>(undefined)
   if (files.length === 0) return null
   const shown = expanded ? files : files.slice(0, COLLAPSED_COUNT)
   const hidden = files.length - shown.length
@@ -126,7 +124,6 @@ export function DeliverableGroup({ files, roomId, runId, remote }: DeliverableGr
           <DeliverableCard
             key={`${file.path}:${index}`}
             file={file}
-            onPreview={() => setPreviewIndex(index)}
             roomId={roomId}
             runId={runId}
             index={index}
@@ -151,16 +148,6 @@ export function DeliverableGroup({ files, roomId, runId, remote }: DeliverableGr
           还有 {hidden} 个文件
         </button>
       )}
-      {previewIndex !== undefined && files[previewIndex] !== undefined && (
-        <DeliverablePreviewDialog
-          file={files[previewIndex]!}
-          roomId={roomId}
-          runId={runId}
-          index={previewIndex}
-          remote={remote}
-          onClose={() => setPreviewIndex(undefined)}
-        />
-      )}
     </div>
   )
 }
@@ -169,9 +156,8 @@ export function DeliverableGroup({ files, roomId, runId, remote }: DeliverableGr
 
 interface AppItem { readonly id: string; readonly name: string; readonly default: boolean; readonly icon?: string | null }
 
-function DeliverableCard({ file, onPreview, roomId, runId, index, remote }: {
+function DeliverableCard({ file, roomId, runId, index, remote }: {
   readonly file: DeliveredFile
-  readonly onPreview: () => void
   readonly roomId: string
   readonly runId: string
   readonly index: number
@@ -506,257 +492,4 @@ const menuNoteStyle = {
   padding: '6px 8px',
   fontSize: 12,
   color: 'var(--dsw-alias-label-tertiary, #8a929c)',
-}
-
-// ── preview dialog ───────────────────────────────────────────────────────────
-
-function DeliverablePreviewDialog({ file, roomId, runId, index, remote, onClose }: {
-  readonly file: DeliveredFile
-  readonly roomId: string
-  readonly runId: string
-  readonly index: number
-  readonly remote?: CommunityRemote | undefined
-  readonly onClose: () => void
-}): ReactElement {
-  const [state, setState] = useState<
-    | { status: 'loading' }
-    | { status: 'ready'; value: Awaited<ReturnType<CommunityRemote['readDeliverablePreview']>> }
-    | { status: 'error'; message: string }
-  >({ status: 'loading' })
-  const [extra, setExtra] = useState('')
-  const [truncated, setTruncated] = useState(false)
-  const [loadingMore, setLoadingMore] = useState(false)
-
-  useEffect(() => {
-    let alive = true
-    const office = /[.](docx?|xlsx?|pptx?)$/iu.test(file.name)
-    const load = async (): Promise<void> => {
-      if (remote === undefined) {
-        setState({ status: 'error', message: '当前宿主不支持内嵌预览，请用应用打开。' })
-        return
-      }
-      try {
-        if (office) {
-          const converted = await remote.renderDeliverableDocument({ roomId, runId, index })
-          if (!alive) return
-          if (!converted.ok) {
-            setState({ status: 'error', message: converted.error })
-            return
-          }
-          setState({ status: 'ready', value: { kind: 'data', name: converted.name, mime: 'application/pdf', dataUrl: converted.dataUrl } })
-          return
-        }
-        const value = await remote.readDeliverablePreview({ roomId, runId, index })
-        if (alive) {
-          setState({ status: 'ready', value })
-          setTruncated(value.kind === 'text' && value.truncated)
-        }
-      } catch (error: unknown) {
-        if (alive) setState({ status: 'error', message: describeError(error) })
-      }
-    }
-    void load()
-    return () => { alive = false }
-  }, [remote, roomId, runId, index, file.name])
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  /** Append the next text window; the host pages by line offset, so nothing is re-read. */
-  const loadMore = async (): Promise<void> => {
-    if (remote === undefined || state.status !== 'ready' || state.value.kind !== 'text') return
-    setLoadingMore(true)
-    try {
-      const offset = (state.value.text + extra).split('\n').length
-      const next = await remote.readDeliverablePreview({ roomId, runId, index, offset })
-      if (next.kind === 'text') {
-        setExtra(previous => previous + next.text)
-        setTruncated(next.truncated)
-      } else {
-        setTruncated(false)
-      }
-    } catch {
-      // Keep what is already on screen; the user can retry or open the file natively.
-    } finally {
-      setLoadingMore(false)
-    }
-  }
-
-  const openExternally = (): void => {
-    if (remote === undefined) return
-    void remote.openWorkspacePath({ path: file.path }).catch(() => undefined)
-  }
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={`预览 ${file.name}`}
-      style={{
-        position: 'fixed',
-        top: 0,
-        right: 0,
-        bottom: 0,
-        zIndex: 200,
-        display: 'flex',
-        alignItems: 'stretch',
-        justifyContent: 'flex-end',
-        background: 'rgba(12, 16, 22, 0.28)',
-      }}
-      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}
-    >
-      <div style={{
-        width: 'min(620px, 92vw)',
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        borderLeft: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)',
-        background: 'var(--dsw-alias-bg-elevated, #ffffff)',
-        boxShadow: '-18px 0 48px rgba(10, 16, 26, 0.24)',
-      }}>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '10px 14px',
-          borderBottom: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)',
-        }}>
-          <span style={{
-            maxWidth: '60%',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            fontSize: 13,
-            fontWeight: 600,
-            color: 'var(--dsw-alias-label-primary, #1b2129)',
-          }}>
-            {file.name}
-          </span>
-          <span style={{ flex: 1 }} />
-          <button
-            type="button"
-            onClick={openExternally}
-            style={{
-              height: 24,
-              padding: '0 8px',
-              border: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)',
-              borderRadius: 6,
-              background: 'transparent',
-              color: 'var(--dsw-alias-label-secondary, #5b6470)',
-              fontSize: 11,
-              cursor: 'pointer',
-            }}
-          >
-            用应用打开
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="关闭预览"
-            style={{
-              height: 24,
-              width: 24,
-              border: 'none',
-              borderRadius: 6,
-              background: 'transparent',
-              color: 'var(--dsw-alias-label-secondary, #5b6470)',
-              fontSize: 16,
-              lineHeight: '24px',
-              cursor: 'pointer',
-            }}
-          >
-            ×
-          </button>
-        </div>
-        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '12px 14px' }}>
-          {state.status === 'loading' && (
-            <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #8a929c)' }}>正在加载预览…</div>
-          )}
-          {state.status === 'error' && (
-            <div style={{ fontSize: 12, color: 'var(--dsw-alias-status-error, #c0392b)' }}>{state.message}</div>
-          )}
-          {state.status === 'ready' && (
-            <>
-              <PreviewBody
-                value={state.value}
-                name={file.name}
-                text={state.value.kind === 'text' ? state.value.text + extra : ''}
-              />
-              {state.value.kind === 'text' && truncated && (
-                <button
-                  type="button"
-                  onClick={() => void loadMore()}
-                  disabled={loadingMore}
-                  style={{
-                    marginTop: 10,
-                    height: 26,
-                    padding: '0 12px',
-                    border: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)',
-                    borderRadius: 6,
-                    background: 'transparent',
-                    color: 'var(--dsw-alias-label-secondary, #5b6470)',
-                    fontSize: 11,
-                    cursor: loadingMore ? 'default' : 'pointer',
-                  }}
-                >
-                  {loadingMore ? '加载中…' : '加载更多'}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function PreviewBody({ value, name, text }: {
-  readonly value: Awaited<ReturnType<CommunityRemote['readDeliverablePreview']>>
-  readonly name: string
-  /** Accumulated text windows (first page + any loaded pages). */
-  readonly text: string
-}): ReactElement {
-  if (value.kind === 'missing') {
-    return <div style={{ fontSize: 12, color: 'var(--dsw-alias-status-error, #c0392b)' }}>文件已不存在，或在当前主机上不可读。</div>
-  }
-  if (value.kind === 'binary') {
-    return (
-      <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #8a929c)' }}>
-        该类型不支持内嵌预览（{value.size.toLocaleString()} 字节）。请用「用应用打开」。
-      </div>
-    )
-  }
-  if (value.kind === 'data') {
-    if (value.mime.startsWith('image/')) {
-      return <img src={value.dataUrl} alt={name} style={{ maxWidth: '100%', borderRadius: 8 }} />
-    }
-    return (
-      <iframe
-        src={value.dataUrl}
-        title={name}
-        style={{ width: '100%', height: '60vh', border: 'none', borderRadius: 8 }}
-      />
-    )
-  }
-  const ext = extensionOf(name)
-  if (ext === 'md' || ext === 'markdown') {
-    return <Markdown text={text} />
-  }
-  return (
-    <pre style={{
-      margin: 0,
-      whiteSpace: 'pre-wrap',
-      wordBreak: 'break-word',
-      fontSize: 12,
-      lineHeight: 1.55,
-      fontFamily: 'var(--dsw-font-code, ui-monospace, SFMono-Regular, Menlo, monospace)',
-      color: 'var(--dsw-alias-label-primary, #1b2129)',
-    }}>
-      {text}
-    </pre>
-  )
 }

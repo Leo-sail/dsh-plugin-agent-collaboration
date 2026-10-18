@@ -35,6 +35,11 @@
   它们在设置里的显示名与思考档位。没有任何厂商/模型名被写死；在设置里新增或改名的提供方无需重启即可出现。
 - **Bot 交付的文件有卡片。** Bot 用 `agent_community_deliver` 声明它产出的文件；该回合回复下方会出现文件卡片——
   在面板里预览、用本机关联应用打开、在 Finder 中定位。文件可以在 Bot 工作区里，也可以是任意绝对路径。
+- **面板内是真查看器，不是浏览器默认打开。** 点卡片打开右侧预览栏：**PDF** 用内置 PDF.js 自绘（翻页、缩放、
+  适应宽度），**`.docx`** 用 docx-preview 直接渲染（分页、正文可选中、适应宽度），**`.xlsx`/`.csv`** 用
+  SheetJS（多工作表标签、冻结表头、虚拟滚动）。PowerPoint 与旧版 `.doc`/`.xls` 先由宿主转成 PDF，再进同一个
+  PDF 查看器。三个查看器都打包进插件的单文件浏览器产物（3.3 MB，gzip 后约 0.9 MB），面板不会联网取查看器。
+  许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 - **附件。** 消息可以带文件与图片，存放在接收方 Bot 自己的工作区里，并附到模型看到的内容上；气泡里显示的仍然是你原样输入的东西。
 - **可手动触发的压缩。** `/compact` 用该房间自己的 Bot 模型把较早的对话总结成摘要，原样保留最近几条，并**退掉承载旧历史的会话**——所以下一次回答是从摘要继续，而不是把整份记录重放一遍。
 - **压缩之后未读依然准确。** 已读水位记的是"读到什么时间"，而不是只记一个消息 id，因此被压缩过的房间仍然能告诉你哪些是新的。
@@ -63,7 +68,7 @@ dsh plugin --profile <你的profile> add dsh-plugin-agent-collaboration
 
 ```bash
 dsh plugin --profile <你的profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.0/dsh-plugin-agent-collaboration-0.3.0.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.1/dsh-plugin-agent-collaboration-0.3.1.tgz
 ```
 
 同一份产物，附在 release 上——不想经过 npm 就直接用它。
@@ -86,11 +91,11 @@ ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/
 ### 让 Agent 帮你装
 
 ```text
-> **注意**：仓库里的当前版本是 **0.2.2**，与下面的链接一致；改动见 [CHANGELOG.md](CHANGELOG.md)，
+> **注意**：仓库里的当前版本是 **0.3.1**，与下面的链接一致；改动见 [CHANGELOG.md](CHANGELOG.md)，
 > 装好后的自测步骤见 [ACCEPTANCE.zh-CN.md](ACCEPTANCE.zh-CN.md)。
 
-把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.0/dsh-plugin-agent-collaboration-0.3.0.tgz
-把本插件装进目标 DSH profile，重启 DSH，并确认侧栏出现「Bots团队」。
+把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.1/dsh-plugin-agent-collaboration-0.3.1.tgz
+装进目标 DSH profile，重启 DSH，并确认侧栏出现「Bots团队」。
 ```
 
 ## 使用
@@ -182,6 +187,12 @@ pnpm typecheck    # 依赖可解析时，对所有包做真实 DSH 类型的类�
 pnpm bundle       # 构建全部包并跑构建形状检查
 ```
 
+> **浏览器产物依赖。** 面板内的三个查看器（PDF.js / docx-preview / SheetJS）在构建时被打进
+> `ui-agent-community/lib/client.js`：DSH 的客户端模块系统每个插件只取一个脚本，不会去读兄弟资源，
+> 所以不能把 worker 或查看器当作独立文件发布。这些库因此是 workspace 的 devDependencies（根
+> `package.json`），安装一次即可构建；产物体积 3.3 MB（gzip 后约 0.9 MB），许可证见
+> [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
 `pnpm bundle` 会运行 [`scripts/check-build.mjs`](scripts/check-build.mjs)——里面每一条断言都对应本仓库**真实出过**的一个 bug
 （裸 ESM 的客户端 bundle、`files` 漏掉自己的类型声明、过期的 `lib/`、指向不存在文件的 `exports`、重复的 CSS 选择器）。
 装上一个坏掉的产物比拒绝安装更糟，所以 `scripts/install-profile.sh` 在拷贝任何东西之前会跑同一套检查。
@@ -194,8 +205,8 @@ pnpm bundle       # 构建全部包并跑构建形状检查
 packages/
   core/agent-community         服务：Bot、房间、运行、会话、ledger
                                AgentCommunityService（ctx.agentCommunity），持久化 state.json
-  tools/tool-agent-community   13 个模型可调用工具（ctx.tools.register）
-  ui/ui-agent-community        浏览器面板：侧栏入口、转录区、输入框
+  tools/tool-agent-community   15 个模型可调用工具（ctx.tools.register）
+  ui/ui-agent-community        浏览器面板：侧栏入口、转录区、输入框、右侧预览栏与三个查看器
   bundle/agent-collaboration   可安装入口（cordis.patch.yml）
 ```
 
@@ -207,3 +218,6 @@ bundle 会挂载上面三个包；每个包也**可以单独安装**——`core/
 ## 许可证
 
 [MIT](LICENSE)
+
+浏览器产物内打包的第三方库（PDF.js、docx-preview、JSZip、SheetJS）另按各自许可证分发，见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
