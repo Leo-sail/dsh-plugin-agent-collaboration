@@ -27,7 +27,8 @@ import type { LedgerEntry } from './conversation/types.ts'
  * `CommunityPage.tsx`. The definitions themselves live in `community/types.ts`.
  */
 export type {
-  ActiveTab, CommunityDiagnostics, CommunityPageProps, CommunityRemote, ModelGroup,
+  ActiveTab, CommunityDiagnostics, CommunityPageProps, CommunityRemote,
+  ModelCatalog, ModelCatalogFailure, ModelGroup, ModelOption, ModelReasoningEffort,
 } from './community/types.ts'
 
 export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {

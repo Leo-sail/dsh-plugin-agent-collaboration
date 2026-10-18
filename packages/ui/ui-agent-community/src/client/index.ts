@@ -384,7 +384,7 @@ export function apply(ctx: ClientContext): void {
 
   /** The ordered groups alone — the composer's menu needs neither failures nor the default. */
   async function listModelGroups(): Promise<ModelGroup[]> {
-    return (await modelCatalog()).groups
+    return [...(await modelCatalog()).groups]
   }
 
   /** Native/browser directory picker; resolves null when the user cancels. */
