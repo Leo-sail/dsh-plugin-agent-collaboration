@@ -267,18 +267,20 @@ export function apply(ctx: ClientContext): void {
     session: {
       modelCatalog(): Promise<unknown>
       canOpenWorkspacePath(): Promise<boolean>
-      workspacePathApplications(request: { path: string }): Promise<Array<{
+      workspacePathApplications(request: { path: string }, signal?: AbortSignal): Promise<Array<{
         id: string; name: string; default: boolean; icon: string | null
       }>>
       openWorkspacePath(request: {
         path: string
         application?: string
         action?: 'reveal'
-      }): Promise<{ opened: boolean }>
+      }, signal?: AbortSignal): Promise<{ opened: boolean }>
     } | undefined
     workspace: { pickDirectory(): Promise<string | null> } | undefined
+    /** The right Sidebar's navigation controller; only present while a Session is on screen. */
+    sidebarRight: { openResource(address: string): void } | undefined
   }
-  const caps: Capabilities = { community: undefined, session: undefined, workspace: undefined }
+  const caps: Capabilities = { community: undefined, session: undefined, workspace: undefined, sidebarRight: undefined }
 
   // The mount promise is observed, never awaited blindly: a rejection is captured
   // for the diagnostic message, a stall is caught by the deadline below.
@@ -305,14 +307,14 @@ export function apply(ctx: ClientContext): void {
     caps.session = scope.remote['session'] as {
       modelCatalog(): Promise<unknown>
       canOpenWorkspacePath(): Promise<boolean>
-      workspacePathApplications(request: { path: string }): Promise<Array<{
+      workspacePathApplications(request: { path: string }, signal?: AbortSignal): Promise<Array<{
         id: string; name: string; default: boolean; icon: string | null
       }>>
       openWorkspacePath(request: {
         path: string
         application?: string
         action?: 'reveal'
-      }): Promise<{ opened: boolean }>
+      }, signal?: AbortSignal): Promise<{ opened: boolean }>
     }
     return () => { caps.session = undefined }
   })
@@ -320,6 +322,91 @@ export function apply(ctx: ClientContext): void {
     caps.workspace = scope.uiWorkspace
     return () => { caps.workspace = undefined }
   })
+  // The right Sidebar's navigation controller. Optional: a deployment without it simply
+  // falls back to the in-panel preview dialog.
+  ctx.inject(['sidebarRight'], (scope) => {
+    caps.sidebarRight = (scope as unknown as {
+      sidebarRight?: { openResource(address: string): void }
+    }).sidebarRight
+    return () => { caps.sidebarRight = undefined }
+  })
+
+  /**
+   * A cancellation signal with a deadline for one host call.
+   *
+   * `workspacePathApplications` and `openWorkspacePath` declare a `signal` parameter;
+   * calling them without one made the native menu answer "无法获取应用列表" — the call
+   * never reached the host. Every DSH call site passes a signal, so this one does too.
+   */
+  function deadlineSignal(timeoutMs: number): { signal: AbortSignal; done(): void } {
+    const controller = new AbortController()
+    const timer = setTimeout(() => { controller.abort() }, timeoutMs)
+    return { signal: controller.signal, done: () => { clearTimeout(timer) } }
+  }
+
+  /** One `dsh-resource://file/…` path segment, encoded the way DSH's chat encodes it. */
+  function encodeSegment(segment: string): string {
+    return encodeURIComponent(segment).replace(/%3A/gi, ':')
+  }
+
+  /**
+   * The `dsh-resource://file/session/<id>/<path>` address of one file.
+   *
+   * Same grammar as `ui-chat`'s `fileAddressFor`: absolute paths stay absolute, so a
+   * file outside the Session workspace still resolves through that Session's read
+   * authority (which is what lets a Bot-workspace file preview in the Sidebar at all).
+   */
+  function fileAddress(sessionId: string, path: string): string {
+    const normalized = path.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '')
+    const encoded = normalized.split('/').map(encodeSegment).join('/')
+    return `dsh-resource://file/session/${encodeSegment(sessionId)}/${encoded}`
+  }
+
+  /**
+   * The Session currently retained by the main view.
+   *
+   * The plugin's own panel renders in a root-scope main slot, so it has no session
+   * prop of its own. DSH's `UiSession` solves the same problem the same way: the one
+   * Session the main view retains is the one on screen. Returns undefined when the
+   * user is somewhere without a Session, and the caller then keeps the in-panel preview.
+   */
+  function currentViewSessionId(): string | undefined {
+    const sessions = (ctx as unknown as {
+      sessions?: {
+        list?: {
+          getSnapshot?: () => {
+            byId?: Record<string, { retainedBy?: { mainView?: number } }>
+          }
+        }
+      }
+    }).sessions
+    try {
+      const byId = sessions?.list?.getSnapshot?.()?.byId ?? {}
+      for (const [id, entry] of Object.entries(byId)) {
+        if ((entry?.retainedBy?.mainView ?? 0) > 0) return id
+      }
+    } catch {
+      // A missing or changed Session store only costs the Sidebar preview.
+    }
+    return undefined
+  }
+
+  /**
+   * Open one file in the right Sidebar's document preview, the way DSH's own file
+   * cards do. Returns false when this deployment has no Session or no right Sidebar,
+   * and the card then falls back to its in-panel preview.
+   */
+  function openFilePreview(path: string): boolean {
+    const sessionId = currentViewSessionId()
+    const right = caps.sidebarRight
+    if (sessionId === undefined || right === undefined) return false
+    try {
+      right.openResource(fileAddress(sessionId, path))
+      return true
+    } catch {
+      return false
+    }
+  }
 
   async function ensureNamespace(): Promise<RemoteFace> {
     const deadline = Date.now() + MOUNT_DEADLINE_MS
@@ -458,13 +545,28 @@ export function apply(ctx: ClientContext): void {
     workspacePathApplications: async (path) => {
       const session = caps.session
       if (session === undefined) return []
-      return await session.workspacePathApplications({ path })
+      const deadline = deadlineSignal(10_000)
+      try {
+        return await session.workspacePathApplications({ path }, deadline.signal)
+      } finally {
+        deadline.done()
+      }
     },
     openWorkspacePath: async (request) => {
       const session = caps.session
       if (session === undefined) throw new Error('当前宿主没有可用的文件打开能力')
-      return await session.openWorkspacePath(request)
+      const deadline = deadlineSignal(15_000)
+      try {
+        return await session.openWorkspacePath(request, deadline.signal)
+      } finally {
+        deadline.done()
+      }
     },
+    // The native path DSH's own cards take: hand the file to the right Sidebar's
+    // document preview (which renders Office/Excel through the host converters).
+    // False means this deployment has no on-screen Session or no right Sidebar, and
+    // the card falls back to its in-panel dialog.
+    openFilePreview: (path) => openFilePreview(path),
     approveBotToolCall: (callId, outcome) => call('approveBotToolCall', callId, outcome),
     answerBotQuestion: (input) => call('answerBotQuestion', input),
     markRoomRead: (input) => call('markRoomRead', input),

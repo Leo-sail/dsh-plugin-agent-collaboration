@@ -256,6 +256,17 @@ function DeliverableCard({ file, onPreview, canOpen, remote }: {
     }
   }
 
+  /**
+   * Click behaviour, matching DSH's delivery cards: open the file in the right
+   * Sidebar's document preview (Office/Excel included, through the host renderers).
+   * The in-panel dialog stays as the fallback for deployments without a Session or
+   * without the right Sidebar.
+   */
+  const openPreview = (): void => {
+    if (remote?.openFilePreview?.(file.path) === true) return
+    onPreview()
+  }
+
   const toggleMenu = async (): Promise<void> => {
     const next = !menuOpen
     setMenuOpen(next)
@@ -264,8 +275,10 @@ function DeliverableCard({ file, onPreview, canOpen, remote }: {
       const list = await remote.workspacePathApplications(file.path)
       setApps(list.map(app => ({ id: app.id, name: app.name, default: app.default })))
       setAppsError(undefined)
-    } catch {
-      setAppsError('无法获取应用列表')
+    } catch (error: unknown) {
+      // Surface the reason: silently printing a generic line is what made the first
+      // report impossible to act on.
+      setAppsError(`无法获取应用列表：${describeError(error)}`)
     }
   }
 
@@ -309,7 +322,7 @@ function DeliverableCard({ file, onPreview, canOpen, remote }: {
       {/* Name + subtitle; the whole block is the preview button. */}
       <button
         type="button"
-        onClick={onPreview}
+        onClick={openPreview}
         title={`预览 ${file.name}\n${file.path}`}
         aria-label={`预览 ${file.name}`}
         style={{

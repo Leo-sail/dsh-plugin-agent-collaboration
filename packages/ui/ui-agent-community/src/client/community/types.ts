@@ -200,6 +200,12 @@ export interface CommunityRemote {
     index: number
     offset?: number
   }): Promise<DeliverablePreview>
+  /**
+   * Open one file in the right Sidebar's document preview, exactly as DSH's own file
+   * cards do. Returns false when there is no on-screen Session or no right Sidebar,
+   * and the caller keeps its in-panel preview.
+   */
+  openFilePreview(path: string): boolean
   /** Whether this host can open/reveal files in an OS application (desktop gate). */
   canOpenWorkspacePath(): Promise<boolean>
   /** Applications associated with one file on this machine, in OS preference order. */
