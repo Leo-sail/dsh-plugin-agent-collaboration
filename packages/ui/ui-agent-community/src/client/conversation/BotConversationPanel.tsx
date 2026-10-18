@@ -120,7 +120,9 @@ export interface BotConversationPanelProps {
   isGroup: boolean
   bots: BotInfo[]
   runs: RunInfo[]
-  modelGroups: Array<{ id: string; label?: string; models: Array<{ id: string; name?: string }> }>
+  modelGroups: Array<{ id: string; name?: string; label?: string; models: Array<{ id: string; name?: string }> }>
+  /** Re-read Settings' model catalog before the composer's model menu opens. */
+  onRefreshModels: () => void
   /** Skills available to the room's bot. */
   skills?: ReadonlyArray<{ id: string; name: string; description: string; path: string }> | undefined
   /** Load a skill's full text for direct invocation. */
@@ -201,7 +203,7 @@ function byTimeThenSequence(a: LedgerEntry, b: LedgerEntry): number {
 }
 
 export function BotConversationPanel({
-  roomId, roomName, isGroup, bots, runs, modelGroups, skills, onLoadSkill, onListSkillFiles, skillsError,
+  roomId, roomName, isGroup, bots, runs, modelGroups, onRefreshModels, skills, onLoadSkill, onListSkillFiles, skillsError,
   onSend, onStop, onApprove, onReject, onAnswerQuestion, onSkipQuestion, onCommand, onClear, listLedger, onFork, tasks, round,
 }: BotConversationPanelProps) {
   const [entries, setEntries] = useState<LedgerEntry[]>([])
@@ -572,6 +574,7 @@ export function BotConversationPanel({
         {...(pendingApproval !== undefined ? { pendingApproval } : {})}
         queue={queue}
         modelGroups={modelGroups}
+        onRefreshModels={onRefreshModels}
         {...(skills !== undefined ? { skills } : {})}
         onLoadSkill={onLoadSkill}
         onListSkillFiles={onListSkillFiles}

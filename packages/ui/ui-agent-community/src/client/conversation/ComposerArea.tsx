@@ -26,7 +26,9 @@ export interface ComposerProps {
   isRunning: boolean
   pendingApproval?: LedgerEntry | undefined
   queue: InFlightMessage[]
-  modelGroups: Array<{ id: string; label?: string; models: Array<{ id: string; name?: string }> }>
+  modelGroups: Array<{ id: string; name?: string; label?: string; models: Array<{ id: string; name?: string }> }>
+  /** Re-read Settings' model catalog when the model menu opens. */
+  onRefreshModels: () => void
   /** Skills available to the room's bot. */
   skills?: ReadonlyArray<{ id: string; name: string; description: string; path: string }> | undefined
   /** Load a skill's full text for direct invocation. */
@@ -170,7 +172,7 @@ function escapeXmlAttr(v: string): string {
 
 export function ComposerArea({
   roomId, isGroup, bots, isRunning, pendingApproval, queue,
-  modelGroups, onSend, onStop, onApprove, onReject,
+  modelGroups, onRefreshModels, onSend, onStop, onApprove, onReject,
   onEditQueue, onRemoveQueue, onSteerQueue, onCommand, skills = [], onLoadSkill, onListSkillFiles, skillsError,
 }: ComposerProps) {
   // The draft belongs to the ROOM: this component unmounts when the user switches rooms, and its
@@ -289,6 +291,9 @@ export function ComposerArea({
       setSlashQuery(slashMatch[1] ?? '')
       // Typing "/" is an open from scratch: never inherit a previous sub-directory.
       setSlashSubmenu(null)
+      // Opening the menu re-reads the catalog, so a provider/model added or renamed in
+      // DSH Settings is selectable without remounting the panel.
+      if (!slashOpen) onRefreshModels()
       setSlashOpen(true)
       setMentionOpen(false)
     } else {
@@ -627,6 +632,7 @@ export function ComposerArea({
               // clears the submenu; this keeps that true even if the menu was closed by
               // something that bypassed it (e.g. the composer unmounted mid-submenu).
               setSlashSubmenu(null)
+              if (!slashOpen) onRefreshModels()
               setSlashOpen(v => !v)
             }}
           />

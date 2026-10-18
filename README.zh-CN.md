@@ -7,7 +7,7 @@
 [English](README.md) · [设计说明](DESIGN.md) · [MIT](LICENSE)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![DSH](https://img.shields.io/badge/DSH-0.2.0--rc.2-2563eb.svg)](#环境要求)
+[![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.2-2563eb.svg)](#环境要求)
 [![topic: dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-0f766e.svg)](https://github.com/topics/dsh-plugin)
 
 </div>
@@ -25,12 +25,14 @@
 - **单聊与群聊。** 房间就是成员列表。点名某个 Bot 的消息只路由给它；不点名的消息由**每个成员各自回答**——因为一句问候是说给整个房间的。
 - **运行可排队、可租约、可恢复。** 每次回答是一个带租约与心跳的 run。运行时进程死掉的 run 会被回收而不是把房间卡住，房间在你去做别的事时照常工作。
 - **转录是持久的。** 面板画的是运行过程中写下的 ledger（消息、工具调用与结果、审批、错误），不是会话日志。被压缩掉的旧历史会换成一条摘要，而不是悄悄消失。
-- **13 个模型可调用工具**，Bot 因此可以建房间、把活交给另一个 Bot、把需求拆成任务并回报：
+- **14 个模型可调用工具**，Bot 因此可以建房间、把活交给另一个 Bot、把需求拆成任务并回报：
   `agent_community_create_bot`、`agent_community_update_bot`、`agent_community_list_bots`、
   `agent_community_create_room`、`agent_community_send_message`、`agent_community_list_runs`、
   `agent_community_get_context`、`agent_community_post_message`、`agent_community_task_decompose`、
   `agent_community_task_assign`、`agent_community_task_status`、`agent_community_task_report`、
-  `agent_community_submit_final`。
+  `agent_community_submit_final`、`agent_community_remember`。
+- **模型全部来自 DSH 设置。** Bot 设置与输入框的模型菜单都读取部署实时的模型目录——全部提供方、全部模型、
+  它们在设置里的显示名与思考档位。没有任何厂商/模型名被写死；在设置里新增或改名的提供方无需重启即可出现。
 - **附件。** 消息可以带文件与图片，存放在接收方 Bot 自己的工作区里，并附到模型看到的内容上；气泡里显示的仍然是你原样输入的东西。
 - **可手动触发的压缩。** `/compact` 用该房间自己的 Bot 模型把较早的对话总结成摘要，原样保留最近几条，并**退掉承载旧历史的会话**——所以下一次回答是从摘要继续，而不是把整份记录重放一遍。
 - **压缩之后未读依然准确。** 已读水位记的是"读到什么时间"，而不是只记一个消息 id，因此被压缩过的房间仍然能告诉你哪些是新的。
@@ -39,14 +41,13 @@
 
 | | |
 | --- | --- |
-| DeepSeek Harness | `0.2.0-rc.2`（这些包就是对着它构建与类型检查的版本） |
+| DeepSeek Harness | `0.2.1-rc.2`（构建与实测所用版本；插件不锁定 DSH 版本） |
 | Node.js | `^22.19.0` 或 `>=24` |
 | pnpm | `11.7.0`（从源码构建时需要） |
 
-`@deepseek-ai/*` 这些包**没有**发布到公共 npm registry。因此本仓库的 peer 版本范围都带**显式的预发布分支**
-（`>=0.2.0-rc.1 <0.3.0`）：像 `*` 或 `>=0.0.1-rc.1 <0.2.0` 这种看起来"很宽"的范围，实际上**匹配不到任何预发布版本**
-——node-semver 只有在范围中**某个比较符**与目标版本 `major.minor.patch` 元组相同、且自身也带预发布标签时，才放行预发布版本。
-这也正是本仓库单独 `pnpm install` 会失败的原因（属于预期），也是这个插件要装进**已有这些依赖的 DSH profile** 的原因。
+`@deepseek-ai/*` 这些包**没有**发布到公共 npm registry，因此本仓库单独 `pnpm install` 解析不到它们（属于预期）。
+插件**刻意不锁定 DSH 版本**：所有 peer 范围都是 `*`，缺少宿主包时降级加载而不是让安装失败。这也是这个插件要装进
+**由目标运行时提供这些包的 DSH profile** 的原因。
 
 ## 安装
 
@@ -60,7 +61,7 @@ dsh plugin --profile <你的profile> add dsh-plugin-agent-collaboration
 
 ```bash
 dsh plugin --profile <你的profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.0/dsh-plugin-agent-collaboration-0.2.0.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.2/dsh-plugin-agent-collaboration-0.2.2.tgz
 ```
 
 同一份产物，附在 release 上——不想经过 npm 就直接用它。
@@ -83,10 +84,10 @@ ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/
 ### 让 Agent 帮你装
 
 ```text
-> **注意**：仓库里的当前版本是 **0.2.0，尚未发布**。下面的链接指向最近一次公开发布（v0.1.2）；
-> 0.2.0 的改动见 [CHANGELOG.md](CHANGELOG.md)，装好后的自测步骤见 [ACCEPTANCE.zh-CN.md](ACCEPTANCE.zh-CN.md)。
+> **注意**：仓库里的当前版本是 **0.2.2**，与下面的链接一致；改动见 [CHANGELOG.md](CHANGELOG.md)，
+> 装好后的自测步骤见 [ACCEPTANCE.zh-CN.md](ACCEPTANCE.zh-CN.md)。
 
-把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.0/dsh-plugin-agent-collaboration-0.2.0.tgz
+把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.2/dsh-plugin-agent-collaboration-0.2.2.tgz
 把本插件装进目标 DSH profile，重启 DSH，并确认侧栏出现「Bots团队」。
 ```
 

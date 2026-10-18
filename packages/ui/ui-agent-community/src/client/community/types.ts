@@ -28,14 +28,58 @@ import type {
 /** The two lists the sidebar's tab strip switches between. */
 export type ActiveTab = 'bots' | 'rooms'
 
+/** One reasoning level a model publishes, exactly as DSH Settings describes it. */
+export interface ModelReasoningEffort {
+  readonly id: string
+  readonly name?: string | undefined
+  readonly description?: string | undefined
+}
+
+/** One model a provider advertises, exactly as DSH Settings describes it. */
+export interface ModelOption {
+  readonly id: string
+  readonly name?: string | undefined
+  readonly description?: string | undefined
+  /** The levels this model accepts; absent when the host publishes none. */
+  readonly reasoning?: {
+    readonly efforts: readonly ModelReasoningEffort[]
+    readonly defaultEffort?: string | undefined
+  } | undefined
+}
+
 /** One provider and the models it advertises, as the host reports them. */
 export interface ModelGroup {
   readonly id: string
+  /** Display name from DSH Settings. `label` is the legacy spelling of the same field. */
+  readonly name?: string | undefined
   readonly label?: string | undefined
-  readonly models: readonly {
-    readonly id: string
-    readonly name?: string | undefined
-  }[]
+  readonly models: readonly ModelOption[]
+}
+
+/** A provider Settings has configured but whose catalog could not be built. */
+export interface ModelCatalogFailure {
+  readonly id: string
+  readonly name?: string | undefined
+  readonly message?: string | undefined
+}
+
+/**
+ * The deployment's whole model catalog.
+ *
+ * This is the ONLY source of provider ids, model ids and display names in this UI. It is
+ * produced by DSH Settings, so custom providers, renamed models and per-model reasoning
+ * levels all appear here without a code change — nothing about a vendor is baked in.
+ */
+export interface ModelCatalog {
+  readonly groups: readonly ModelGroup[]
+  /** Configured providers that are currently unavailable, with the host's reason. */
+  readonly failures: readonly ModelCatalogFailure[]
+  /** The model DSH Settings names as the deployment default. */
+  readonly default?: {
+    readonly provider: string
+    readonly model: string
+    readonly reasoningEffort?: string | undefined
+  } | undefined
 }
 
 /** Everything the page asks of the host. Injected by the plugin, never fetched here. */
@@ -64,6 +108,8 @@ export interface CommunityRemote {
   listRuns(botId?: string): Promise<BotRun[]>
   getBotPresence(botId: string): Promise<BotPresence>
   listModelGroups(): Promise<ModelGroup[]>
+  /** The same catalog plus the deployment default and the unavailable providers. */
+  modelCatalog(): Promise<ModelCatalog>
   pickDirectory(): Promise<string | null>
   getDefaults(): Promise<{ defaultWorkspace: string }>
   controlRun(input: ControlBotRunRequest): Promise<BotRun>

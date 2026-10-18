@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-agent-collaboration",
-  "description": "Bot Community plugin for DSH — persistent bots, rooms, and runs",
-  "version": "0.2.1",
+  "description": "Bot Community plugin for DSH \u2014 persistent bots, rooms, and runs",
+  "version": "0.2.2",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

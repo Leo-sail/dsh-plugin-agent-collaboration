@@ -1,7 +1,7 @@
 {
   "name": "@dsh-plugin-agent-community/tool-agent-community",
-  "description": "Model-facing tools for Agent Community — Bot and room management via ctx.agentCommunity",
-  "version": "0.2.1",
+  "description": "Model-facing tools for Agent Community \u2014 Bot and room management via ctx.agentCommunity",
+  "version": "0.2.2",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

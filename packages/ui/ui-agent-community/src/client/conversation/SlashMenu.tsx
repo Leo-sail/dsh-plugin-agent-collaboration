@@ -341,24 +341,31 @@ export function SlashMenu({ query, commands, onSelect, onClose, openSubmenu, set
 }
 
 export function buildSlashCommands(
-  modelGroups: Array<{ id: string; label?: string; models: Array<{ id: string; name?: string }> }>,
+  modelGroups: Array<{ id: string; name?: string; label?: string; models: Array<{ id: string; name?: string }> }>,
   skills: ReadonlyArray<{ id: string; name: string; description: string; path: string }> = [],
   skillsError?: string | undefined,
 ): SlashCommand[] {
-  // ── ONE ROW PER MODEL, NAMED WITH ITS PROVIDER ──────────────────────────────
+  // ── ONE ROW PER (PROVIDER, MODEL), NAMED WITH ITS PROVIDER ──────────────────
   //
-  // Two providers in the catalog can offer the SAME model ids (deepseek-account and
-  // deepseek-official do), and the menu rendered one row per occurrence labelled only
-  // with the model name — so a list showed duplicates and picking one switched the
-  // provider as a side effect the user could not see. Now each model appears once and
-  // its provider rides the row's description.
+  // Two providers in the catalog can offer the SAME model ids, and the menu used to
+  // collapse them by id: one row per model name, and picking it silently resolved to
+  // the first provider that listed the id. The row id now carries BOTH halves
+  // (`<provider>:<model>`) so the menu lists every provider's every model and the
+  // picker writes back the exact route the user chose. Display names come from the
+  // catalog verbatim — Settings owns them, so they may be any vendor or language.
+  const providerLabelOf = (group: { id: string; name?: string; label?: string }): string => {
+    const name = group.name ?? group.label ?? group.id
+    const clashes = modelGroups.filter(other => (other.name ?? other.label ?? other.id) === name).length > 1
+    return clashes ? `${name}（${group.id}）` : name
+  }
   const seenModels = new Set<string>()
   const modelItems: Array<{ id: string; label: string; description?: string | undefined }> = []
   for (const g of modelGroups) {
     for (const m of g.models) {
-      if (seenModels.has(m.id)) continue
-      seenModels.add(m.id)
-      modelItems.push({ id: m.id, label: m.name ?? m.id, description: g.label ?? g.id })
+      const key = `${g.id}\u0000${m.id}`
+      if (seenModels.has(key)) continue
+      seenModels.add(key)
+      modelItems.push({ id: `${g.id}:${m.id}`, label: m.name ?? m.id, description: providerLabelOf(g) })
     }
   }
 
@@ -389,7 +396,8 @@ export function buildSlashCommands(
       ],
     },
     {
-      id: 'model', label: 'model', title: '模型', description: '选择本会话使用的模型', group: '指令',
+      id: 'model', label: 'model', title: '模型',
+      description: '列出设置里的全部提供商与模型；选中后写回该 Bot', group: '指令',
       icon: <IconDatabaseOutlineRegular size={14} />,
       hasSubmenu: true,
       submenuItems: modelItems.length > 0 ? modelItems : [{ id: 'default', label: '(使用默认)' }],

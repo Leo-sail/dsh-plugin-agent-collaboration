@@ -7,7 +7,7 @@
 [简体中文](README.zh-CN.md) · [Design notes](DESIGN.md) · [MIT](LICENSE)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![DSH](https://img.shields.io/badge/DSH-0.2.0--rc.2-2563eb.svg)](#requirements)
+[![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.2-2563eb.svg)](#requirements)
 [![topic: dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-0f766e.svg)](https://github.com/topics/dsh-plugin)
 
 </div>
@@ -34,12 +34,15 @@ produced it is gone.
 - **A durable transcript.** The panel draws from a ledger written as the run happens (messages, tool
   calls and their results, approvals, errors), not from the session log. Compacted-away history is
   replaced by a summary rather than silently dropped.
-- **13 model-facing tools**, so a Bot can create rooms, hand work to another Bot, decompose a request
+- **14 model-facing tools**, so a Bot can create rooms, hand work to another Bot, decompose a request
   into tasks and report on them: `agent_community_create_bot`, `agent_community_update_bot`,
   `agent_community_list_bots`, `agent_community_create_room`, `agent_community_send_message`,
   `agent_community_list_runs`, `agent_community_get_context`, `agent_community_post_message`,
   `agent_community_task_decompose`, `agent_community_task_assign`, `agent_community_task_status`,
-  `agent_community_task_report`, `agent_community_submit_final`.
+  `agent_community_task_report`, `agent_community_submit_final`, `agent_community_remember`.
+- **Models come from DSH Settings.** The Bot form and the composer's model menu read the deployment's live
+  catalog — every provider, every model, its display name and its reasoning levels. Nothing about a vendor
+  or a model is hard-coded; a provider added or renamed in Settings appears without restarting.
 - **Attachments.** Files and images can be added to a message. They are stored inside the receiving Bot's
   own workspace and appended to what the model sees; the bubble still shows exactly what you typed.
 - **Compaction that you can trigger.** `/compact` summarises the older part of a room with the room's own
@@ -52,16 +55,15 @@ produced it is gone.
 
 | | |
 | --- | --- |
-| DeepSeek Harness | `0.2.0-rc.2` (the version these packages are built and typechecked against) |
+| DeepSeek Harness | `0.2.1-rc.2` (built and verified against it; no DSH version is pinned) |
 | Node.js | `^22.19.0` or `>=24` |
 | pnpm | `11.7.0` (for building from source) |
 
-`@deepseek-ai/*` packages are **not** published to the public npm registry. The peer ranges in this repo
-therefore carry an explicit prerelease branch (`>=0.2.0-rc.1 <0.3.0`): a broad-looking range such as `*`
-or `>=0.0.1-rc.1 <0.2.0` matches no prerelease version at all, because node-semver only lets a
-prerelease satisfy a range when some comparator carries the same `major.minor.patch` tuple **and** a
-prerelease tag. That is why `pnpm install` in this repo alone fails — it is expected, and it is also why
-the plugin is meant to be installed *into* a DSH profile, where those packages are already present.
+`@deepseek-ai/*` packages are **not** published to the public npm registry, so this repo cannot install
+them and `pnpm install` alone fails — expected. The plugin deliberately does **not** pin a DSH version:
+every peer range is `*` and a missing host package degrades at load instead of failing the install. That
+is also why the plugin is meant to be installed *into* a DSH profile, where the running harness supplies
+those packages.
 
 ## Installation
 
@@ -80,7 +82,7 @@ see [CHANGELOG.md](CHANGELOG.md) for what a newer version changes.
 
 ```bash
 dsh plugin --profile <your-profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.0/dsh-plugin-agent-collaboration-0.2.0.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.2/dsh-plugin-agent-collaboration-0.2.2.tgz
 ```
 
 ### Installing from a checkout instead
@@ -104,7 +106,7 @@ ls -ld ~/.dsh/profiles/<your-profile>/node_modules/@dsh-plugin-agent-community/*
 
 ```text
 Install the DSH plugin at
-https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.0/dsh-plugin-agent-collaboration-0.2.0.tgz
+https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.2/dsh-plugin-agent-collaboration-0.2.2.tgz
 into my DSH profile, restart DSH, and confirm the "Bots团队" entry appears in the sidebar.
 ```
 
@@ -217,7 +219,7 @@ To develop against a real runtime, install the bundle into a profile with
 packages/
   core/agent-community         the service: Bots, rooms, runs, sessions, the ledger
                                AgentCommunityService (ctx.agentCommunity), persists state.json
-  tools/tool-agent-community   the 13 model-facing tools (ctx.tools.register)
+  tools/tool-agent-community   the 14 model-facing tools (ctx.tools.register)
   ui/ui-agent-community        the browser panel: sidebar entry, transcript, composer
   bundle/agent-collaboration   the installable entry (cordis.patch.yml)
 ```

@@ -20,7 +20,9 @@
  * instead of hanging the panel silently.
  */
 import { createContext, createElement, useContext } from 'react'
-import type { CommunityRemote, CommunityPageProps, CommunityDiagnostics, ModelGroup } from './CommunityPage.tsx'
+import type {
+  CommunityRemote, CommunityPageProps, CommunityDiagnostics, ModelCatalog, ModelCatalogFailure, ModelGroup,
+} from './CommunityPage.tsx'
 import { CommunityPage } from './CommunityPage.tsx'
 import { installNavBadge } from './navBadge.ts'
 // The native-conversation surface is deliberately NOT embedded: the plugin draws its own
@@ -330,15 +332,59 @@ export function apply(ctx: ClientContext): void {
     return unwrap<T>(await withDeadline(fn(...args), deadlineMs, `${NS}/${method}`), `${NS}/${method}`)
   }
 
-  /** Providers and models configured in DSH Settings, as the model selector sees them. */
-  async function listModelGroups(): Promise<ModelGroup[]> {
+  /**
+   * Providers and models configured in DSH Settings, as the model selector sees them.
+   *
+   * The catalog is the ONLY source of provider ids, model ids and display names here:
+   * nothing is baked in, so a provider the user added or renamed in Settings appears
+   * without a code change. `modelCatalog` also carries the deployment default and the
+   * providers Settings configured but whose catalog could not be built — the Bot form
+   * needs both to start on the user's default and to explain a missing provider.
+   */
+  async function modelCatalog(): Promise<ModelCatalog> {
     const session = caps.session
     if (session === undefined) throw new Error('模型目录不可用：remote.session 未就绪')
-    const value = unwrap<{ groups?: ModelGroup[] }>(
+    const value = unwrap<{
+      groups?: ModelGroup[]
+      failures?: ModelCatalogFailure[]
+      default?: { provider?: string; model?: string; reasoningEffort?: string }
+    }>(
       await withDeadline(session.modelCatalog(), CALL_DEADLINE_MS, 'session/modelCatalog'),
       'session/modelCatalog',
     )
-    return value?.groups ?? []
+    const fallback = value?.default?.provider !== undefined && value?.default?.model !== undefined
+      ? {
+        provider: value.default.provider,
+        model: value.default.model,
+        ...(value.default.reasoningEffort !== undefined
+          ? { reasoningEffort: value.default.reasoningEffort }
+          : {}),
+      }
+      : undefined
+    const source = value?.groups ?? []
+    // Settings owns the default model; order it first so a form or menu that starts at
+    // `groups[0]` starts where the user configured it, not on an arbitrary provider.
+    const ordered = fallback === undefined
+      ? source
+      : [...source].sort((a, b) => Number(b.id === fallback.provider) - Number(a.id === fallback.provider))
+    const groups: ModelGroup[] = ordered.map(group => {
+      const models = [...group.models]
+      if (fallback !== undefined && group.id === fallback.provider) {
+        const mi = models.findIndex(model => model.id === fallback.model)
+        if (mi > 0) models.unshift(...models.splice(mi, 1))
+      }
+      return { ...group, models }
+    })
+    return {
+      groups,
+      failures: [...(value?.failures ?? [])],
+      ...(fallback !== undefined ? { default: fallback } : {}),
+    }
+  }
+
+  /** The ordered groups alone — the composer's menu needs neither failures nor the default. */
+  async function listModelGroups(): Promise<ModelGroup[]> {
+    return (await modelCatalog()).groups
   }
 
   /** Native/browser directory picker; resolves null when the user cancels. */
@@ -362,6 +408,7 @@ export function apply(ctx: ClientContext): void {
     listRuns: (botId) => call('listRuns', botId),
     getBotPresence: (botId) => call('getBotPresence', botId),
     listModelGroups,
+    modelCatalog,
     pickDirectory,
     getDefaults: () => call('getDefaults'),
     controlRun: (input) => call('controlRun', input),

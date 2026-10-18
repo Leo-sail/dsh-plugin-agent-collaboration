@@ -30,6 +30,12 @@ export interface ConversationAreaProps {
   /** This room's runs (already filtered by the shell), for the panel's live-run tests. */
   runs: readonly BotRun[]
   modelGroups: readonly ModelGroup[]
+  /**
+   * Re-read Settings' model catalog. Called when the composer opens its model menu:
+   * Settings can change while the panel stays mounted, and this UI must show the
+   * user's CURRENT providers rather than the list captured at mount time.
+   */
+  onRefreshModels: () => void
   /** The snapshot's task board; filtered to this room below. */
   tasks: readonly SnapshotTask[]
   skills: ReadonlyArray<{ id: string; name: string; description: string; path: string }> | undefined
@@ -64,7 +70,7 @@ export interface ConversationAreaProps {
 }
 
 export function ConversationArea({
-  room, roomId, bots, runs, modelGroups, tasks, skills, skillsError, error, isBotMode,
+  room, roomId, bots, runs, modelGroups, onRefreshModels, tasks, skills, skillsError, error, isBotMode,
   remote, onLoadSkill, onListSkillFiles, listLedger, onNotice, onMarkRead, onDetectProposal,
   onReload, onOpenBotRoom,
 }: ConversationAreaProps) {
@@ -116,7 +122,8 @@ export function ConversationArea({
           // to satisfy the task dock's "something is running" test, so the card stayed
           // on screen in a room where nothing was happening.
           runs={runs.filter(r => r.roomId === roomId)}
-          modelGroups={modelGroups as Array<{ id: string; label?: string; models: Array<{ id: string; name?: string }> }>}
+          modelGroups={modelGroups as Array<{ id: string; name?: string; label?: string; models: Array<{ id: string; name?: string }> }>}
+          onRefreshModels={onRefreshModels}
           skills={skills}
           skillsError={skillsError}
           onLoadSkill={onLoadSkill}
@@ -214,16 +221,21 @@ export function ConversationArea({
                 onNotice('这是占位项：模型目录还没加载完，稍后再试。')
                 return
               }
-              // The submenu carries model ids only, so resolve the provider from the
-              // catalog the menu was built from rather than guessing it.
-              const group = modelGroups.find(g => g.models.some(m => m.id === subId))
+              // Menu ids are `<provider>:<model>` so two providers that offer the same
+              // model id (they exist) stay distinguishable; a bare id is still accepted
+              // for entries produced by an older menu.
+              const sep = subId.indexOf(':')
+              const providerId = sep > 0 ? subId.slice(0, sep) : undefined
+              const modelId = sep > 0 ? subId.slice(sep + 1) : subId
+              const group = (providerId !== undefined ? modelGroups.find(g => g.id === providerId) : undefined)
+                ?? modelGroups.find(g => g.models.some(m => m.id === modelId))
               if (group === undefined) {
                 onNotice(`找不到模型「${subId}」所属的提供方，未做修改。`)
                 return
               }
-              const modelName = group.models.find(m => m.id === subId)?.name ?? subId
-              const providerName = group.label ?? group.id
-              void remote.updateBot({ id: botId, provider: group.id, model: subId })
+              const modelName = group.models.find(m => m.id === modelId)?.name ?? modelId
+              const providerName = group.name ?? group.label ?? group.id
+              void remote.updateBot({ id: botId, provider: group.id, model: modelId })
                 .then(() => {
                   // The provider belongs in the notice: two providers offer the same model
                   // ids, so "model set to X" alone cannot tell the user what changed.

@@ -25,7 +25,7 @@ import { DialogTabs } from '../conversation/DialogTabs.tsx'
 import { NativeCheckbox, NativeSegmentedControl } from '../conversation/NativeControls.tsx'
 import { IconFolderOpenRegular } from '../conversation/NativeIcons.tsx'
 import { css } from '../styles.ts'
-import type { CommunityRemote, ModelGroup } from './types.ts'
+import type { CommunityRemote, ModelCatalogFailure, ModelGroup } from './types.ts'
 import { describe } from './types.ts'
 
 const AVATAR_EMOJIS = ['🤖', '🧠', '🦊', '🐙', '🐼', '🐸', '🚀', '🌟', '🎯', '🛠️', '🧭', '🔥', '🌈', '🪐', '🦉', '🐳'] as const
@@ -77,6 +77,8 @@ export function BotFormDialog({
   const [botWorkspace, setBotWorkspace] = useState(editingBot?.workspace ?? '')
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelError, setModelError] = useState<string>()
+  /** Providers Settings configured but whose catalog could not be built. */
+  const [modelFailures, setModelFailures] = useState<readonly ModelCatalogFailure[]>([])
 
   // Full-access risk confirmation. Full access is a ONE-TIME authorization: the bot is already
   // persisted with `permission: 'full-access'`, so the user granted it when they saved that.
@@ -90,21 +92,44 @@ export function BotFormDialog({
   const [roomName, setRoomName] = useState('')
   const [roomMembers, setRoomMembers] = useState<BotId[]>([])
 
-  // Load model groups when the create-bot form opens
+  // Load the model catalog when the create/edit form opens.
+  //
+  // `modelCatalog()` rather than `listModelGroups()`: the form also needs the deployment
+  // default (so a new Bot starts where Settings says) and the providers Settings has
+  // configured but that are currently unavailable (so a missing one can be explained
+  // instead of silently disappearing).
   useEffect(() => {
     if (!isBotMode) return
     let cancelled = false
     void (async () => {
       setModelsLoading(true)
       try {
-        const groups = await remote.listModelGroups()
+        const catalog = await remote.modelCatalog()
         if (cancelled) return
-        setModelGroups(groups)
-        // Pre-select provider/model only when creating; editing keeps existing values
+        setModelGroups([...catalog.groups])
+        setModelFailures(catalog.failures)
+        // Pre-select provider/model/effort only when creating; editing keeps existing values.
         if (editingBot === undefined) {
-          const preferred = groups.find(g => g.id === 'deepseek-account') ?? groups[0]
-          setBotProvider(prev => (prev !== '' && groups.some(g => g.id === prev) ? prev : preferred?.id ?? ''))
-          setBotModel(prev => (prev !== '' ? prev : preferred?.models[0]?.id ?? ''))
+          const defaultGroup = catalog.default !== undefined
+            ? catalog.groups.find(g => g.id === catalog.default?.provider)
+            : undefined
+          const defaultModel = catalog.default !== undefined
+            ? defaultGroup?.models.find(m => m.id === catalog.default?.model)
+            : undefined
+          const fallbackGroup = defaultGroup ?? catalog.groups[0]
+          const fallbackModel = defaultModel ?? fallbackGroup?.models[0]
+          setBotProvider(prev => (prev !== '' && catalog.groups.some(g => g.id === prev) ? prev : fallbackGroup?.id ?? ''))
+          setBotModel(prev => (prev !== '' ? prev : fallbackModel?.id ?? ''))
+          // The level a new Bot starts with is the one its default model publishes.
+          const published = fallbackModel?.reasoning?.efforts ?? []
+          const publishedDefault = fallbackModel?.reasoning?.defaultEffort
+          if (publishedDefault !== undefined && published.some(e => e.id === publishedDefault)) {
+            setBotEffort(publishedDefault)
+          } else if (published.length > 0) {
+            setBotEffort(published[0]!.id)
+          } else if (catalog.default?.reasoningEffort !== undefined) {
+            setBotEffort(catalog.default.reasoningEffort)
+          }
         }
         setModelError(undefined)
       } catch (e) {
@@ -131,10 +156,46 @@ export function BotFormDialog({
     }
   }
 
+  /**
+   * Display rules for everything model-related in this form.
+   *
+   * A provider label is Settings' display name, disambiguated by provider id only when two
+   * routes share one name. A model name is Settings' name. Reasoning levels are the ones
+   * THIS model publishes. Nothing here names a vendor, a model or a fixed set of levels.
+   */
+  function providerLabelOf(group: ModelGroup): string {
+    const name = group.name ?? group.label ?? group.id
+    const clashes = modelGroups.filter(other => (other.name ?? other.label ?? other.id) === name).length > 1
+    return clashes ? `${name}（${group.id}）` : name
+  }
+
+  /** The reasoning levels `provider`/`model` publishes, and that model's own default. */
+  function effortsFor(provider: string, model: string): {
+    options: Array<{ id: string; name: string }>
+    fallback: string
+  } {
+    const group = modelGroups.find(g => g.id === provider)
+    const entry = group?.models.find(m => m.id === model)
+    const efforts = entry?.reasoning?.efforts ?? []
+    return {
+      options: efforts.map(e => ({ id: e.id, name: e.name ?? e.id })),
+      fallback: entry?.reasoning?.defaultEffort ?? '',
+    }
+  }
+
+  /** Move to the model's own default level when the current one is not offered. */
+  function alignEffort(provider: string, model: string, previous: string): string {
+    const { options, fallback } = effortsFor(provider, model)
+    if (options.some(option => option.id === previous)) return previous
+    return fallback !== '' ? fallback : previous
+  }
+
   function handleSelectProvider(next: string) {
     setBotProvider(next)
     const group = modelGroups.find(g => g.id === next)
-    setBotModel(group?.models[0]?.id ?? '')
+    const firstModel = group?.models[0]?.id ?? ''
+    setBotModel(firstModel)
+    setBotEffort(prev => alignEffort(next, firstModel, prev))
   }
 
   async function handleCreateBot(e: FormEvent) {
@@ -282,28 +343,59 @@ export function BotFormDialog({
                         <span className={css.rowControl}><select className={css.select} value={botProvider} onChange={e => handleSelectProvider(e.target.value)} disabled={modelsLoading || modelGroups.length === 0}>
                           {modelGroups.length === 0 && <option value="">{modelsLoading ? '加载中…' : '没有已配置的 Provider'}</option>}
                           {modelGroups.map(group => (
-                            <option key={group.id} value={group.id}>{group.label ?? group.id}</option>
+                            <option key={group.id} value={group.id}>{providerLabelOf(group)}</option>
                           ))}
+                          {botProvider !== '' && !modelGroups.some(g => g.id === botProvider) && (
+                            <option value={botProvider}>{botProvider}（当前值，设置中未列出）</option>
+                          )}
                         </select></span>
+                        {modelFailures.length > 0 && (
+                          <span className={css.fieldHint}>
+                            设置中另有 {modelFailures.length} 个提供方当前不可用：
+                            {modelFailures.map(f => `${f.name ?? f.id}${f.message !== undefined ? `（${f.message}）` : ''}`).join('；')}
+                          </span>
+                        )}
                       </div>
                       <div className={css.field}>
                         <span className={css.fieldLabel}>Model</span>
-                        <span className={css.rowControl}><select className={css.select} value={botModel} onChange={e => setBotModel(e.target.value)} disabled={modelsLoading || botProvider === ''}>
+                        <span className={css.rowControl}><select
+                          className={css.select}
+                          value={botModel}
+                          onChange={e => {
+                            setBotModel(e.target.value)
+                            setBotEffort(prev => alignEffort(botProvider, e.target.value, prev))
+                          }}
+                          disabled={modelsLoading || botProvider === ''}
+                        >
                           {(modelGroups.find(g => g.id === botProvider)?.models ?? []).map(model => (
                             <option key={model.id} value={model.id}>{model.name ?? model.id}</option>
                           ))}
+                          {botModel !== '' && !(modelGroups.find(g => g.id === botProvider)?.models ?? []).some(m => m.id === botModel) && (
+                            <option value={botModel}>{botModel}（当前值，设置中未列出）</option>
+                          )}
                         </select></span>
-                        <span className={css.fieldHint}>{modelError !== undefined ? `读取失败：${modelError}` : '该 Bot 每次回答使用的模型'}</span>
+                        <span className={css.fieldHint}>{modelError !== undefined ? `读取失败：${modelError}` : '模型与提供方来自 DSH 设置，可随时切换'}</span>
                       </div>
                       <div className={css.field}>
                         <span className={css.fieldLabel}>思考强度</span>
                         <span className={css.rowControl}><select className={css.select} value={botEffort} onChange={e => setBotEffort(e.target.value)}>
-                          <option value="max">max</option>
-                          <option value="high">high</option>
-                          <option value="low">low</option>
-                          <option value="off">off</option>
+                          {(() => {
+                            const published = effortsFor(botProvider, botModel).options
+                            // A model that publishes levels shows exactly those. One that
+                            // publishes none keeps the deployment's classic set, so this
+                            // never removes a choice the host still accepts.
+                            const options = published.length > 0
+                              ? published
+                              : [{ id: 'off', name: 'off' }, { id: 'low', name: 'low' }, { id: 'high', name: 'high' }, { id: 'max', name: 'max' }]
+                            const items = [...options]
+                            if (items.length > 0 && !items.some(o => o.id === '')) items.unshift({ id: '', name: '默认' })
+                            if (botEffort !== '' && !items.some(o => o.id === botEffort)) {
+                              items.unshift({ id: botEffort, name: `${botEffort}（当前值，设置中未列出）` })
+                            }
+                            return items.map(o => <option key={o.id === '' ? '__default' : o.id} value={o.id}>{o.name}</option>)
+                          })()}
                         </select></span>
-                        <span className={css.fieldHint}>越高越稳，也越慢</span>
+                        <span className={css.fieldHint}>档位由该模型在 DSH 设置中提供；越高越稳，也越慢</span>
                       </div>
                       <div className={css.field}>
                         <span className={css.fieldLabel}>工作目录</span>

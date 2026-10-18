@@ -270,13 +270,13 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
    * the row already says so. `BotFormDialog` still reports catalog errors in the form,
    * which is where a user can act on them.
    */
-  useEffect(() => {
-    let cancelled = false
+  const refreshModelGroups = useCallback(() => {
     void remote.listModelGroups()
-      .then(groups => { if (!cancelled && groups.length > 0) setModelGroups(groups) })
+      .then(groups => { if (groups.length > 0) setModelGroups(groups) })
       .catch(() => undefined)
-    return () => { cancelled = true }
   }, [remote])
+
+  useEffect(() => { refreshModelGroups() }, [refreshModelGroups])
 
   // Stable reference — without useCallback this recreates every render, restarting the
   // polling interval inside BotConversationPanel on every state change.
@@ -433,6 +433,7 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
             bots={visibleBots}
             runs={runs}
             modelGroups={modelGroups}
+            onRefreshModels={refreshModelGroups}
             tasks={snapshot?.tasks ?? []}
             skills={skills}
             skillsError={skillsError}

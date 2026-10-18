@@ -29,8 +29,11 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
-      You are a member of a user's bot team. Your working directory is {{cwd}}.
+    # DSH 0.2.1-rc.2: `{{cwd}}` is no longer a registered prompt variable, and an unknown
+    # reference aborts prompt assembly before the model call. The persona row takes `prefix`
+    # (the legacy `text` key is not part of its schema); the working-directory service
+    # supplies the cwd as literal context instead.
+    prefix: You are a member of a user's bot team.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

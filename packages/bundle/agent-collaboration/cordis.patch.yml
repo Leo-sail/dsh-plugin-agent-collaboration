@@ -113,7 +113,13 @@
             config:
               prefix: >-
                 You are a member of the user's bot team, powered by the {{model}} model.
-              suffix: Your working directory is {{cwd}}.
+              # DSH 0.2.1-rc.2 dropped the built-in `{{cwd}}` prompt variable, and an unknown
+              # reference now aborts prompt assembly BEFORE the model call — with this suffix in
+              # place every Bot turn died with
+              #   unknown prompt variable "{{cwd}}" in section "deployment:persona-suffix"
+              # The working-directory service supplies the current directory as literal context,
+              # so the suffix stays empty (host guidance: omit or clear an otherwise empty one).
+              suffix: '' 
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
