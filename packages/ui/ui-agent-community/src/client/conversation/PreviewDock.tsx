@@ -27,13 +27,16 @@ function ext(name: string): string {
 }
 
 /** One preview surface, chosen by the file's type. */
-export function PreviewDock({ requests, active, remote, onSelect, onClose }: {
+export function PreviewDock({ requests, active, remote, onSelect, onCloseTab, onCloseAll }: {
   /** Every file opened in this dock; the header tabs switch between them (DSH parity). */
   readonly requests: ReadonlyArray<PreviewRequest>
   readonly active: number
   readonly remote?: CommunityRemote | undefined
   readonly onSelect: (index: number) => void
-  readonly onClose: () => void
+  /** Close one tab (its own ×). */
+  readonly onCloseTab: (index: number) => void
+  /** Rightmost ×: close every open preview. */
+  readonly onCloseAll: () => void
 }): ReactElement {
   const request = requests[Math.min(Math.max(active, 0), requests.length - 1)]!
   const { file, roomId, runId, index } = request
@@ -148,12 +151,20 @@ export function PreviewDock({ requests, active, remote, onSelect, onClose }: {
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}
           >
-            {item.file.name}
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.file.name}</span>
+            <span
+              role="button"
+              aria-label={`关闭 ${item.file.name}`}
+              onClick={(event) => { event.stopPropagation(); onCloseTab(i) }}
+              style={{ marginLeft: 6, color: 'var(--dsw-alias-label-tertiary, #8a929c)', cursor: 'pointer' }}
+            >
+              ×
+            </span>
           </button>
         ))}
         <span style={{ flex: 1 }} />
         <button type="button" onClick={openNative} style={{ height: 24, padding: '0 8px', border: '1px solid var(--dsw-alias-border-secondary, #e4e7eb)', borderRadius: 6, background: 'transparent', fontSize: 11, cursor: 'pointer' }}>用应用打开</button>
-        <button type="button" onClick={onClose} aria-label="关闭预览" style={{ width: 24, height: 24, border: 'none', background: 'transparent', fontSize: 16, cursor: 'pointer' }}>×</button>
+        <button type="button" onClick={onCloseAll} aria-label="关闭全部预览" title="关闭全部预览" style={{ width: 24, height: 24, border: 'none', background: 'transparent', fontSize: 16, cursor: 'pointer' }}>×</button>
       </header>
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>{body}</div>
     </section>

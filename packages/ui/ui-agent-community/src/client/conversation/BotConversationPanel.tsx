@@ -576,13 +576,16 @@ export function BotConversationPanel({
             active={activePreview}
             remote={remote}
             onSelect={setActivePreview}
-            onClose={() => {
+            onCloseTab={(index) => {
               setPreviews((previous) => {
-                const next = previous.filter((_, i) => i !== activePreview)
-                setActivePreview(Math.max(0, Math.min(activePreview, next.length - 1)))
+                const next = previous.filter((_, i) => i !== index)
+                const nextActive = index < activePreview ? activePreview - 1
+                  : Math.max(0, Math.min(activePreview, next.length - 1))
+                setActivePreview(nextActive)
                 return next
               })
             }}
+            onCloseAll={() => { setPreviews([]); setActivePreview(0) }}
           />
         )}
       </div>
