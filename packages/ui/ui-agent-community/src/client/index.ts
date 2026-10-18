@@ -151,6 +151,8 @@ const contribution = {
     descriptor('declineGroup', [param('input', obj('DeclineGroupRequest'))]),
     // P0-2/P0-3/P0-1 new RPCs
     descriptor('listLedger', [param('roomId', str()), param('opts', obj('LedgerPageOpts'))]),
+    // Deliverable cards: preview one declared file (the host never accepts a bare path).
+    descriptor('readDeliverablePreview', [param('input', obj('ReadDeliverablePreviewRequest'))]),
     descriptor('approveBotToolCall', [param('callId', str()), param('outcome', str())]),
     // A bot's question card answers back here: `answer` or `skip`.
     descriptor('answerBotQuestion', [param('input', obj('AnswerBotQuestionRequest'))]),
@@ -262,7 +264,18 @@ export function apply(ctx: ClientContext): void {
 
   interface Capabilities {
     community: RemoteFace | undefined
-    session: { modelCatalog(): Promise<unknown> } | undefined
+    session: {
+      modelCatalog(): Promise<unknown>
+      canOpenWorkspacePath(): Promise<boolean>
+      workspacePathApplications(request: { path: string }): Promise<Array<{
+        id: string; name: string; default: boolean; icon: string | null
+      }>>
+      openWorkspacePath(request: {
+        path: string
+        application?: string
+        action?: 'reveal'
+      }): Promise<{ opened: boolean }>
+    } | undefined
     workspace: { pickDirectory(): Promise<string | null> } | undefined
   }
   const caps: Capabilities = { community: undefined, session: undefined, workspace: undefined }
@@ -289,7 +302,18 @@ export function apply(ctx: ClientContext): void {
 
   // Optional Host faces: the panel must survive their absence.
   ctx.inject(['remote.session'], (scope) => {
-    caps.session = scope.remote['session'] as { modelCatalog(): Promise<unknown> }
+    caps.session = scope.remote['session'] as {
+      modelCatalog(): Promise<unknown>
+      canOpenWorkspacePath(): Promise<boolean>
+      workspacePathApplications(request: { path: string }): Promise<Array<{
+        id: string; name: string; default: boolean; icon: string | null
+      }>>
+      openWorkspacePath(request: {
+        path: string
+        application?: string
+        action?: 'reveal'
+      }): Promise<{ opened: boolean }>
+    }
     return () => { caps.session = undefined }
   })
   ctx.inject(['uiWorkspace'], (scope) => {
@@ -418,6 +442,29 @@ export function apply(ctx: ClientContext): void {
     confirmGroup: (input) => call('confirmGroup', input),
     declineGroup: (input) => call('declineGroup', input),
     listLedger: (roomId, opts) => call('listLedger', roomId, opts),
+    readDeliverablePreview: (input) => call('readDeliverablePreview', input),
+    // The OS-open surface is the host's Session Remote, already mounted for the panel
+    // (`remote.session`); only the type was narrowed to modelCatalog. A host without a
+    // desktop answers `false`, and the card then simply hides its open control.
+    canOpenWorkspacePath: async () => {
+      const session = caps.session
+      if (session === undefined) return false
+      try {
+        return await session.canOpenWorkspacePath()
+      } catch {
+        return false
+      }
+    },
+    workspacePathApplications: async (path) => {
+      const session = caps.session
+      if (session === undefined) return []
+      return await session.workspacePathApplications({ path })
+    },
+    openWorkspacePath: async (request) => {
+      const session = caps.session
+      if (session === undefined) throw new Error('当前宿主没有可用的文件打开能力')
+      return await session.openWorkspacePath(request)
+    },
     approveBotToolCall: (callId, outcome) => call('approveBotToolCall', callId, outcome),
     answerBotQuestion: (input) => call('answerBotQuestion', input),
     markRoomRead: (input) => call('markRoomRead', input),

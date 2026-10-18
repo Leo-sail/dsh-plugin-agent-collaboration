@@ -18,10 +18,11 @@
  *  approval     — member session triggered an approval prompt; awaiting user decision
  *  error        — run failed with a specific error
  *  dispatch     — host agent scheduling action (system row, non-bubble)
+ *  deliverable  — files the turn declared for the user (rendered as file cards)
  */
 
 import { randomUUID } from 'node:crypto'
-import type { BotId, BotMessageAttachment, BotRoomId, BotRunId } from './types.ts'
+import type { BotId, BotMessageAttachment, BotRoomId, BotRunId, DeliveredFile } from './types.ts'
 
 export type LedgerEntryType =
   | 'user'
@@ -33,6 +34,7 @@ export type LedgerEntryType =
   | 'question'
   | 'error'
   | 'dispatch'
+  | 'deliverable'
 
 interface LedgerEntryBase {
   readonly id: string
@@ -116,6 +118,22 @@ export interface LedgerToolResultEntry extends LedgerEntryBase {
   readonly output: string
 }
 
+/**
+ * Files a turn declared as deliverables for the user.
+ *
+ * One row per turn, not one per file: the card group renders after the reply, so a
+ * second row for the same turn would render as a second, disconnected card stack.
+ * Repeated declarations in one turn merge into this row's `files`.
+ */
+export interface LedgerDeliverableEntry extends LedgerEntryBase {
+  readonly type: 'deliverable'
+  readonly botId: BotId
+  readonly botName: string
+  /** Turn identity: the card group belongs to this reply. */
+  readonly runId: BotRunId
+  readonly files: readonly DeliveredFile[]
+}
+
 export interface LedgerApprovalEntry extends LedgerEntryBase {
   readonly type: 'approval'
   readonly botId: BotId
@@ -171,6 +189,7 @@ export type LedgerEntry =
   | LedgerQuestionEntry
   | LedgerErrorEntry
   | LedgerDispatchEntry
+  | LedgerDeliverableEntry
 
 /**
  * A ledger entry before the projector assigns its identity. Distributing over the
@@ -236,8 +255,10 @@ export interface SeedRoomItem {
        * and tool rows are reconstructed from the message that carried them so a
        * restart does not erase the thinking and tool sections.
        */
-      readonly actor?: 'bot-text' | 'bot-reasoning' | 'tool-call' | 'tool-result' | undefined
+      readonly actor?: 'bot-text' | 'bot-reasoning' | 'tool-call' | 'tool-result' | 'deliverable' | undefined
       readonly callId?: string | undefined
+      /** Deliverable file metadata for a {@link LedgerDeliverableEntry} rebuild. */
+      readonly files?: readonly DeliveredFile[] | undefined
       readonly name?: string | undefined
       readonly args?: string | undefined
       readonly ok?: boolean | undefined
@@ -317,6 +338,16 @@ export class LedgerProjector {
           botName: item.senderName,
           ...(item.runId !== undefined ? { runId: item.runId as BotRunId } : {}),
           text: item.reasoning ?? item.text,
+        })
+      } else if (item.actor === 'deliverable') {
+        if (item.files === undefined || item.files.length === 0) continue
+        list.push({
+          ...base,
+          type: 'deliverable',
+          botId: (item.botId ?? item.senderName) as BotId,
+          botName: item.senderName,
+          runId: (item.runId ?? item.id) as BotRunId,
+          files: item.files,
         })
       } else if (item.actor === 'tool-call') {
         list.push({
@@ -875,8 +906,47 @@ export class LedgerProjector {
     return out
   }
 
+  // ── deliverables waiting for their turn to settle ──────────────────────────
+
+  /**
+   * Files a bot declared during the current turn, keyed by `(room, run)`.
+   *
+   * Kept off the ledger until the turn ends: the card group renders after the reply,
+   * and the settled `BotMessage` is what rebuilds it after a restart. Held here so a
+   * second declaration in the same turn merges into one card group instead of two.
+   */
+  private readonly pendingDeliverables = new Map<string, DeliveredFile[]>()
+
+  private static deliverKey(roomId: string, runId: string): string {
+    return `${roomId}\u0000${runId}`
+  }
+
+  recordDeliverables(roomId: string, runId: string, files: readonly DeliveredFile[]): void {
+    if (files.length === 0) return
+    const key = LedgerProjector.deliverKey(roomId, runId)
+    const merged = new Map((this.pendingDeliverables.get(key) ?? []).map(f => [f.path, f] as const))
+    for (const file of files) merged.set(file.path, file)
+    this.pendingDeliverables.set(key, [...merged.values()])
+  }
+
+  /** Drop a failed run's pending deliverables (the turn never reached the user). */
+  discardDeliverables(roomId: string, runId: string): void {
+    this.pendingDeliverables.delete(LedgerProjector.deliverKey(roomId, runId))
+  }
+
+  /** Take (and clear) the deliverables recorded for one run. */
+  deliverablesFromRun(roomId: string, runId: string): DeliveredFile[] {
+    const key = LedgerProjector.deliverKey(roomId, runId)
+    const files = this.pendingDeliverables.get(key) ?? []
+    this.pendingDeliverables.delete(key)
+    return files
+  }
+
   /** Remove all entries for a room (called by clearMessages). */
   clearRoom(roomId: string): void {
+    for (const key of [...this.pendingDeliverables.keys()]) {
+      if (key.startsWith(`${roomId}\u0000`)) this.pendingDeliverables.delete(key)
+    }
     this.byRoom.delete(roomId)
     this.pendingBatch.delete(roomId)
     this.subscribers.delete(roomId)

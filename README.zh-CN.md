@@ -25,14 +25,16 @@
 - **单聊与群聊。** 房间就是成员列表。点名某个 Bot 的消息只路由给它；不点名的消息由**每个成员各自回答**——因为一句问候是说给整个房间的。
 - **运行可排队、可租约、可恢复。** 每次回答是一个带租约与心跳的 run。运行时进程死掉的 run 会被回收而不是把房间卡住，房间在你去做别的事时照常工作。
 - **转录是持久的。** 面板画的是运行过程中写下的 ledger（消息、工具调用与结果、审批、错误），不是会话日志。被压缩掉的旧历史会换成一条摘要，而不是悄悄消失。
-- **14 个模型可调用工具**，Bot 因此可以建房间、把活交给另一个 Bot、把需求拆成任务并回报：
+- **15 个模型可调用工具**，Bot 因此可以建房间、把活交给另一个 Bot、把需求拆成任务并回报：
   `agent_community_create_bot`、`agent_community_update_bot`、`agent_community_list_bots`、
   `agent_community_create_room`、`agent_community_send_message`、`agent_community_list_runs`、
   `agent_community_get_context`、`agent_community_post_message`、`agent_community_task_decompose`、
   `agent_community_task_assign`、`agent_community_task_status`、`agent_community_task_report`、
-  `agent_community_submit_final`、`agent_community_remember`。
+  `agent_community_submit_final`、`agent_community_remember`、`agent_community_deliver`。
 - **模型全部来自 DSH 设置。** Bot 设置与输入框的模型菜单都读取部署实时的模型目录——全部提供方、全部模型、
   它们在设置里的显示名与思考档位。没有任何厂商/模型名被写死；在设置里新增或改名的提供方无需重启即可出现。
+- **Bot 交付的文件有卡片。** Bot 用 `agent_community_deliver` 声明它产出的文件；该回合回复下方会出现文件卡片——
+  在面板里预览、用本机关联应用打开、在 Finder 中定位。文件可以在 Bot 工作区里，也可以是任意绝对路径。
 - **附件。** 消息可以带文件与图片，存放在接收方 Bot 自己的工作区里，并附到模型看到的内容上；气泡里显示的仍然是你原样输入的东西。
 - **可手动触发的压缩。** `/compact` 用该房间自己的 Bot 模型把较早的对话总结成摘要，原样保留最近几条，并**退掉承载旧历史的会话**——所以下一次回答是从摘要继续，而不是把整份记录重放一遍。
 - **压缩之后未读依然准确。** 已读水位记的是"读到什么时间"，而不是只记一个消息 id，因此被压缩过的房间仍然能告诉你哪些是新的。
@@ -61,7 +63,7 @@ dsh plugin --profile <你的profile> add dsh-plugin-agent-collaboration
 
 ```bash
 dsh plugin --profile <你的profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.2/dsh-plugin-agent-collaboration-0.2.2.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.0/dsh-plugin-agent-collaboration-0.3.0.tgz
 ```
 
 同一份产物，附在 release 上——不想经过 npm 就直接用它。
@@ -87,7 +89,7 @@ ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/
 > **注意**：仓库里的当前版本是 **0.2.2**，与下面的链接一致；改动见 [CHANGELOG.md](CHANGELOG.md)，
 > 装好后的自测步骤见 [ACCEPTANCE.zh-CN.md](ACCEPTANCE.zh-CN.md)。
 
-把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.2/dsh-plugin-agent-collaboration-0.2.2.tgz
+把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.0/dsh-plugin-agent-collaboration-0.3.0.tgz
 把本插件装进目标 DSH profile，重启 DSH，并确认侧栏出现「Bots团队」。
 ```
 

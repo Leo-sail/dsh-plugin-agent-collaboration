@@ -107,6 +107,18 @@ export class Maintenance {
         rows.push({ ...base, id: callId, at: m.createdAt, actor: 'tool-call' as const, text: '', callId, name: tool.name, args: tool.detail ?? '' })
         rows.push({ ...base, id: `${callId}-result`, at: m.createdAt, actor: 'tool-result' as const, text: '', callId, ok: tool.status !== 'error', output: tool.detail ?? '' })
       }
+      // The files this turn delivered. Rebuilt after the answer so the card group keeps
+      // its place below the reply; without this the cards vanished on the next reload.
+      if (m.sender.kind !== 'user' && m.deliverables !== undefined && m.deliverables.length > 0) {
+        rows.push({
+          ...base,
+          id: `${m.id}-deliverables`,
+          at: m.createdAt,
+          actor: 'deliverable' as const,
+          text: '',
+          files: m.deliverables,
+        })
+      }
       rows.push({ ...base, id: m.id, at: m.createdAt, actor: 'bot-text' as const, text: m.text,
         ...(usage !== undefined ? { usage } : {}),
         // A user row's attachment metadata rides the rebuild too: the panel renders the

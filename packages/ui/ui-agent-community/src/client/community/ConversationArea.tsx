@@ -110,6 +110,7 @@ export function ConversationArea({
       <div style={{ gridRow: '2 / -1', height: '100%', minHeight: 0, overflow: 'hidden' }}>
         <BotConversationPanel
           key={`${roomId}#${transcriptEpoch}`}
+          remote={remote}
           roomId={roomId!}
           roomName={room.directBotId !== undefined
             ? (bots.find(b => b.id === room.directBotId)?.name ?? room.name ?? 'Bot 会话')

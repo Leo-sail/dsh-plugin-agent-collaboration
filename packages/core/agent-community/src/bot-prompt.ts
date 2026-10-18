@@ -50,7 +50,8 @@ export const SHADOWED_SECTIONS: ReadonlyArray<{ readonly name: string; readonly 
   // "Use the workflow tool ONLY when…" — a bot orchestrates room members (`dispatch`), not
   // hidden child agents, and the tool itself is masked.
   { name: 'tool:workflow', order: 2_600 },
-  // Deliverables panel guidance: a bot has no panel.
+  // Deliverables guidance written for DSH's own chat cards and inline file links; the room
+  // renders its own file cards, and `bots:deliverable` carries the guidance that matches it.
   { name: 'ui:deliverable-file-references', order: 9_000 },
   // The DSH checkout path: irrelevant to a bot, and misleading (it tempts file archaeology).
   { name: 'harness:source', order: 10_000 },
@@ -77,7 +78,7 @@ export interface BotPromptIdentity {
 }
 
 /**
- * The eight sections, in order.
+ * The nine sections, in order.
  *
  * Written to be read by a model that must decide what to DO, so each rule states the action
  * and its boundary rather than the principle behind it.
@@ -185,6 +186,18 @@ export function botPromptSections(identity: BotPromptIdentity): readonly BotProm
         '读当前房间的目标用 agent_community_goal（action="get"）；要改就同一个工具（有权限时）。',
         '宿主自带的 get_goal 读的是 DSH 会话目标，不是本房间的目标——别把它当房间目标用。',
         '不要自己造"私有的长期目标"，也不要把目标内容带到别的房间去。',
+      ].join('\n'),
+    },
+    {
+      name: 'bots:deliverable',
+      order: BASE + 8,
+      text: [
+        '当用户需要一个能拿走/打开的独立文件（报告、文档、表格、幻灯片、图片、导出数据等）时，在结束这一轮之前调用 agent_community_deliver 声明它：',
+        '· files 写 1–2 个最重要的文件，每项 { path, description }；path 相对你的工作区，也可以写绝对路径（工作区外的文件也能交付）；description 一句话说明。',
+        '· 只声明你确实创建/修改过、现在存在的普通文件；目录、损坏路径、符号链接会被拒绝；一次最多 8 个。',
+        '· 用户会在你这条回复下方看到文件卡片，可以预览、用本机应用打开、在 Finder 中定位；正文里不要再重复粘贴整个文件内容（除非用户要求）。',
+        '· 不要为了列出「改过的源码文件」而调用它；只交付用户真正需要拿走的那一两个文件。',
+        '· 交付不等于结束任务：群聊里仍按房间协议用 finish_task 交付结果。',
       ].join('\n'),
     },
     {

@@ -10,6 +10,7 @@ import {
   IconChevronDownOutlineRegular, IconPanelLeftOutlineRegular,
 } from './NativeIcons.tsx'
 import { TranscriptArea } from './TranscriptArea.tsx'
+import type { CommunityRemote } from '../community/types.ts'
 import { ComposerArea } from './ComposerArea.tsx'
 import { QuestionComposer, pendingQuestion } from './QuestionComposer.tsx'
 import { TaskDockCard, currentRoundTasks, currentRoundTodos, shouldShowTaskDock, type RoomTaskRow } from './TaskDockCard.tsx'
@@ -132,6 +133,8 @@ export interface BotConversationPanelProps {
   /** Populated when the skill RPC failed, so an empty group is explicable. */
   skillsError?: string | undefined
   onSend: (roomId: string, text: string, modelPayload: string, attachments: AttachmentItem[], mentions: string[]) => Promise<void>
+  /** Host RPCs for the deliverable cards (preview, OS open/reveal). */
+  remote?: CommunityRemote | undefined
   /** The room's task board, straight from the polled snapshot. */
   tasks?: ReadonlyArray<RoomTaskRow> | undefined
   /** The room's current round (its task board's counter), so the dock refreshes per round. */
@@ -204,7 +207,7 @@ function byTimeThenSequence(a: LedgerEntry, b: LedgerEntry): number {
 
 export function BotConversationPanel({
   roomId, roomName, isGroup, bots, runs, modelGroups, onRefreshModels, skills, onLoadSkill, onListSkillFiles, skillsError,
-  onSend, onStop, onApprove, onReject, onAnswerQuestion, onSkipQuestion, onCommand, onClear, listLedger, onFork, tasks, round,
+  onSend, onStop, onApprove, onReject, onAnswerQuestion, onSkipQuestion, onCommand, onClear, listLedger, onFork, tasks, round, remote,
 }: BotConversationPanelProps) {
   const [entries, setEntries] = useState<LedgerEntry[]>([])
   const [hasEarlier, setHasEarlier] = useState(false)
@@ -515,6 +518,7 @@ export function BotConversationPanel({
             A dedicated leader surface is explicitly not wanted — nothing in this
             panel special-cases the leader, and nothing should. */}
         <TranscriptArea
+          remote={remote}
           entries={entries}
           onLoadEarlier={handleLoadEarlier}
           loadingEarlier={loadingEarlier}

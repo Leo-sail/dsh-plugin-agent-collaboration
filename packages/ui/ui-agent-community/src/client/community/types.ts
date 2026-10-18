@@ -133,6 +133,8 @@ export interface CommunityRemote {
     ok?: boolean; output?: string;
     toolName?: string; outcome?: string;
     message?: string; code?: string;
+    /** Deliverable files (deliverable row only). */
+    files?: Array<{ path: string; name: string; description?: string; size?: number }>;
   }>>
   // P0-3: approval
   answerBotQuestion(input: { roomId: string; questionId: string; answer?: string; skip?: boolean }): Promise<{ ok: boolean }>
@@ -186,7 +188,38 @@ export interface CommunityRemote {
     sourceRoomId: string,
     upToMessageId: string,
   ): Promise<{ bot: { id: string; name: string }; room: { id: string } }>
+  /**
+   * Read one declared deliverable for the in-panel preview.
+   *
+   * Addressed by (room, run, index) rather than by path: the host only reads files a bot
+   * already declared, and the Bot session id never reaches the browser.
+   */
+  readDeliverablePreview(input: {
+    roomId: string
+    runId: string
+    index: number
+    offset?: number
+  }): Promise<DeliverablePreview>
+  /** Whether this host can open/reveal files in an OS application (desktop gate). */
+  canOpenWorkspacePath(): Promise<boolean>
+  /** Applications associated with one file on this machine, in OS preference order. */
+  workspacePathApplications(path: string): Promise<Array<{
+    id: string; name: string; default: boolean; icon: string | null
+  }>>
+  /** Open a file with its association (or a named app), or reveal it in the file manager. */
+  openWorkspacePath(request: {
+    path: string
+    application?: string
+    action?: 'reveal'
+  }): Promise<{ opened: boolean }>
 }
+
+/** One preview payload for a declared deliverable. */
+export type DeliverablePreview =
+  | { kind: 'text'; name: string; text: string; offset: number; truncated: boolean }
+  | { kind: 'data'; name: string; mime: string; dataUrl: string }
+  | { kind: 'binary'; name: string; size: number }
+  | { kind: 'missing'; name: string }
 
 /** The plugin's own RPC health, shown in the page's status bar while it is not ready. */
 export interface CommunityDiagnostics {

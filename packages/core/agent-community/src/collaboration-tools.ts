@@ -28,6 +28,7 @@
  *     because that is where coordination happens.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { DeliveredFile } from './types.ts'
 
 /** What the tools need from the service layer. */
 export interface CollaborationToolDeps {
@@ -157,6 +158,18 @@ export interface CollaborationToolDeps {
   }): Promise<{ status: 'answered' | 'skipped' | 'expired'; answer: string }>
   /** The run that is asking, so the question row lands inside its turn. */
   currentRunId(roomId: string, botId: string): string | undefined
+  /**
+   * Declare files as deliverables for the user.
+   *
+   * The service owns path resolution (relative to the bot's workspace), the
+   * regular-file checks and the per-turn cap; the tool only carries the verdict back
+   * to the model, together with what the room would show.
+   */
+  deliverFiles(input: {
+    roomId: string
+    botId: string
+    files: ReadonlyArray<{ path: string; description?: string | undefined }>
+  }): Promise<{ ok: boolean; files?: readonly DeliveredFile[]; error?: string | undefined }>
   /**
    * Load one skill's body by name.
    *
@@ -919,6 +932,71 @@ export function registerCollaborationTools(
       // so without this the model could keep calling tools after declaring completion.
       exec.concludeTurn?.()
       return { value: { ok: true, finished: true }, text: '已汇报并结束本轮。' }
+    },
+  })
+
+  // ── agent_community_deliver (files for the user) ───────────────────────────
+  //
+  // The room's own equivalent of DSH's `present`, but registered natively here: the bot
+  // preset does not mount the host's present tool, and a hidden bot session has no DSH
+  // card of its own to write to. Same contract as present — existing regular files only,
+  // relative paths against the workspace, absolute paths allowed — so the model's habit
+  // transfers unchanged.
+  add({
+    name: 'agent_community_deliver',
+    description:
+      'Declare files you have already created as final deliverables for the user. Use it when the '
+      + 'user needs a separate file (documents, spreadsheets, slide decks, images, reports); prefer '
+      + 'your final reply when that suffices. The user opens the current files; their contents are '
+      + 'not copied. Paths are relative to your workspace or absolute. Declare the 1-2 most '
+      + 'important files, at most 4 per call.',
+    properties: {
+      files: {
+        type: 'array',
+        required: true,
+        description: 'The deliverables; usually the 1-2 most important files, at most 4 per call.',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            path: {
+              type: 'string',
+              required: true,
+              description: 'Path of an existing regular file. Relative paths use the bot workspace.',
+            },
+            description: { type: 'string', description: 'Brief description for the user.' },
+          },
+        },
+      },
+    },
+    required: ['files'],
+    run: async (args, exec) => {
+      const who = caller(exec)
+      if (typeof who === 'string') return { value: { ok: false }, text: who }
+      const raw = args['files']
+      const files: Array<{ path: string; description?: string }> = []
+      if (Array.isArray(raw)) {
+        for (const item of raw) {
+          if (item === null || typeof item !== 'object') continue
+          const entry = item as Record<string, unknown>
+          const path = typeof entry['path'] === 'string' ? entry['path'].trim() : ''
+          if (path === '') continue
+          const description = typeof entry['description'] === 'string'
+            ? entry['description'].trim()
+            : ''
+          files.push(description === '' ? { path } : { path, description })
+        }
+      }
+      if (files.length === 0) {
+        return { value: { ok: false }, text: 'files 至少要有 1 个文件（每项 { path, description }）。' }
+      }
+      const result = await deps.deliverFiles({ roomId: who.roomId, botId: who.botId, files })
+      if (!result.ok) return { value: { ok: false }, text: result.error ?? '交付失败。' }
+      const names = (result.files ?? []).map(file => file.name)
+      return {
+        value: { ok: true, files: result.files ?? [] },
+        text: `已交付 ${names.length} 个文件：${names.join('、')}。用户会在你这条回复下方看到文件卡片。`,
+      }
     },
   })
 

@@ -34,15 +34,20 @@ produced it is gone.
 - **A durable transcript.** The panel draws from a ledger written as the run happens (messages, tool
   calls and their results, approvals, errors), not from the session log. Compacted-away history is
   replaced by a summary rather than silently dropped.
-- **14 model-facing tools**, so a Bot can create rooms, hand work to another Bot, decompose a request
+- **15 model-facing tools**, so a Bot can create rooms, hand work to another Bot, decompose a request
   into tasks and report on them: `agent_community_create_bot`, `agent_community_update_bot`,
   `agent_community_list_bots`, `agent_community_create_room`, `agent_community_send_message`,
   `agent_community_list_runs`, `agent_community_get_context`, `agent_community_post_message`,
   `agent_community_task_decompose`, `agent_community_task_assign`, `agent_community_task_status`,
-  `agent_community_task_report`, `agent_community_submit_final`, `agent_community_remember`.
+  `agent_community_task_report`, `agent_community_submit_final`, `agent_community_remember`,
+  `agent_community_deliver`.
 - **Models come from DSH Settings.** The Bot form and the composer's model menu read the deployment's live
   catalog — every provider, every model, its display name and its reasoning levels. Nothing about a vendor
   or a model is hard-coded; a provider added or renamed in Settings appears without restarting.
+- **File cards for what a Bot delivered.** A Bot declares the files it produced with
+  `agent_community_deliver`; the turn then shows file cards below its reply — preview in the panel,
+  open with the OS application association, or reveal in Finder. Files may live inside the Bot's
+  workspace or at any absolute path.
 - **Attachments.** Files and images can be added to a message. They are stored inside the receiving Bot's
   own workspace and appended to what the model sees; the bubble still shows exactly what you typed.
 - **Compaction that you can trigger.** `/compact` summarises the older part of a room with the room's own
@@ -82,7 +87,7 @@ see [CHANGELOG.md](CHANGELOG.md) for what a newer version changes.
 
 ```bash
 dsh plugin --profile <your-profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.2/dsh-plugin-agent-collaboration-0.2.2.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.0/dsh-plugin-agent-collaboration-0.3.0.tgz
 ```
 
 ### Installing from a checkout instead
@@ -106,7 +111,7 @@ ls -ld ~/.dsh/profiles/<your-profile>/node_modules/@dsh-plugin-agent-community/*
 
 ```text
 Install the DSH plugin at
-https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.2.2/dsh-plugin-agent-collaboration-0.2.2.tgz
+https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.0/dsh-plugin-agent-collaboration-0.3.0.tgz
 into my DSH profile, restart DSH, and confirm the "Bots团队" entry appears in the sidebar.
 ```
 

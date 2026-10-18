@@ -226,6 +226,18 @@ export interface BotMessageAttachment {
   readonly kind: 'image' | 'file'
 }
 
+/** One file a Bot declared as a deliverable for the user. */
+export interface DeliveredFile {
+  /** Canonical absolute host path; the card's open/reveal target and dedupe key. */
+  readonly path: string
+  /** Basename, the card's main label. */
+  readonly name: string
+  /** Optional one-line description supplied by the model. */
+  readonly description?: string | undefined
+  /** Byte size at declaration time, for the card's secondary line. */
+  readonly size?: number | undefined
+}
+
 export interface BotMessage {
   readonly id: BotMessageId
   readonly roomId: BotRoomId
@@ -256,6 +268,8 @@ export interface BotMessage {
   readonly sessionSeq?: SessionSeq | undefined
   readonly reasoning?: string | undefined
   readonly toolActivity?: readonly { readonly name: string; readonly status: string; readonly detail?: string | undefined }[] | undefined
+  /** Files this turn declared as deliverables; see {@link DeliveredFile}. */
+  readonly deliverables?: readonly DeliveredFile[] | undefined
   readonly usage?: BotMessageUsage | undefined
   readonly durationMs?: number | undefined
   readonly sequence?: number | undefined
@@ -548,6 +562,7 @@ export interface SettleBotRunRequest {
     readonly sessionSeq: SessionSeq
     readonly reasoning?: string | undefined
     readonly toolActivity?: readonly { readonly name: string; readonly status: string; readonly detail?: string | undefined }[] | undefined
+    readonly deliverables?: readonly DeliveredFile[] | undefined
     readonly usage?: BotMessageUsage | undefined
   } | undefined
 }

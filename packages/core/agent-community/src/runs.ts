@@ -18,6 +18,7 @@ import type {
   BotRoomId,
   BotRunId,
   BotMessageId,
+  DeliveredFile,
 } from './types.ts'
 import { VisibilityController } from './visibility.ts'
 import { toolSchemas, ToolRunner, type ToolInvocation } from './tools.ts'
@@ -254,6 +255,8 @@ export interface CommunityStateAccessor {
       sessionSeq: SessionSeq
       reasoning?: string
       toolActivity?: readonly { name: string; status: string; detail?: string }[]
+      /** Files this turn declared with `agent_community_deliver`. */
+      deliverables?: readonly DeliveredFile[]
       usage?: { uncachedInputTokens: number; outputTokens: number; totalTokens: number }
     }
   }): Promise<RunSnapshot>
@@ -439,6 +442,9 @@ export class RunExecutor {
       // A failed turn must not leave a row on `streaming: true`, or the panel shows
       // "处理中…" over an answer that will never come and the turn looks live forever.
       this.ledger?.settleRunText(run.roomId, run.id)
+      // Its declared files are dropped too: the turn never reached the user, and a card
+      // group must not outlive the reply that would have introduced it.
+      this.ledger?.discardDeliverables(run.roomId, run.id)
       this.ledger?.releaseLiveRow(run.roomId, bot.id)
       throw error
     }
@@ -494,12 +500,30 @@ export class RunExecutor {
     // and without this a reload left the answer and the reasoning in place while the
     // turn's tools silently vanished from the transcript.
     const toolActivity = this.ledger?.toolActivityFromRun(run.roomId, run.id) ?? []
+    // ── THE FILES THIS TURN DELIVERED ─────────────────────────────────────────
+    //
+    // The deliver tool kept them out of the ledger until the turn ended (the card group
+    // renders AFTER the reply, and a row pushed mid-turn would let a retry duplicate it).
+    // Read them before the row is released, stamp one `deliverable` row so the live panel
+    // sees the cards too, and carry them into the settled message for restarts.
+    const deliverables = this.ledger?.deliverablesFromRun(run.roomId, run.id) ?? []
+    if (deliverables.length > 0) {
+      this.ledger?.push({
+        type: 'deliverable',
+        roomId: run.roomId as never,
+        botId: bot.id as never,
+        botName: bot.name,
+        runId: run.id as never,
+        files: deliverables,
+      } as never)
+    }
     this.ledger?.releaseLiveRow(run.roomId, bot.id)
     return {
       text: outcome.text,
       sessionSeq: 0 as SessionSeq,
       ...(outcome.reasoning !== '' ? { reasoning: outcome.reasoning } : {}),
       ...(toolActivity.length > 0 ? { toolActivity } : {}),
+      ...(deliverables.length > 0 ? { deliverables } : {}),
     }
   }
 

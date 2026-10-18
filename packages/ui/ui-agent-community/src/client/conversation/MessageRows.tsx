@@ -6,6 +6,9 @@ import {
   type SettledReason, type TurnFlowItem } from './turnFlow.tsx'
 import { processKindOf } from './processSteps.tsx'
 import { avatarStyle, nameLabel, botEmoji } from './styles.ts'
+import { DeliverableGroup } from './DeliverableCard.tsx'
+import type { CommunityRemote } from '../community/types.ts'
+import type { DeliveredFile } from './types.ts'
 
 // The user row lives next to the turn modules; re-exported so `TranscriptArea`
 // keeps its single import site.
@@ -13,7 +16,7 @@ export { UserMessage } from './userMessage.tsx'
 
 // ── BotTurn ───────────────────────────────────────────────────────────────────
 
-export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runStartedAtMs, stopped = false }: {
+export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runStartedAtMs, stopped = false, remote }: {
   group: TurnGroup
   /**
    * Duration computed from the host's run record (finishedAt - startedAt).
@@ -45,9 +48,28 @@ export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runS
   bots?: ReadonlyArray<{ id: string; name: string; avatarSeed?: string | undefined }> | undefined
   /** Fork FROM a message: receives that message's id. */
   onFork?: ((messageId: string) => void) | undefined
+  /** Host RPCs for the deliverable cards (preview, OS open/reveal). */
+  remote?: CommunityRemote | undefined
 }) {
-  const toolCalls = group.entries.filter(e => e.type === 'tool-call')
-  const toolResults = group.entries.filter(e => e.type === 'tool-result')
+  // ── DELIVERED FILES ────────────────────────────────────────────────────────
+  //
+  // The deliver tool's own call/result rows are replaced by the card group below:
+  // keeping them in the process section would show the same delivery twice (one raw
+  // "工具执行" row plus the file cards). The tool name is the only thing filtered —
+  // every other tool still renders its normal step.
+  const deliverCallIds = new Set(
+    group.entries
+      .filter(e => e.type === 'tool-call' && e.name === 'agent_community_deliver')
+      .map(e => e.callId),
+  )
+  const toolCalls = group.entries.filter(e => e.type === 'tool-call' && e.name !== 'agent_community_deliver')
+  const toolResults = group.entries.filter(
+    e => e.type === 'tool-result' && (e.callId === undefined || !deliverCallIds.has(e.callId)),
+  )
+  const deliverables: DeliveredFile[] = group.entries
+    .filter(e => e.type === 'deliverable')
+    .flatMap(e => e.files ?? [])
+  const deliverableEntry = group.entries.find(e => e.type === 'deliverable')
   const approvals = group.entries.filter(e => e.type === 'approval')
   const questions = group.entries.filter(e => e.type === 'question')
   const textEntries = group.entries.filter(e => e.type === 'bot-text')
@@ -134,7 +156,9 @@ export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runS
   // chose not to speak, or when a run failed before producing text — rendering an
   // empty bubble there only adds noise to the room.
   const hasText = (textEntry?.text ?? '').trim() !== ''
-  if (!hasText && !isLive && !hasReasoning && !hasProcess) return null
+  // A turn whose only output was delivered files still has something to show: without
+  // this arm the whole row vanished, taking the cards with it.
+  if (!hasText && !isLive && !hasReasoning && !hasProcess && deliverables.length === 0) return null
 
   // Native `TurnTailNodeView` (§2.2): the action row only exists once the turn
   // has a closing event — i.e. **not** while it still streams (`closing === null`
@@ -199,6 +223,22 @@ export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runS
     items.push({
       kind: 'response',
       node: <ResponseItem text={textEntry.text ?? ''} hasText={hasText} isLive={isLive} />,
+    })
+  }
+
+  // Delivery cards sit between the reply and the action tail — the same place DSH puts
+  // them, so the reading order is answer → files → actions.
+  if (deliverables.length > 0) {
+    items.push({
+      kind: 'deliverable',
+      node: (
+        <DeliverableGroup
+          files={deliverables}
+          roomId={group.entries[0]?.roomId ?? ''}
+          runId={group.runId ?? deliverableEntry?.runId ?? ''}
+          remote={remote}
+        />
+      ),
     })
   }
 

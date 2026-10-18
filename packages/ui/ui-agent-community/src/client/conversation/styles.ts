@@ -137,7 +137,7 @@ export const FLOW_GAP_AFTER_RESPONSE = 12
 export const FLOW_GAP_AROUND_PROCESS = 16
 
 /** Which kind of flow item a turn is built from (drives the gap that follows it). */
-export type FlowKind = 'reasoning' | 'process' | 'response' | 'tail' | 'running'
+export type FlowKind = 'reasoning' | 'process' | 'response' | 'deliverable' | 'tail' | 'running'
 
 /**
  * The `margin-top` the *next* flow item gets, i.e. the gap that follows `prev`.

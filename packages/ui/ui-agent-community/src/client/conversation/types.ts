@@ -13,6 +13,7 @@ export type LedgerEntryType =
   | 'question'
   | 'error'
   | 'dispatch'
+  | 'deliverable'
 
 /**
  * Token accounting for one bot turn, mirroring the provider's own breakdown.
@@ -59,6 +60,17 @@ export interface MessageAttachment {
   kind: 'image' | 'file'
 }
 
+/** One file a bot turn declared for the user; metadata only, never the bytes. */
+export interface DeliveredFile {
+  /** Canonical absolute host path; the card's open/reveal target and dedupe key. */
+  path: string
+  /** Basename, the card's main label. */
+  name: string
+  description?: string
+  /** Byte size at declaration time; the card shows it for binary types. */
+  size?: number
+}
+
 export interface LedgerEntry {
   id: string
   type: LedgerEntryType
@@ -76,6 +88,8 @@ export interface LedgerEntry {
    * keeps its bubble from rendering empty.
    */
   attachments?: MessageAttachment[]
+  /** Deliverable files (deliverable row only). */
+  files?: DeliveredFile[]
   // bot-text / bot-reasoning / tool-call / tool-result
   botId?: string
   botName?: string

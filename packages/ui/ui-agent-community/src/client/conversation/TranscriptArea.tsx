@@ -9,6 +9,7 @@ import { DispatchRow, ErrorRow } from './SimpleRows.tsx'
 import type { LedgerEntry } from './types.ts'
 import { groupIntoTurns } from './turns.ts'
 import type { TurnGroup } from './turns.ts'
+import type { CommunityRemote } from '../community/types.ts'
 
 interface Props {
   entries: LedgerEntry[]
@@ -45,10 +46,12 @@ interface Props {
   runStarts?: ReadonlyMap<string, number> | undefined
   /** Runs the user interrupted — labelled 已停止 rather than 已完成. */
   stoppedRunIds?: ReadonlySet<string> | undefined
+  /** Host RPCs for the deliverable cards (preview, OS open/reveal). */
+  remote?: CommunityRemote | undefined
 }
 
 export function TranscriptArea({
-  entries, onLoadEarlier, loadingEarlier = false, hasEarlier = false, bots, onFork, skillNames, liveRunIds, runDurations, runStarts, stoppedRunIds,
+  entries, onLoadEarlier, loadingEarlier = false, hasEarlier = false, bots, onFork, skillNames, liveRunIds, runDurations, runStarts, stoppedRunIds, remote,
 }: Props) {
   const { containerRef, atBottom, scrollToBottom, captureAnchor, restoreAnchor } = useStickToBottom()
   // Pure function of `atBottom`, which is already state: mirroring it through an effect cost an
@@ -200,6 +203,7 @@ export function TranscriptArea({
               // `data-turn-id` is the anchor the turn rail jumps to.
               <div key={key} data-turn-id={(row as TurnGroup).runId ?? ''}>
                 <BotTurn
+                  remote={remote}
                   group={row as TurnGroup}
                   bots={bots}
                   onFork={onFork}

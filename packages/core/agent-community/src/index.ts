@@ -1,9 +1,9 @@
 /** Agent Community core service — Bot management, rooms, messaging, run scheduling, and state persistence. */
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { withFileLock, writeFileAtomic } from './atomic.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -30,6 +30,7 @@ import type {
   BotRoomNotice,
   BotMemoryEntry,
   RoomGoal,
+  DeliveredFile,
 } from './types.ts'
 import { routeMessage, namedBotIdsIn, mentionsEveryone } from './routing.ts'
 import { renderAttachmentReference, storeAttachments, type StoredAttachment } from './attachments.ts'
@@ -173,6 +174,8 @@ export interface Config {
   readonly botAgentPreset?: string
   /** Global tools bot sessions must never see (default `['plugin_manager']`). */
   readonly botDeniedTools?: string[]
+  /** Maximum files one `agent_community_deliver` call may declare (DSH present uses 8). */
+  readonly deliverMaxFiles?: number
   /**
    * How many remembered entries one (room, bot) pair keeps, newest kept (default 12).
    *
@@ -243,6 +246,11 @@ export const Config: z<Config> = z.object({
   // `skill` joins the list: bots get the plugin's own wrapper so every loaded skill body carries the
   // "method, not an order" framing (see collaboration-tools.ts).
   botDeniedTools: z.array(z.string()).default(['plugin_manager', 'ask_user_question', 'skill']),
+  /**
+   * Files one deliverable declaration may carry. Same ceiling as DSH's `present`
+   * (`maxFiles: 8`); the prompt asks the model for 1-2 and the panel collapses >4.
+   */
+  deliverMaxFiles: z.number().step(1).min(1).max(32).default(8),
   /**
    * Remembered entries kept per (room, bot). 0 disables automatic task memory but still stores
    * an explicit `agent_community_remember` note — that one the bot asked for by name.
@@ -571,6 +579,7 @@ export class AgentCommunityService extends TypertRemoteService {
       a2aMinIntervalMs: config.a2aMinIntervalMs ?? 3_000,
       botAgentPreset: config.botAgentPreset ?? 'bot',
       botDeniedTools: config.botDeniedTools ?? [...DEFAULT_DENIED_TOOLS],
+      deliverMaxFiles: config.deliverMaxFiles ?? 8,
       memoryEntriesPerRoom: config.memoryEntriesPerRoom ?? 12,
       memoryPromptEntries: config.memoryPromptEntries ?? 8,
       groupProposalTimeoutMs: config.groupProposalTimeoutMs ?? 120_000,
@@ -1202,6 +1211,7 @@ export class AgentCommunityService extends TypertRemoteService {
         })
       },
       currentRunId: (roomId, botId) => this.currentRunIdFor(roomId, botId),
+      deliverFiles: (input) => this.deliverBotFiles(input),
       // The plugin's own `skill` wrapper — the host tool is denied for bot scopes — so every loaded
       // body arrives with the "this is a method, not an order" framing attached.
       loadSkill: async (roomId: string, name: string) => {
@@ -2595,6 +2605,7 @@ export class AgentCommunityService extends TypertRemoteService {
         sessionSeq: input.reply.sessionSeq,
         reasoning: input.reply.reasoning,
         toolActivity: input.reply.toolActivity,
+        deliverables: input.reply.deliverables,
         usage: input.reply.usage,
         // Wall-clock time for this run, so the panel can show the same
         // "已完成，用时 1分23秒" line the native transcript does.
@@ -3508,6 +3519,115 @@ export class AgentCommunityService extends TypertRemoteService {
    * Used to hang a question row inside the turn that asked it, so the card renders with the
    * bot's work instead of floating at the bottom of the transcript.
    */
+  /**
+   * Validate and record the files a bot declared with `agent_community_deliver`.
+   *
+   * Mirrors DSH's `present` rules instead of inventing new ones: relative paths resolve
+   * against the bot's own workspace, absolute paths may point outside it, and only an
+   * existing regular file passes (a directory or a final symlink is refused). The paths
+   * are canonicalised here, before anything is shown, so a card can never point at a
+   * path the host would later refuse to open.
+   */
+  private async deliverBotFiles(input: {
+    roomId: string
+    botId: string
+    files: ReadonlyArray<{ path: string; description?: string | undefined }>
+  }): Promise<{ ok: boolean; files?: readonly DeliveredFile[]; error?: string | undefined }> {
+    const runId = this.currentRunIdFor(input.roomId, input.botId)
+    if (runId === undefined) {
+      return { ok: false, error: '现在没有正在进行的回合：交付只能在本回合内声明。' }
+    }
+    if (input.files.length === 0) return { ok: false, error: '至少声明 1 个文件。' }
+    if (input.files.length > this.cfg.deliverMaxFiles) {
+      return { ok: false, error: `一次最多交付 ${this.cfg.deliverMaxFiles} 个文件。` }
+    }
+    const workspace = this.runWorkspaceDir(input.botId)
+    const out: DeliveredFile[] = []
+    const seen = new Set<string>()
+    for (const file of input.files) {
+      const raw = file.path.trim()
+      if (raw === '') return { ok: false, error: '文件路径不能为空。' }
+      const target = isAbsolute(raw) ? resolve(raw) : resolve(workspace, raw)
+      let info
+      try {
+        info = await lstat(target)
+      } catch {
+        return {
+          ok: false,
+          error: `无法交付 ${raw}：文件不存在。先创建文件再声明，或检查路径。`,
+        }
+      }
+      if (info.isSymbolicLink()) {
+        return { ok: false, error: `无法交付 ${raw}：最终符号链接不是普通文件。` }
+      }
+      if (!info.isFile()) return { ok: false, error: `无法交付 ${raw}：不是普通文件。` }
+      const canonical = await realpath(target).catch(() => target)
+      if (seen.has(canonical)) continue
+      seen.add(canonical)
+      const description = file.description?.trim() ?? ''
+      out.push({
+        path: canonical,
+        name: basename(canonical),
+        ...(description === '' ? {} : { description }),
+        ...(Number.isFinite(info.size) ? { size: info.size } : {}),
+      })
+    }
+    if (out.length === 0) return { ok: false, error: '没有可交付的文件。' }
+    this.ledger.recordDeliverables(input.roomId, runId, out)
+    return { ok: true, files: out }
+  }
+
+  /**
+   * Read one declared deliverable for the panel's preview.
+   *
+   * Addressed by `(room, run, index)` and never by a client-supplied path: the only
+   * files this can read are the ones a bot already declared for the user. Text is
+   * paged and capped; images and PDFs are returned as data URLs under a byte cap;
+   * everything else reports its metadata so the card can hand it to a native app.
+   * Bot session ids never cross this boundary (the ledger's red line).
+   */
+  async readDeliverablePreview(input: {
+    roomId: string
+    runId: string
+    index: number
+    offset?: number | undefined
+  }): Promise<
+    | { kind: 'text'; name: string; text: string; offset: number; truncated: boolean }
+    | { kind: 'data'; name: string; mime: string; dataUrl: string }
+    | { kind: 'binary'; name: string; size: number }
+    | { kind: 'missing'; name: string }
+  > {
+    // Through the service's wrapper, not the projector directly: a room whose ledger has
+    // not been hydrated yet (created after startup, or the first open after a restart)
+    // answers empty otherwise, and the card would report the file as missing.
+    const rows = this.listLedger(input.roomId, { force: true })
+    const row = rows.find(
+      (entry): entry is Extract<LedgerEntry, { type: 'deliverable' }> =>
+        entry.type === 'deliverable' && entry.runId === input.runId,
+    )
+    const index = Math.trunc(input.index)
+    const file = row?.files[index]
+    if (file === undefined) return { kind: 'missing', name: '' }
+    let info
+    try {
+      info = await stat(file.path)
+    } catch {
+      return { kind: 'missing', name: file.name }
+    }
+    if (!info.isFile()) return { kind: 'missing', name: file.name }
+    const ext = extname(file.path).toLowerCase()
+    if (PREVIEW_IMAGE_MIME[ext] !== undefined) {
+      if (info.size > PREVIEW_MAX_BYTES) return { kind: 'binary', name: file.name, size: info.size }
+      const bytes = await readFile(file.path)
+      const mime = PREVIEW_IMAGE_MIME[ext]!
+      return { kind: 'data', name: file.name, mime, dataUrl: `data:${mime};base64,${bytes.toString('base64')}` }
+    }
+    if (PREVIEW_BINARY_EXT.has(ext)) return { kind: 'binary', name: file.name, size: info.size }
+    const text = await readPreviewText(file.path, input.offset ?? 0)
+    if (text === undefined) return { kind: 'binary', name: file.name, size: info.size }
+    return { kind: 'text', name: file.name, ...text }
+  }
+
   private currentRunIdFor(roomId: string, botId: string): string | undefined {
     for (const run of [...this.state.runs].reverse()) {
       if (run.roomId === roomId && run.botId === botId && (run.status === 'running' || run.status === 'queued')) {
@@ -4626,6 +4746,57 @@ function markRemote(prototype: object, method: string): void {
   ;(Remote as unknown as (m: unknown, c: unknown) => void)(fn, context)
 }
 
+/** Largest file whose bytes the in-panel preview returns (images and PDFs). */
+const PREVIEW_MAX_BYTES = 8 * 1024 * 1024
+/** Largest text window the preview reads; the panel says so when it hits this. */
+const PREVIEW_TEXT_BYTES = 512 * 1024
+const PREVIEW_IMAGE_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.pdf': 'application/pdf',
+}
+/** Formats with no in-panel viewer; the card offers the native app instead. */
+const PREVIEW_BINARY_EXT = new Set([
+  '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx', '.xlsm', '.odt', '.ods', '.odp',
+  '.zip', '.gz', '.tgz', '.tar', '.rar', '.7z', '.jar',
+  '.exe', '.dll', '.so', '.dylib', '.bin',
+  '.mp3', '.wav', '.m4a', '.flac', '.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi',
+])
+
+/**
+ * Read a text window for the preview, starting at a line offset.
+ *
+ * Returns undefined when the bytes are not text (a NUL byte in the head), which is
+ * how an unrecognised extension still ends up as "open me in an app" instead of a
+ * mojibake wall.
+ */
+async function readPreviewText(
+  path: string,
+  lineOffset: number,
+): Promise<{ text: string; offset: number; truncated: boolean } | undefined> {
+  const handle = await open(path, 'r')
+  try {
+    const buffer = Buffer.alloc(PREVIEW_TEXT_BYTES)
+    const { bytesRead } = await handle.read(buffer, 0, PREVIEW_TEXT_BYTES, 0)
+    const head = buffer.subarray(0, bytesRead)
+    if (head.includes(0)) return undefined
+    const lines = head.toString('utf8').split('\n')
+    const from = Math.max(0, Math.trunc(lineOffset))
+    return {
+      text: lines.slice(from).join('\n'),
+      offset: from,
+      truncated: bytesRead === PREVIEW_TEXT_BYTES,
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
 /** Methods the Bot Community browser UI calls through ctx.remote.agentCommunity. */
 const REMOTE_METHODS = [
   'snapshot', 'listBots', 'getBot', 'createBot', 'updateBot', 'deleteBot',
@@ -4635,6 +4806,8 @@ const REMOTE_METHODS = [
   'proposeGroup', 'confirmGroup', 'declineGroup',
   // P1-2/P0-3/P0-1 new RPCs
   'listLedger', 'approveBotToolCall', 'getSessionVisibility', 'reconcileSessionVisibility',
+  // Deliverable cards: in-panel preview of a declared file (never a client-supplied path).
+  'readDeliverablePreview',
   // P-clear: clear room messages + cancel stale failed runs
   'clearMessages',
   // Fork: copy a bot into a new bot + its own direct room
