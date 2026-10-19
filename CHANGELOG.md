@@ -17,7 +17,10 @@
 侧栏入口徽章 = 各房间之和；打开房间后清零（0.3.2 的「屏幕上的房间即已读」行为保持）；console/pageerror = 0。
 
 ### 发布说明
-- 实际发布版本：core **0.3.2** / bundle **0.3.3** / ui **0.3.8**（本版 UI 无改动）/ tools **0.3.1**。
+- 实际发布版本：core **0.3.2**（npm 已发布）、ui **0.3.8**、tools **0.3.1**，均已是 latest；bundle 的 GitHub Release
+  **v0.3.3** 已发布、tarball 安装解析通过。npm 上的 bundle latest 仍是 **0.3.2**——它依赖 core `^0.3.1`，安装时会解析到
+  core **0.3.2**，因此 `npm install dsh-plugin-agent-collaboration` 同样包含本版修复；bundle **0.3.3** 的 staged 版本
+  待一次独立浏览器 2FA 批准后才会把 npm latest 更新到 0.3.3（纯版本元数据差异，不影响功能）。
 - 客户端产物大小不变（3.32 MB / gzip 914 KB）；本版是宿主侧计数修复，**重启 DSH 才会生效**。
 
 ## 0.3.2 — 未读角标：在会话界面里就是已读
