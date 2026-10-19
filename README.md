@@ -64,7 +64,9 @@ produced it is gone.
   just which message, so a room that has been compacted can still tell you what is new. The room on
   screen counts as read — its badge clears as soon as it is displayed, and a reply that lands while
   you are looking at it clears immediately. Only messages that arrive while the DSH window is hidden
-  stay unread, so the count is right when you come back.
+  stay unread, so the count is right when you come back. The badge counts **unread replies** — each bot run
+  is one (so several scheduled runs are several unread, not one) — and a bot's extra post in the same turn
+  does not double-count.
 
 ## Requirements
 

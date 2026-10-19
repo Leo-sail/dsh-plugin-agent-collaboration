@@ -62,8 +62,25 @@ export function resolveReadMark(
  *
  *   · the user's own messages never count;
  *   · a placeholder with no visible text (reasoning / tool activity only) never counts;
- *   · one RUN counts once, however many message rows it produced, so the narration a model emits
- *     before a tool call cannot inflate the badge.
+ *   · ONE BOT RUN counts once, however many message rows it produced.
+ *
+ * ── WHY THE UNIT IS THE RUN, NOT THE TURN ─────────────────────────────────────
+ *
+ * The count used to collapse by (speaker, turn), where a turn = everything since the user's
+ * own last message. Scheduled/routine work breaks that assumption: four hourly bot-schedule runs
+ * produced four unread replies without a single user message in between, and the badge said
+ * 「1」 while the room held four unread answers — reported as 「明明有很多条未读消息…只显示1条」.
+ *
+ * A run is the unit a reader perceives as one answer, so every distinct run now counts once.
+ * The two things the collapse was introduced for stay covered:
+ *
+ *   · a bot's own `agent_community_post_message` row in the same turn does NOT add a second
+ *     notification — the speaker already has a run in that turn (the old group case: three bots
+ *     answered one 「你好」 and one posted an extra row; the badge must stay 3);
+ *   · a single run that somehow wrote two rows still counts once.
+ *
+ * A message with no run id at all (older rows, or a bot posting without a run context) falls back
+ * to one notification per (speaker, turn).
  *
  * ── A MARK WHOSE MESSAGE IS GONE ──────────────────────────────────────────────
  *
@@ -92,29 +109,17 @@ export function unreadByRoom(
   const unread: Record<string, number> = {}
   for (const [roomId, list] of rooms) {
     const from = startIndex(list, readAt[roomId], messages)
-    /**
-     * One entry per SPEAKER PER TURN.
-     *
-     * A "turn" is everything since the user's own last message: answering one prompt is ONE
-     * notification from a bot, however many rows it produced. That makes the badge agree with
-     * what the user counts on screen, and it covers both ways a single reply became two rows:
-     *
-     *   · the run's own answer (which carries a `runId`) PLUS a message the bot posted itself
-     *     through `agent_community_post_message`, which has no run id at all. Observed on a
-     *     real board: three bots answered one 「你好」 and the group showed 4 unread, because
-     *     one of them had done exactly that;
-     *   · a bot that runs twice for one prompt, which a run-only key counted twice.
-     *
-     * Rows from the same speaker in the same turn collapse; every bot that answered adds one.
-     */
-    const seen = new Set<string>()
+    /** One entry per distinct bot run (a run that wrote several rows still counts once). */
+    const counted = new Set<string>()
+    /** (speaker, turn) pairs that already have a run — a loose post from the same bot is not news. */
+    const speakerTurnsWithRun = new Set<string>()
+    /** Unread rows with no run id at all, kept for the fallback pass. */
+    const loose: string[] = []
     let turn = -1
-    let count = 0
     for (let i = 0; i < list.length; i += 1) {
       const message = list[i]!
       if (message.sender.kind === 'user') {
-        // The user's own message opens a new turn. It never counts itself, but it is what
-        // makes the next bot message a different notification from the previous one.
+        // The user's own message opens a new turn; it never counts itself.
         turn += 1
         continue
       }
@@ -122,16 +127,29 @@ export function unreadByRoom(
       if (message.text.trim() === '') continue
       const speaker = message.sender.botId !== undefined
         ? `id:${message.sender.botId}`
-        // Two different bots sharing one turn is only reachable for a bot with no id at
-        // all; the name is the best remaining identity, and collapsing those would
-        // undercount a group the same way a run-only key did.
+        // A bot with no id is only possible for old rows; its name is the best identity left.
         : `name:${message.sender.name}`
-      const key = `${speaker}\u0000${turn}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      count += 1
+      const speakerTurn = `${speaker}\u0000${turn}`
+      const runIds = [
+        ...(message.runId === undefined ? [] : [message.runId]),
+        ...(message.runIds ?? []),
+      ]
+      if (runIds.length === 0) {
+        loose.push(speakerTurn)
+        continue
+      }
+      speakerTurnsWithRun.add(speakerTurn)
+      for (const runId of runIds) counted.add(`${speaker}\u0000run:${runId}`)
     }
-    if (count > 0) unread[roomId] = count
+    // A no-run row is the fallback notification for its (speaker, turn) — but never on top of
+    // the same speaker's run in that turn (the extra `post_message` case).
+    const looseSeen = new Set<string>()
+    for (const speakerTurn of loose) {
+      if (speakerTurnsWithRun.has(speakerTurn) || looseSeen.has(speakerTurn)) continue
+      looseSeen.add(speakerTurn)
+      counted.add(`loose\u0000${speakerTurn}`)
+    }
+    if (counted.size > 0) unread[roomId] = counted.size
   }
   return unread
 }
