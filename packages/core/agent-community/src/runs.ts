@@ -296,6 +296,13 @@ export interface CommunityStateAccessor {
    * pinned at compaction time (`compactRoom`) and survive the window the user stated them in.
    */
   roomConstraintsBlock(roomId: string): string | undefined
+  /**
+   * The `[本群协作模式]` block for THIS room (OP-09), or undefined when it has no pattern cards.
+   *
+   * Room-keyed like the goal/constraints accessors: a pattern learned in one group can never be
+   * rendered into another group's prompt.
+   */
+  roomPatternsBlock(roomId: string): string | undefined
   /** Every bot in the community (id + name are what the prompt needs). */
   /** Every bot, with the role text a 1:1 needs to decide who to propose. */
   listBots(): Array<{
@@ -1690,6 +1697,14 @@ export class RunExecutor {
     // assembler inserts its trust-boundary guard right after this section.
     const constraints = this.svc.roomConstraintsBlock(run.roomId)
     if (constraints !== undefined && constraints !== '') sections.constraints = constraints
+    // ── HOW THIS GROUP WORKS (OP-09) ───────────────────────────────────────────
+    //
+    // Learned from finished tasks in THIS room (deterministic pattern cards). Placed after the
+    // user's hard constraints and before memory/history: it is standing knowledge about the
+    // group's way of working, not untrusted transcript data, so the assembler's trust guard
+    // stays in front of memory/history only.
+    const patterns = this.svc.roomPatternsBlock(run.roomId)
+    if (patterns !== undefined && patterns !== '') sections.patterns = patterns
     if (bot !== undefined && this.memoryPromptEntries > 0) {
       // BASELINE ONCE, DELTA AFTER: the executor remembers what this pair has already been
       // shown, so a turn carries the recent memory only when it is the first, and otherwise

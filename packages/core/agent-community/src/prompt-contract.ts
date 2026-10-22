@@ -1,5 +1,6 @@
 /**
- * The prompt format contract (OP-05; v2 adds the OP-03 trust boundary).
+ * The prompt format contract (OP-05; v2 adds the OP-03 trust boundary, v3 adds the OP-09
+ * group-pattern section).
  *
  * WHY THIS MODULE EXISTS. A bot's turn prompt is assembled from dynamic sections — role,
  * skills, room goal, pinned constraints, room memory, recent history, this turn's input — and
@@ -38,26 +39,34 @@
  * v2 (OP-03): a `constraints` section (user-stated hard rules pinned across compaction) and a
  * fixed trust-boundary guard inserted before the first untrusted context section. Both change
  * the assembled bytes, so every stored v1 prompt is a different harness.
+ *
+ * v3 (OP-09): a `patterns` section carrying this GROUP's learned collaboration patterns
+ * (`[本群协作模式]`). It sits AFTER `constraints` and BEFORE `memory`/`history`: it is standing
+ * knowledge about how this group works, not untrusted transcript data, so it is rendered
+ * outside the trust guard. Every stored v2 prompt is a different harness.
  */
-export const PROMPT_CONTRACT_VERSION = 2
+export const PROMPT_CONTRACT_VERSION = 3
 
 /**
  * The canonical section order.
  *
  * `role` first (who is speaking), then the capabilities and the standing task context, then the
- * user's hard constraints (they outrank remembered/historical data), then the recent
- * conversation, then the instruction for this turn. `input` is deliberately LAST: it is the thing
- * the model must act on, read after all context.
+ * user's hard constraints (they outrank remembered/historical data), then this group's learned
+ * collaboration patterns, then the recent conversation, then the instruction for this turn.
+ * `input` is deliberately LAST: it is the thing the model must act on, read after all context.
  *
- * TRUST ORDER IS PART OF THE ORDER: `constraints` sits BEFORE `memory`/`history` because those
- * two are untrusted context evidence — a rule pinned from what the user actually said must be
- * read before (and protected from) what a previous turn happened to write.
+ * TRUST ORDER IS PART OF THE ORDER: `constraints` and `patterns` sit BEFORE `memory`/`history`
+ * because those two are untrusted context evidence — a rule pinned from what the user actually
+ * said, and how this group previously agreed to work, must be read before (and protected from)
+ * what a previous turn happened to write. The guard is inserted before the first untrusted
+ * section, never before `patterns`.
  */
 export const PROMPT_SECTION_ORDER = [
   'role',
   'skills',
   'goal',
   'constraints',
+  'patterns',
   'memory',
   'history',
   'input',

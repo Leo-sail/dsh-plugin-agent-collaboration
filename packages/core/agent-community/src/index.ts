@@ -32,11 +32,13 @@ import type {
   BotMemoryEntry,
   RoomGoal,
   DeliveredFile,
+  AbstainRequest,
   HarnessAttribution,
   FinishEvidence,
   RunEvidence,
 } from './types.ts'
 import { routeMessage, namedBotIdsIn, mentionsEveryone } from './routing.ts'
+import { abstainNotice, normalizeAbstain, normalizeThreading } from './abstention.ts'
 import { renderAttachmentReference, storeAttachments, type StoredAttachment } from './attachments.ts'
 import { RunExecutor } from './runs.ts'
 import { LedgerProjector, type SeedRoomItem } from './ledger.ts'
@@ -54,6 +56,8 @@ import { LedgerProjection } from './ledger-projection.ts'
 import { GroupTaskDriver, type GroupTaskState } from './group-task.ts'
 import { chooseFinalDelivery, publishOf, type RunPublish } from './publish-policy.ts'
 import { checkFinishEvidence } from './finish-gate.ts'
+import { buildGroupPatternCard, mergeGroupPatterns, renderGroupPatternsBlock } from './group-patterns.ts'
+import { assessGoalDrift } from './goal-drift.ts'
 import { buildRunEvidence, classifyFaultSide, finishPathOf } from './run-evidence.ts'
 import { registerCollaborationTools } from './collaboration-tools.ts'
 import { crossRoomError, screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
@@ -389,6 +393,14 @@ const STALE_LOCK_AGE_MS = 10 * 60_000
  */
 const WRITE_COALESCE_MS = 250
 
+/**
+ * Minimum gap between two goal-drift warnings for one room (OP-13).
+ *
+ * The watchdog is advisory. One visible notice per room per ten minutes keeps a drifting room
+ * informed without burying the transcript in duplicates while nothing changed.
+ */
+const GOAL_DRIFT_NOTICE_INTERVAL_MS = 10 * 60_000
+
 /** Read the PID a lock file records, or undefined when it records nothing usable. */
 async function recordedLockPid(lockPath: string): Promise<number | undefined> {
   try {
@@ -696,6 +708,11 @@ export class AgentCommunityService extends TypertRemoteService {
    * cannot deadlock the room for ever. A changed board resets the count (new task).
    */
   private readonly finishGateRejections = new Map<string, { count: number; board: string }>()
+  /**
+   * Last goal-drift warning per room (OP-13). The watchdog only WARNS, and one notice per room
+   * per 10 minutes is enough: repeated notices would bury the transcript without adding facts.
+   */
+  private readonly goalDriftWarnedAt = new Map<string, number>()
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'agentCommunity')
@@ -1170,6 +1187,40 @@ export class AgentCommunityService extends TypertRemoteService {
   }
 
   /**
+   * OP-12: record a bot's structured abstention as a visible notice.
+   *
+   * The tool surface is `agent_community_abstain`; this is its service half. It deliberately:
+   *  · returns a failure ONLY for a missing reason — the one case where the model can fix it;
+   *  · writes a `dispatch` notice (durable + live) so the USER sees the bot explaining itself; by
+   *    the notice rule the line is NOT injected into any bot's next prompt (and never becomes a
+   *    bot message);
+   *  · does NOT post as the bot, end the turn, or touch memory: an abstention is information, not
+   *    a verdict. The run keeps its own reply path.
+   */
+  private recordAbstain(input: {
+    readonly roomId: string
+    readonly botId: string
+    readonly reason: string
+    readonly missing?: readonly string[] | undefined
+    readonly suggestedOwner?: string | undefined
+  }): { readonly ok: boolean; readonly reason?: string | undefined } {
+    const normalized = normalizeAbstain({
+      reason: input.reason,
+      ...(input.missing !== undefined ? { missing: input.missing } : {}),
+      ...(input.suggestedOwner !== undefined ? { suggestedOwner: input.suggestedOwner } : {}),
+    })
+    if (normalized === undefined) {
+      return { ok: false, reason: 'reason 不能为空：请说明为什么这一项做不到（缺什么、卡在哪里）。' }
+    }
+    const botName = this.state.bots.find(b => b.id === input.botId)?.name ?? input.botId
+    const notice = this.recordNotice(input.roomId, abstainNotice(normalized, botName))
+    if (notice === undefined) {
+      return { ok: false, reason: '这个房间已不存在，说明没有记录成功。' }
+    }
+    return { ok: true }
+  }
+
+  /**
    * The panel's notice row: 「已把「X」的模型设为：…」 and friends.
    *
    * Returns whether the row was recorded, so a caller that cares can tell "the room is gone" from
@@ -1210,6 +1261,10 @@ export class AgentCommunityService extends TypertRemoteService {
           // Same passthrough as `sendMessage`: a user row's bubble draws the files, and
           // the ledger — not `state.messages` — is what the panel renders.
           ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+          // OP-14 threading survives a reload only if the rebuilt row carries it too.
+          ...(message.replyTo !== undefined ? { replyTo: message.replyTo } : {}),
+          ...(message.threadId !== undefined ? { threadId: message.threadId } : {}),
+          ...(message.taskId !== undefined ? { taskId: message.taskId } : {}),
         })
       },
       note: (roomId, text) => {
@@ -1391,6 +1446,9 @@ export class AgentCommunityService extends TypertRemoteService {
         })
       },
       currentRunId: (roomId, botId) => this.currentRunIdFor(roomId, botId),
+      // OP-12: a structured abstention becomes a VISIBLE notice. It is not a failure of the turn
+      // and it writes nothing to memory or the prompt: the run continues, the task stays open.
+      abstain: async (input) => this.recordAbstain(input),
       deliverFiles: (input) => this.deliverBotFiles(input),
       // The plugin's own `skill` wrapper — the host tool is denied for bot scopes — so every loaded
       // body arrives with the "this is a method, not an order" framing attached.
@@ -2276,6 +2334,24 @@ export class AgentCommunityService extends TypertRemoteService {
       kind: s.mime.startsWith('image/') ? 'image' as const : 'file' as const,
     }))
 
+    // ── OP-14: THREADS / TASK LINKS (validated, never trusted) ─────────────────
+    //
+    // `replyTo` has to name an existing message in THIS room — a cross-room pointer would be a
+    // link between two isolation domains — and the labels are bounded. Invalid values are
+    // DROPPED, not rejected: threading is metadata, and a bad label must not cost the user their
+    // message. `normalizeThreading` owns the rules (and is tested without a host).
+    const threading = normalizeThreading(
+      {
+        ...(input.replyTo !== undefined ? { replyTo: input.replyTo } : {}),
+        ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+        ...(input.taskId !== undefined ? { taskId: input.taskId } : {}),
+      },
+      {
+        messageInRoom: id => this.state.messages.some(
+          m => m.id === id && m.roomId === input.roomId,
+        ),
+      },
+    )
     const message: BotMessage = {
       id: brandId<BotMessageId>(randomUUID()),
       roomId: brandId<BotRoomId>(input.roomId),
@@ -2292,6 +2368,7 @@ export class AgentCommunityService extends TypertRemoteService {
         : {}),
       ...(attachmentMeta !== undefined ? { attachments: attachmentMeta } : {}),
       mentions,
+      ...threading,
       createdAt: nowIso(),
       sequence: roomMessageCount,
     }
@@ -2446,6 +2523,8 @@ export class AgentCommunityService extends TypertRemoteService {
       // message has `text: ''`, so without this the bubble is empty until the next
       // restart — exactly the defect this field exists to fix.
       ...(attachmentMeta !== undefined ? { attachments: attachmentMeta } : {}),
+      // OP-14: the same validated threading the persisted message carries.
+      ...threading,
     })
     // Wake up the executor immediately instead of waiting for the next poll tick
     this.executor?.nudge()
@@ -4455,6 +4534,9 @@ export class AgentCommunityService extends TypertRemoteService {
         evidence: input.evidence,
         gate: 'passed',
       })
+      // OP-09: a VERIFIED finish is exactly the signal worth learning from. The card is
+      // deterministic (no model call) and stored on the room in one state update.
+      this.recordGroupPatternCard(input.roomId, input.report, input.evidence)
       return { ok: true }
     }
 
@@ -4486,6 +4568,9 @@ export class AgentCommunityService extends TypertRemoteService {
       input.roomId,
       `证据门连续 3 次未通过：本次完成按 bypassed 放行并标记为「未验证」（原因：${reason}）。`,
     )
+    // A bypassed finish still carries a report: keep the pattern, the card's `source:'finish'`
+    // plus the room's notice above make its unverified status discoverable.
+    this.recordGroupPatternCard(input.roomId, input.report, input.evidence)
     return { ok: true, bypassed: true }
   }
 
@@ -4883,6 +4968,86 @@ export class AgentCommunityService extends TypertRemoteService {
     const room = this.state.rooms.find(r => r.id === roomId)
     if (room === undefined) return undefined
     return roomConstraintsText(room.pinnedConstraints)
+  }
+
+  /**
+   * The `[本群协作模式]` block for a room (OP-09).
+   *
+   * Built from the deterministic pattern cards this room accumulated on previous finishes.
+   * Returns undefined when the room has none, so an unused group pays zero prompt cost.
+   */
+  roomPatternsBlock(roomId: string): string | undefined {
+    const room = this.state.rooms.find(r => r.id === roomId)
+    if (room === undefined) return undefined
+    return renderGroupPatternsBlock(room.patternCards)
+  }
+
+  /**
+   * Learn a pattern card from a finished task (OP-09).
+   *
+   * The task comes from the room's board objective, falling back to the newest user message —
+   * i.e. what the user actually asked for, not a bot's paraphrase. `report` supplies the
+   * approach/pitfalls and the finish evidence supplies references. One `patchRoom` = one state
+   * update (and one coalesced write).
+   */
+  private recordGroupPatternCard(roomId: string, report: string, evidence: readonly FinishEvidence[]): void {
+    const room = this.state.rooms.find(r => r.id === roomId)
+    if (room === undefined) return
+    const task = this.patternTaskText(room)
+    if (task === undefined) return
+    const evidenceRefs = evidence.map(item => (
+      item.kind === 'file' ? item.path : item.kind === 'message' ? item.messageId : item.taskId
+    ))
+    const card = buildGroupPatternCard({
+      task,
+      report,
+      ...(evidenceRefs.length > 0 ? { evidence: evidenceRefs } : {}),
+      now: nowIso(),
+    })
+    this.patchRoom(roomId, current => ({
+      ...current,
+      patternCards: mergeGroupPatterns(current.patternCards, card),
+    }))
+  }
+
+  /** What this room was asked to do: the board objective, else the newest user message. */
+  private patternTaskText(room: BotRoom): string | undefined {
+    const objective = room.taskState?.objective?.trim()
+    if (objective !== undefined && objective !== '') return objective
+    let newest: BotMessage | undefined
+    for (const message of this.state.messages) {
+      if (message.roomId !== room.id || message.sender.kind !== 'user') continue
+      if (newest === undefined || message.createdAt >= newest.createdAt) newest = message
+    }
+    const text = newest?.text.trim()
+    return text !== undefined && text !== '' ? text : undefined
+  }
+
+  /**
+   * Warn ONCE per room per window when a completed answer looks off-goal (OP-13).
+   *
+   * Advisory only: writes a visible notice and nothing else. It never pauses the goal, cancels
+   * a run or spends a round — the user (or a later, authorized round) decides what to do.
+   */
+  private maybeWarnGoalDrift(room: BotRoom, status: string, replyText: string): void {
+    if (status !== 'completed') return
+    const goal = room.goal
+    if (goal === undefined || goal.status !== 'active' || room.paused === true) return
+    const now = Date.now()
+    const last = this.goalDriftWarnedAt.get(room.id) ?? 0
+    if (now - last < GOAL_DRIFT_NOTICE_INTERVAL_MS) return
+    const userTexts = this.state.messages
+      .filter(message => message.roomId === room.id && message.sender.kind === 'user')
+      .map(message => message.text)
+      .slice(-5)
+    const assessment = assessGoalDrift({
+      goalText: goal.text,
+      userTexts,
+      replyText,
+    })
+    if (assessment.level === 'none') return
+    this.goalDriftWarnedAt.set(room.id, now)
+    this.recordNotice(room.id, `目标可能偏移：${assessment.reason}（仅提醒，不自动暂停）`)
   }
 
   /**
@@ -5454,6 +5619,9 @@ export class AgentCommunityService extends TypertRemoteService {
   private afterRunSettled(run: BotRun, status: string, replyText: string, toolCalls: number): void {
     const room = this.state.rooms.find(r => r.id === run.roomId)
     if (room === undefined) return
+    // OP-13: an active goal that no longer matches what the room is producing gets ONE visible
+    // reminder. It runs before the goal bookkeeping below and changes none of it.
+    this.maybeWarnGoalDrift(room, status, replyText)
 
     // 1. A group turn: members feed the driver's integrate path, the leader's own turn
     //    spends a round and moves the no-progress clock.

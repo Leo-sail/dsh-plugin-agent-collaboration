@@ -1,3 +1,29 @@
+## Unreleased — P1 batch A (OP-09 patterns, OP-12 abstention, OP-13 drift, OP-14 threads)
+
+P1 机制批次 A；只改插件源码/测试，不改 Bot。
+
+### OP-09 · 群记忆模式卡
+- 新增 `group-patterns.ts`：从 finish report 确定性提炼「任务→做法/坑/证据」，不调模型；
+  去重、每房 ≤20 卡、prompt 只渲染最近 3 条。
+- finish_task 成功（passed/bypassed）后写 `room.patternCards`（房间隔离）；新增
+  `roomPatternsBlock`，prompt contract v3 新增 `patterns` 段（constraints 后、memory 前）。
+
+### OP-12 · 结构化弃权
+- 新增 `abstention.ts` + `agent_community_abstain` 工具（所有房间）：reason 必填、缺项 ≤5、
+  建议 owner；服务写可见 notice，**不写 memory/prompt、不结束任务**。
+
+### OP-13 · Goal drift 看门狗
+- 新增 `goal-drift.ts` 确定性检测（关键词覆盖 + 偏题短语）；active goal 房间在 completed run
+  后写「目标可能偏移」notice（10 分钟节流），**只提醒、不自动暂停**。
+
+### OP-14 · 群聊结构化交互
+- BotMessage / SendRoomMessageRequest 新增 `replyTo/threadId/taskId`；sendMessage 校验 replyTo
+  必须在本房间，thread/task 标签 >80 丢弃；消息与 ledger 重建路径透传。
+
+### 版本与验证
+- `PROMPT_CONTRACT_VERSION=3`（patterns 段）；`HARNESS_REVISION=paper-batch5-2026-10-22`。
+- `node --test tests/*.test.ts`：**359/359**；typecheck/四包构建/check-build OK。
+- 未发布 npm / 未更新市场；只同步 GitHub 源码。
 ## Unreleased — paper batch 4 (OP-07 task-board contract, OP-08 memory lifecycle)
 
 论文第四批机制改进；只改插件源码/测试，不改 Bot。

@@ -71,6 +71,14 @@ export interface LedgerUserEntry extends LedgerEntryBase {
    * only on `state.messages` would vanish on the next reload.
    */
   readonly attachments?: readonly BotMessageAttachment[] | undefined
+  /**
+   * OP-14 threading/task linkage, passed through from the persisted message on both paths (live
+   * push and restart rebuild). Optional and additive: a reader that does not render threads
+   * ignores it, and older rows simply lack it.
+   */
+  readonly replyTo?: string | undefined
+  readonly threadId?: string | undefined
+  readonly taskId?: string | undefined
 }
 
 export interface LedgerBotTextEntry extends LedgerEntryBase {
@@ -96,6 +104,10 @@ export interface LedgerBotTextEntry extends LedgerEntryBase {
   } | undefined
   /** true while the turn is still streaming */
   readonly streaming: boolean
+  /** OP-14 threading/task linkage carried by the reply (absent when it had none). */
+  readonly replyTo?: string | undefined
+  readonly threadId?: string | undefined
+  readonly taskId?: string | undefined
 }
 
 export interface LedgerBotReasoningEntry extends LedgerEntryBase {

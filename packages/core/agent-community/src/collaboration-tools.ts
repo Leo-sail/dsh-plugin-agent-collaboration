@@ -142,6 +142,19 @@ export interface CollaborationToolDeps {
     refused: ReadonlyArray<{ botId: string; reason: string }>
     error?: string | undefined
   }>
+  /**
+   * OP-12: record a structured abstention as a VISIBLE notice in the room.
+   *
+   * Not a failure and NOT the end of the turn: the run continues, the task stays open, and the
+   * notice shows the user the reason, what is missing, and who could take it.
+   */
+  abstain(input: {
+    roomId: string
+    botId: string
+    reason: string
+    missing?: readonly string[] | undefined
+    suggestedOwner?: string | undefined
+  }): Promise<{ readonly ok: boolean; readonly reason?: string | undefined }>
   /** Fan work out to members. Returns what was accepted and what was refused. */
   assignTask(input: {
     roomId: string
@@ -556,6 +569,62 @@ export function registerCollaborationTools(
         return { value: { ok: true, status: 'paused', goal: result.goal }, text: '已暂停本房间目标：不会自动续跑。' }
       }
       return { value: { ok: true, status: 'done', goal: result.goal }, text: '已把本房间目标标记为完成。' }
+    },
+  })
+
+  // ── agent_community_abstain (any room) ──────────────────────────────────────
+  add({
+    name: 'agent_community_abstain',
+    description:
+      'SAY WHAT YOU CANNOT DO, STRUCTURED — before it becomes a silent failure. Use it when you '
+      + 'cannot finish a piece: missing information/files/access, a job that belongs to another '
+      + 'bot, or a requirement that conflicts with your boundaries. State the reason, what is '
+      + 'missing, and who you suggest could take it over. This is NOT a failure and it does NOT '
+      + 'end the task: the note is recorded as a visible room notice for the user, and you keep '
+      + 'your turn — continue with what you CAN do, or ask for help with message_member.',
+    properties: {
+      reason: {
+        type: 'string',
+        required: true,
+        description: 'Why you cannot complete this piece — one concrete sentence.',
+      },
+      missing: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'What is missing: files, data, permission, another member\'s output. At most 5, each ≤120 chars.',
+      },
+      suggestedOwner: {
+        type: 'string',
+        description: 'A member name or role who could take this over (optional, ≤60 chars).',
+      },
+    },
+    required: ['reason'],
+    run: async (args, exec) => {
+      const who = caller(exec)
+      if (typeof who === 'string') return { value: { ok: false }, text: who }
+      const reason = str(args, 'reason').trim()
+      if (reason === '') {
+        return { value: { ok: false }, text: 'reason 不能为空：请说明为什么这一项做不到。' }
+      }
+      const missing = strList(args, 'missing')
+        .map(entry => entry.trim())
+        .filter(entry => entry !== '')
+      const suggestedOwner = str(args, 'suggestedOwner').trim()
+      const result = await deps.abstain({
+        roomId: who.roomId,
+        botId: who.botId,
+        reason,
+        missing,
+        ...(suggestedOwner !== '' ? { suggestedOwner } : {}),
+      })
+      if (!result.ok) {
+        return { value: { ok: false }, text: result.reason ?? '弃权说明没有记录成功。' }
+      }
+      return {
+        value: { ok: true },
+        text: '已记录你的说明（用户能在群里看到这条 notice）。这不是失败，也没有结束任务：'
+          + '继续做你能做的部分；需要支援就用 message_member 说明。',
+      }
     },
   })
 

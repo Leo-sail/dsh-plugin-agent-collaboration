@@ -115,6 +115,30 @@ export interface BotRoomNotice {
   readonly at: string
 }
 
+/**
+ * One collaboration pattern card (OP-09): what this group learned from a delivered task.
+ *
+ * Built DETERMINISTICALLY from the finish report (no model call): the first sentences become
+ * the approach, lines that mention a pitfall/risk become `pitfalls`, and the finish evidence
+ * becomes a short reference list. Cards are remembered on the room and re-rendered into later
+ * turns as the `[本群协作模式]` section, so a new task in the same group starts from what
+ * worked before instead of relearning it.
+ */
+export interface GroupPatternCard {
+  readonly id: string
+  /** The task this pattern was learned from (normalized for de-duplication). */
+  readonly task: string
+  /** What was done, extracted from the report's opening lines. */
+  readonly approach: string
+  /** Pitfalls/risks/attention lines from the report (at most 3). */
+  readonly pitfalls?: readonly string[] | undefined
+  /** Short references to the finish evidence (paths/ids, at most 5). */
+  readonly evidence?: readonly string[] | undefined
+  readonly createdAt: string
+  /** Only finish_task produces cards today; the field keeps the origin explicit. */
+  readonly source: 'finish'
+}
+
 export interface BotRoom {
   readonly directBotId?: BotId | undefined
   readonly id: BotRoomId
@@ -152,6 +176,13 @@ export interface BotRoom {
   readonly pendingGroupProposal?: PendingGroupProposal | undefined
   /** This room's objective, if any — see `RoomGoal`. */
   readonly goal?: RoomGoal | undefined
+  /**
+   * Collaboration patterns learned from finished tasks in THIS group (OP-09).
+   *
+   * Additive and bounded (`mergeGroupPatterns` caps the list); rendered into later prompts as
+   * `[本群协作模式]` and never shared across rooms.
+   */
+  readonly patternCards?: readonly GroupPatternCard[] | undefined
   /**
    * Messages folded into a checkpoint: kept in the transcript, EXCLUDED from the prompt.
    *
@@ -289,6 +320,17 @@ export interface BotMessage {
   readonly sequence?: number | undefined
   readonly kind?: BotTeamMessageKind | undefined
   readonly targetNames?: readonly string[] | undefined
+  /**
+   * OP-14 (structured group interaction) — optional and additive.
+   *
+   * `replyTo` names an earlier message in the SAME room (the service drops a pointer that does not
+   * resolve there), so a transcript can render a reply as part of a thread instead of an
+   * unanchored bubble. `threadId` / `taskId` are opaque client labels for grouping a conversation
+   * or linking it to a task; both are bounded and absent on messages that carry no threading.
+   */
+  readonly replyTo?: BotMessageId | undefined
+  readonly threadId?: string | undefined
+  readonly taskId?: string | undefined
 }
 
 /**
@@ -658,6 +700,27 @@ export interface SendRoomMessageRequest {
   readonly mentions?: readonly string[] | undefined
   /** auto = normal routing; direct-reply = only mentioned bots respond. */
   readonly mode?: 'auto' | 'direct-reply' | undefined
+  /** OP-14: optional threading/task linkage, validated by `normalizeThreading` before storing. */
+  readonly replyTo?: string | undefined
+  readonly threadId?: string | undefined
+  readonly taskId?: string | undefined
+}
+
+/**
+ * OP-12: a bot's structured "I cannot complete this piece" (the `agent_community_abstain` tool).
+ *
+ * Deliberately NOT a failure signal: the run continues and the task stays open. It becomes a
+ * visible room notice so the USER sees the reason, what is missing, and who the bot suggests could
+ * take it — exactly the information a re-plan needs. It stays out of the bot prompt and does not
+ * end the run (the service records a notice, never a message).
+ */
+export interface AbstainRequest {
+  /** Why this bot cannot do it (required: an abstention without a reason helps nobody). */
+  readonly reason: string
+  /** What is missing: files, data, permissions, another member's output (at most 5). */
+  readonly missing?: readonly string[] | undefined
+  /** A member name or role the bot suggests could take it over (at most 60 chars). */
+  readonly suggestedOwner?: string | undefined
 }
 
 export interface RetryBotRunRequest {
