@@ -99,7 +99,7 @@ see [CHANGELOG.md](CHANGELOG.md) for what a newer version changes.
 
 ```bash
 dsh plugin --profile <your-profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.4/dsh-plugin-agent-collaboration-0.3.4.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.5/dsh-plugin-agent-collaboration-0.3.5.tgz
 ```
 
 ### Installing from a checkout instead
@@ -123,7 +123,7 @@ ls -ld ~/.dsh/profiles/<your-profile>/node_modules/@dsh-plugin-agent-community/*
 
 ```text
 Install the DSH plugin at
-https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.4/dsh-plugin-agent-collaboration-0.3.4.tgz
+https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.3.5/dsh-plugin-agent-collaboration-0.3.5.tgz
 into my DSH profile, restart DSH, and confirm the "Bots团队" entry appears in the sidebar.
 ```
 

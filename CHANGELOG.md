@@ -1,3 +1,12 @@
+## 0.3.5 — 长任务活跃豁免
+
+- 运行中的工具调用（`tool-start`…`tool-end`）现在被识别为**真实进展**：工具在跑时不再触发
+  「运行无进展，已停止」，过期 deadline 也会向后滚动（受总上限约束）。
+- 适合长时间 shell/编译/下载/深挖任务；工具结束后恢复普通无进展判定。
+- 实测：5 秒无进展 + 10 秒总预算下，真实 `sleep 20` 工具运行 25 秒后正常完成。
+- 包版本：bundle **0.3.5**、core **0.3.4**；tools/UI 无代码变化，版本保持 0.3.2/0.3.9。
+- 全量测试 **542/542**；core tsc/build 通过。
+
 ## Unreleased — long-task active-tool exemption
 
 - `tool/call` / `tool/result` now feed distinct `tool-start` / `tool-end` progress events.
