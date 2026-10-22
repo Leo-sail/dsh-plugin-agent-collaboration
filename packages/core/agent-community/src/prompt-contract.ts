@@ -45,7 +45,7 @@
  * knowledge about how this group works, not untrusted transcript data, so it is rendered
  * outside the trust guard. Every stored v2 prompt is a different harness.
  */
-export const PROMPT_CONTRACT_VERSION = 3
+export const PROMPT_CONTRACT_VERSION = 4
 
 /**
  * The canonical section order.

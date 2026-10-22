@@ -153,6 +153,10 @@ export interface CommunityRemote {
   reconcileSessionVisibility(): Promise<void>
   /** Clear a room's transcript, cancel stale runs, and clear its ledger. */
   clearMessages(roomId: string): Promise<void>
+  /** Delete one learned experience card from a room (settings management). */
+  deleteRoomPattern(input: { roomId: string; patternId: string }): Promise<{ ok: boolean; reason?: string }>
+  /** Confirm a pending experience card so it may enter future prompts. */
+  confirmRoomPattern(input: { roomId: string; patternId: string }): Promise<{ ok: boolean; reason?: string }>
   /**
    * S3: grant THIS room's goal a bounded number of automatic continuation rounds.
    *

@@ -1,3 +1,15 @@
+## Unreleased — rename to “群经验卡” + user management
+
+- 群聊设置里的「群协作模式」更名为 **「群经验卡」**；prompt 注入标题同步为 `[本群经验卡]`。
+  说明文案改为「完成群任务后从最终汇报提炼，只影响本群；只有已启用的卡会进入 Bot 上下文」。
+- 新增卡片状态：verified finish → `active`；bypassed finish → `pending`。只有 active 进入 prompt，
+  pending 显示「待确认」并需用户点「启用」；所有卡都可「删除」。
+- 新增 RPC `deleteRoomPattern` / `confirmRoomPattern`（REMOTE_METHODS allowlist、UI remote、
+  设置面板本地更新）；每个操作一次房间 state 更新。
+- `PROMPT_CONTRACT_VERSION=4`（标题文案变更）、`HARNESS_REVISION=paper-batch7-2026-10-22`。
+- 测试：group-patterns pending 过滤 + 全量 **538/538**；core/UI tsc、tsdown/wrap、check-build OK；
+  隔离实例验证启用/删除会真实持久化。
+- 未发布 npm / 未更新市场。
 ## Unreleased — failure diagnosis moves from settings into the conversation
 
 - 群聊设置删除「运行诊断」整块（不再展示最近 run 状态/上下文分段占比）；设置里保留群协作模式、

@@ -129,7 +129,7 @@ export interface BotRoomNotice {
  * Built DETERMINISTICALLY from the finish report (no model call): the first sentences become
  * the approach, lines that mention a pitfall/risk become `pitfalls`, and the finish evidence
  * becomes a short reference list. Cards are remembered on the room and re-rendered into later
- * turns as the `[本群协作模式]` section, so a new task in the same group starts from what
+ * turns as the `[本群经验卡]` section, so a new task in the same group starts from what
  * worked before instead of relearning it.
  */
 export interface GroupPatternCard {
@@ -145,6 +145,12 @@ export interface GroupPatternCard {
   readonly createdAt: string
   /** Only finish_task produces cards today; the field keeps the origin explicit. */
   readonly source: 'finish'
+  /**
+   * `pending` cards come from a BYPASSED finish and are shown in room settings but NOT
+   * injected into the prompt until the user confirms them. Absent means `active` for cards
+   * recorded before this field existed.
+   */
+  readonly status?: 'active' | 'pending' | undefined
 }
 
 export interface BotRoom {
@@ -188,7 +194,7 @@ export interface BotRoom {
    * Collaboration patterns learned from finished tasks in THIS group (OP-09).
    *
    * Additive and bounded (`mergeGroupPatterns` caps the list); rendered into later prompts as
-   * `[本群协作模式]` and never shared across rooms.
+   * `[本群经验卡]` and never shared across rooms.
    */
   readonly patternCards?: readonly GroupPatternCard[] | undefined
   /**
@@ -544,6 +550,12 @@ export interface MarkRoomReadRequest {
 export interface NoticeRoomRequest {
   readonly roomId: string
   readonly text: string
+}
+
+/** Delete or confirm one learned room pattern card (OP-09 management). */
+export interface RoomPatternRequest {
+  readonly roomId: string
+  readonly patternId: string
 }
 
 /**

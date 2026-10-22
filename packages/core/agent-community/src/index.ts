@@ -33,6 +33,7 @@ import type {
   RoomGoal,
   DeliveredFile,
   AbstainRequest,
+  RoomPatternRequest,
   HarnessAttribution,
   FinishEvidence,
   RunEvidence,
@@ -4650,7 +4651,7 @@ export class AgentCommunityService extends TypertRemoteService {
       })
       // OP-09: a VERIFIED finish is exactly the signal worth learning from. The card is
       // deterministic (no model call) and stored on the room in one state update.
-      this.recordGroupPatternCard(input.roomId, input.report, input.evidence)
+      this.recordGroupPatternCard(input.roomId, input.report, input.evidence, true)
       this.maybeWarnReputation(input.roomId)
       return { ok: true }
     }
@@ -4685,7 +4686,7 @@ export class AgentCommunityService extends TypertRemoteService {
     )
     // A bypassed finish still carries a report: keep the pattern, the card's `source:'finish'`
     // plus the room's notice above make its unverified status discoverable.
-    this.recordGroupPatternCard(input.roomId, input.report, input.evidence)
+    this.recordGroupPatternCard(input.roomId, input.report, input.evidence, false)
     this.maybeWarnReputation(input.roomId)
     return { ok: true, bypassed: true }
   }
@@ -5107,7 +5108,7 @@ export class AgentCommunityService extends TypertRemoteService {
   }
 
   /**
-   * The `[本群协作模式]` block for a room (OP-09).
+   * The `[本群经验卡]` block for a room (OP-09).
    *
    * Built from the deterministic pattern cards this room accumulated on previous finishes.
    * Returns undefined when the room has none, so an unused group pays zero prompt cost.
@@ -5126,7 +5127,7 @@ export class AgentCommunityService extends TypertRemoteService {
    * approach/pitfalls and the finish evidence supplies references. One `patchRoom` = one state
    * update (and one coalesced write).
    */
-  private recordGroupPatternCard(roomId: string, report: string, evidence: readonly FinishEvidence[]): void {
+  private recordGroupPatternCard(roomId: string, report: string, evidence: readonly FinishEvidence[], verified: boolean): void {
     const room = this.state.rooms.find(r => r.id === roomId)
     if (room === undefined) return
     const task = this.patternTaskText(room)
@@ -5139,11 +5140,40 @@ export class AgentCommunityService extends TypertRemoteService {
       report,
       ...(evidenceRefs.length > 0 ? { evidence: evidenceRefs } : {}),
       now: nowIso(),
+      status: verified ? 'active' : 'pending',
     })
     this.patchRoom(roomId, current => ({
       ...current,
       patternCards: mergeGroupPatterns(current.patternCards, card),
     }))
+  }
+
+  /** Remove one learned experience card from a room (user management; no prompt side effects beyond). */
+  async deleteRoomPattern(input: RoomPatternRequest): Promise<{ ok: boolean; reason?: string }> {
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room === undefined) return { ok: false, reason: '房间不存在。' }
+    const cards = room.patternCards ?? []
+    if (!cards.some(card => card.id === input.patternId)) return { ok: false, reason: '经验卡不存在。' }
+    this.patchRoom(input.roomId, current => ({
+      ...current,
+      patternCards: (current.patternCards ?? []).filter(card => card.id !== input.patternId),
+    }))
+    return { ok: true }
+  }
+
+  /** Confirm a pending card (from a bypassed finish) so it may enter the prompt. */
+  async confirmRoomPattern(input: RoomPatternRequest): Promise<{ ok: boolean; reason?: string }> {
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room === undefined) return { ok: false, reason: '房间不存在。' }
+    const cards = room.patternCards ?? []
+    if (!cards.some(card => card.id === input.patternId)) return { ok: false, reason: '经验卡不存在。' }
+    this.patchRoom(input.roomId, current => ({
+      ...current,
+      patternCards: (current.patternCards ?? []).map(card => card.id === input.patternId
+        ? { ...card, status: 'active' as const }
+        : card),
+    }))
+    return { ok: true }
   }
 
   /** What this room was asked to do: the board objective, else the newest user message. */
@@ -6532,6 +6562,8 @@ const REMOTE_METHODS = [
   // Room goal authorization (S3): the panel is the user's only way to grant, pause or resume
   // automatic continuation. A Bot's own tool can only PROPOSE a goal, never authorize it.
   'authorizeRoomGoal', 'pauseRoomGoal', 'resumeRoomGoal',
+  // Experience-card management from room settings (delete / confirm pending).
+  'deleteRoomPattern', 'confirmRoomPattern',
 ] as const
 
 for (const method of REMOTE_METHODS) {

@@ -96,13 +96,37 @@ export function RoomSettingsDialog({
   const [paused, setPaused] = useState(room.paused ?? false)
   const [error, setError] = useState<string>()
 
-  const patternCards = [...(room.patternCards ?? [])].sort(
+  const [patternCards, setPatternCards] = useState(() => [...(room.patternCards ?? [])].sort(
     (a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0),
-  )
+  ))
+  const [patternError, setPatternError] = useState<string>()
+  const [patternBusy, setPatternBusy] = useState(false)
   const adherence = room.taskState?.adherence
 
   const toggleMember = (id: BotId) => {
     setMembers(prev => prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id])
+  }
+
+  async function actOnPattern(patternId: string, action: 'confirm' | 'delete'): Promise<void> {
+    if (patternBusy) return
+    setPatternBusy(true)
+    setPatternError(undefined)
+    try {
+      const result = action === 'confirm'
+        ? await remote.confirmRoomPattern({ roomId: room.id, patternId })
+        : await remote.deleteRoomPattern({ roomId: room.id, patternId })
+      if (!result.ok) {
+        setPatternError(result.reason ?? '操作失败')
+        return
+      }
+      setPatternCards(prev => action === 'delete'
+        ? prev.filter(card => card.id !== patternId)
+        : prev.map(card => card.id === patternId ? { ...card, status: 'active' as const } : card))
+    } catch (e) {
+      setPatternError(describe(e))
+    } finally {
+      setPatternBusy(false)
+    }
   }
 
   async function handleSave(e: FormEvent) {
@@ -180,32 +204,54 @@ export function RoomSettingsDialog({
         </section>
       )}
 
-      {/* ── 群协作模式 (OP-09) — read-only ──────────────────────────────────────────
-          Cards the host learned from finished tasks in THIS group. Display only: there is
-          no delete/edit RPC and none is needed — the host bounds the list itself. */}
+      {/* ── 群经验卡 (OP-09) — manageable ────────────────────────────────────────────
+          Cards learned from tasks THIS group finished. A card from a verified finish is
+          active immediately; a card from a bypassed finish stays PENDING until the user
+          confirms it. Only active cards enter the bot prompt. */}
       <section style={blockStyle} data-pattern-cards="">
-        <h4 style={blockTitleStyle}>群协作模式</h4>
+        <h4 style={blockTitleStyle}>群经验卡</h4>
+        <p style={mutedLineStyle}>
+          完成群任务后从最终汇报提炼，只影响本群；只有「已启用」的卡会进入 Bot 上下文。
+        </p>
         {patternCards.length === 0
           ? <p style={mutedLineStyle}>暂无</p>
           : (
             <div style={scrollerStyle}>
-              {patternCards.map(card => (
-                <article key={card.id} style={cardStyle} data-pattern-card={card.id}>
-                  <span style={{ color: 'var(--dsw-alias-label-primary)', fontWeight: 500 }}>{card.task}</span>
-                  <span>做法：{card.approach}</span>
-                  {card.pitfalls !== undefined && card.pitfalls.length > 0 && (
-                    <span>注意：{card.pitfalls.join('；')}</span>
-                  )}
-                  {card.evidence !== undefined && card.evidence.length > 0 && (
-                    <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>
-                      证据：{card.evidence.join('、')}
+              {patternCards.map(card => {
+                const pending = (card.status ?? 'active') === 'pending'
+                return (
+                  <article key={card.id} style={cardStyle} data-pattern-card={card.id} data-pattern-status={pending ? 'pending' : 'active'}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                      <span style={{ flex: 1, minWidth: 0, color: 'var(--dsw-alias-label-primary)', fontWeight: 500 }}>{card.task}</span>
+                      <span style={{
+                        flexShrink: 0, padding: '0 5px', borderRadius: 'var(--dsw-radius-sm, 4px)',
+                        border: '0.5px solid var(--dsw-alias-border-l3)',
+                        color: pending ? 'var(--dsw-alias-state-warning-primary, var(--dsw-alias-label-secondary))' : 'var(--dsw-alias-label-tertiary)',
+                        fontSize: 10, lineHeight: '16px',
+                      }}>{pending ? '待确认' : '已启用'}</span>
                     </span>
-                  )}
-                  <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>{whenText(card.createdAt)}</span>
-                </article>
-              ))}
+                    <span>做法：{card.approach}</span>
+                    {card.pitfalls !== undefined && card.pitfalls.length > 0 && (
+                      <span>注意：{card.pitfalls.join('；')}</span>
+                    )}
+                    {card.evidence !== undefined && card.evidence.length > 0 && (
+                      <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>
+                        证据：{card.evidence.join('、')}
+                      </span>
+                    )}
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dsw-alias-label-tertiary)' }}>
+                      <span style={{ flex: 1 }}>{whenText(card.createdAt)}</span>
+                      {pending && (
+                        <button type="button" disabled={patternBusy} onClick={() => { void actOnPattern(card.id, 'confirm') }}>启用</button>
+                      )}
+                      <button type="button" disabled={patternBusy} onClick={() => { void actOnPattern(card.id, 'delete') }}>删除</button>
+                    </span>
+                  </article>
+                )
+              })}
             </div>
           )}
+        {patternError !== undefined && <p style={mutedLineStyle} role="alert">{patternError}</p>}
       </section>
 
       {error !== undefined && (

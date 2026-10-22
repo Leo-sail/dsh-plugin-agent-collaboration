@@ -12,7 +12,7 @@
  *
  * Cards live on the room (`BotRoom.patternCards`), are de-duplicated by the normalized task,
  * newest first and capped. `renderGroupPatternsBlock` turns the newest few into the
- * `[本群协作模式]` prompt section — scoped to one room, so a pattern learned in one group can
+ * `[本群经验卡]` prompt section — scoped to one room, so a pattern learned in one group can
  * never leak into another.
  *
  * Everything here is pure and bounded; no model call, no storage, no clock beyond `now`.
@@ -86,6 +86,8 @@ export interface GroupPatternCardInput {
   /** Short evidence references (paths, message ids, task ids). */
   readonly evidence?: readonly string[] | undefined
   readonly now: string
+  /** `pending` = learned from a bypassed finish; confirm in settings before it enters prompts. */
+  readonly status?: 'active' | 'pending' | undefined
 }
 
 /**
@@ -123,6 +125,7 @@ export function buildGroupPatternCard(input: GroupPatternCardInput): GroupPatter
     ...(evidence.length > 0 ? { evidence } : {}),
     createdAt: input.now,
     source: 'finish',
+    ...(input.status !== undefined ? { status: input.status } : {}),
   }
 }
 
@@ -144,7 +147,7 @@ export function mergeGroupPatterns(
 }
 
 /**
- * Render the newest cards as the `[本群协作模式]` prompt section.
+ * Render the newest cards as the `[本群经验卡]` prompt section.
  *
  * Returns `undefined` when there is nothing to say — the caller then omits the section, so an
  * empty group pays no prompt cost. Only task/approach/pitfalls are rendered: evidence stays on
@@ -155,6 +158,8 @@ export function renderGroupPatternsBlock(
   limit: number = GROUP_PATTERNS_RENDER_LIMIT,
 ): string | undefined {
   const usable = (cards ?? [])
+    // Only ACTIVE cards enter the prompt; pending cards wait for the user's confirmation.
+    .filter(card => (card.status ?? 'active') === 'active')
     .filter(card => card.task.trim() !== '' && card.approach.trim() !== '')
     .slice(0, Math.max(0, Math.floor(limit)))
   if (usable.length === 0) return undefined
@@ -163,5 +168,5 @@ export function renderGroupPatternsBlock(
     const suffix = pitfalls.length > 0 ? `（坑：${pitfalls.join('；')}）` : ''
     return `· ${card.task}：${card.approach}${suffix}`
   })
-  return ['[本群协作模式]', ...lines].join('\n')
+  return ['[本群经验卡]', ...lines].join('\n')
 }

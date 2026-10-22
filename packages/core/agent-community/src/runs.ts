@@ -298,7 +298,7 @@ export interface CommunityStateAccessor {
    */
   roomConstraintsBlock(roomId: string): string | undefined
   /**
-   * The `[本群协作模式]` block for THIS room (OP-09), or undefined when it has no pattern cards.
+   * The `[本群经验卡]` block for THIS room (OP-09), or undefined when it has no pattern cards.
    *
    * Room-keyed like the goal/constraints accessors: a pattern learned in one group can never be
    * rendered into another group's prompt.

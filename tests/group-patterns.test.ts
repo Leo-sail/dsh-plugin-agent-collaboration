@@ -4,7 +4,7 @@
  * A card is built from the finish report (no model call): opening sentences → `approach`,
  * pitfall/risk lines → `pitfalls`, finish evidence → short references. Cards live per room,
  * de-duplicate by normalized task (newest wins), are capped, and render as the
- * `[本群协作模式]` prompt section.
+ * `[本群经验卡]` prompt section.
  *
  * Run with: node --test tests/group-patterns.test.ts  (Node v26 runs TypeScript directly)
  */
@@ -117,7 +117,17 @@ test('render includes the header, task/approach and pitfalls', () => {
   const block = renderGroupPatternsBlock([
     card({ task: '交付方案', approach: '先拆解再写', pitfalls: ['不要一次写太长', '先自检'] }),
   ])
-  assert.equal(block, '[本群协作模式]\n· 交付方案：先拆解再写（坑：不要一次写太长；先自检）')
+  assert.equal(block, '[本群经验卡]\n· 交付方案：先拆解再写（坑：不要一次写太长；先自检）')
+})
+
+test('only active cards enter the prompt; a pending card waits for confirmation', () => {
+  const block = renderGroupPatternsBlock([
+    card({ task: '已确认任务', approach: '按 A 做', status: 'active' }),
+    card({ task: '待确认任务', approach: '按 B 做', status: 'pending' }),
+  ])!
+  assert.match(block, /已确认任务/u)
+  assert.doesNotMatch(block, /待确认任务/u)
+  assert.equal(renderGroupPatternsBlock([card({ task: '只有待确认', status: 'pending' })]), undefined)
 })
 
 test('render returns undefined when there is nothing usable, and respects the limit', () => {

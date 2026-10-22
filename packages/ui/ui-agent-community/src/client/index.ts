@@ -167,6 +167,9 @@ const contribution = {
     // P1-2: host session predicate for conversation.view slot
     // P-clear: clear room messages + cancel stale failed runs
     descriptor('clearMessages', [param('roomId', str())]),
+    // OP-09 management: room experience cards (delete / confirm pending).
+    descriptor('deleteRoomPattern', [param('input', obj('RoomPatternRequest'))]),
+    descriptor('confirmRoomPattern', [param('input', obj('RoomPatternRequest'))]),
     // Notice rows: a model/permission/command result becomes a durable grey divider row.
     descriptor('noticeRoom', [param('input', obj('NoticeRoomRequest'))]),
     // Compaction: summarise the room's older messages with the host's own LLM path.
@@ -606,6 +609,8 @@ export function apply(ctx: ClientContext): void {
     getSessionVisibility: () => call('getSessionVisibility'),
     reconcileSessionVisibility: () => call('reconcileSessionVisibility'),
     clearMessages: (roomId) => call('clearMessages', roomId),
+    deleteRoomPattern: (input) => call('deleteRoomPattern', input),
+    confirmRoomPattern: (input) => call('confirmRoomPattern', input),
     noticeRoom: (input) => call('noticeRoom', input),
     // A compaction WAITS ON A MODEL, so it gets its own deadline. The shared 15 s one is a
     // "stuck RPC" detector for calls that answer from local state; applying it here reported
