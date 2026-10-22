@@ -213,8 +213,7 @@ export function RoomSettingsDialog({
             : bots.map(bot => (
               <label key={bot.id} className={css.check}>
                 <input type="checkbox" checked={members.includes(bot.id as BotId)} onChange={() => toggleMember(bot.id as BotId)} />
-                {bot.avatar.seed} {bot.name}
-                <small>{bot.description}</small>
+                <span>{bot.name}</span>
               </label>
             ))}
         </fieldset>

@@ -1,3 +1,7 @@
+## Unreleased — UI fix: member rows show only the bot name
+
+- 群聊设置的成员列表不再渲染头像 emoji 与 Bot 描述，只保留复选框 + Bot 名称；成员选择/保存逻辑不变。
+- UI tsc/tsdown/wrap 通过；无 core/后端/Bot 改动。
 ## Unreleased — P2 batch (all remaining P2 mechanisms)
 
 只改插件源码/测试；不改 Bot。
