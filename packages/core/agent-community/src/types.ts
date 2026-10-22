@@ -688,6 +688,14 @@ export interface ConfirmGroupRequest {
   readonly proposalId: string
   readonly memberIds: readonly string[]
   readonly name?: string | undefined
+  /**
+   * The leader the user picked in the dialog.
+   *
+   * Optional and validated at confirm time (`chooseValidLeader`): it must be one of the
+   * surviving members. Absent keeps the proposal's leader, which is the source bot when it
+   * was still a member — the bot that holds the task's first-hand context.
+   */
+  readonly leaderId?: string | undefined
 }
 
 export interface DeclineGroupRequest {

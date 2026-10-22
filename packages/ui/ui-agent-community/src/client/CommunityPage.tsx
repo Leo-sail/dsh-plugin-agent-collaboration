@@ -544,7 +544,10 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
 
       {/* Group proposal dialog (§5.4). `key` on the proposal id so a second proposal
           remounts the dialog and its countdown instead of inheriting the first one's
-          edited name and pending state. */}
+          edited name and pending state.
+          S7: `bots` is the FULL live directory (not just the proposal's candidates) so the
+          user can build the group from any bot; the edited member list and leader travel
+          back inside `ConfirmGroupRequest` through `onConfirm` (forwarded untouched). */}
       {proposal !== undefined && (
         <GroupProposalDialog
           key={proposal.id}

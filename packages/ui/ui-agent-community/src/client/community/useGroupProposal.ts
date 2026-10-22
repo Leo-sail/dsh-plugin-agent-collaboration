@@ -49,6 +49,15 @@ export interface GroupProposalFlow {
   proposal: GroupProposal | undefined
   /** §5.4: after a DM send, ask the host whether this task should become a group. */
   detectProposal: (roomId: string, messageId: string) => Promise<void>
+  /**
+   * Confirm the proposal with the user's edited roster.
+   *
+   * S7: the dialog owns member editing and the leader pick, so `input` carries
+   * `memberIds`/`leaderId` exactly as the user left them; this hook only forwards it to the
+   * host, which validates the final roster (bots still exist, at least two members, leader is
+   * one of them). No re-derivation happens here on purpose: the user's edit must not be
+   * silently repaired back to the suggestion.
+   */
   onConfirm: (input: ConfirmGroupRequest) => Promise<BotRoom>
   onDecline: (proposalId: string) => Promise<void>
   onConfirmed: (room: BotRoom) => void

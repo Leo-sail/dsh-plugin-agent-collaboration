@@ -14,6 +14,7 @@ import type { CommunityRemote, ModelGroup } from './types.ts'
 import { describe } from './types.ts'
 import { css } from '../styles.ts'
 import { GoalStrip } from './GoalStrip.tsx'
+import { shouldConsiderGroup } from './proposalGate.ts'
 import { BotConversationPanel } from '../conversation/BotConversationPanel.tsx'
 import type { BotConversationPanelProps } from '../conversation/BotConversationPanel.tsx'
 import type { AttachmentItem } from '../conversation/types.ts'
@@ -184,7 +185,15 @@ export function ConversationArea({
             // §5.4: only a DM can escalate into a group — a group already has
             // its members — and the check runs AFTER the send resolved so the
             // message the proposal is about is already in the room.
-            if (room.directBotId !== undefined) void onDetectProposal(roomId, sent.id)
+            //
+            // S7 GATE: the host's judgement is ONE extra model call, so an obviously
+            // single-turn message ("你好", "查下天气") skips it. This only decides whether
+            // to ASK — it never creates a group and never hides the explicit paths: a bot
+            // that announced a group with `propose_group` still reaches the user through
+            // the snapshot's pending proposal, and 新建群聊 in the sidebar is unchanged.
+            if (room.directBotId !== undefined && shouldConsiderGroup(text)) {
+              void onDetectProposal(roomId, sent.id)
+            }
           }}
           onStop={async (_roomId) => {
             const activeRuns = runs.filter(r =>

@@ -1,3 +1,34 @@
+## Unreleased — stability batch 4 (S7 group-member selection)
+
+修复用户问题 4：单聊 Bot 拉群协作时选中的 Bot 与本任务不适配。只改插件源码，不改任何 Bot。
+
+### 选人闭环
+- 新增 `capability.ts`：从 Bot 的 description、systemPrompt 的标题/职责/产出/边界段、
+  skillProfile 技能名生成确定性能力卡（domains/deliverables/skills/boundaries，上限 20 项），
+  不调用模型。
+- `rankCandidates`：对任务文本做中英混合词命中打分（技能 ×3、描述/领域 ×2、边界 ×0.5），
+  同分按 bot 名稳定排序，返回命中词用于解释；`shortlistFor` 保证源 Bot 必在短名单（≤4）。
+- `group-flow.consultModel` 只从短名单里选，prompt 要求"members 2–4、leader 必须∈members、
+  优先适配分高者、一 bot 能完成就不建群"，roster 带适配分/命中/领域/技能。
+- 强校验：成员 ⊆ 短名单且 2–4、leader ∈ 成员；不合法/模型失败 → 确定性 fallback
+  （短名单前 2–3、source Bot 为 leader）。`collaborate:false` 视为明确不建群，不 fallback。
+- 修复旧提案跨消息复用：pending 提案仅同 `sourceMessageId` 可复用；新消息不再拿到旧任务的
+  taskText。
+- `ConfirmGroupRequest` 加 `leaderId`；`confirm` 按 用户选择 → 提案 leader → 成员[0] 校验。
+- UI：`GroupProposalDialog` 成员区改为全部 Bot 可勾选（建议成员默认选中、标「建议」），
+  选中成员中单选 leader；确认按钮按 `validateProposalSelection`（≥2 人、leader∈成员）禁用并
+  显示原因；确认传用户编辑后的 `memberIds`/`leaderId`。
+- 新增发送后触发门槛 `shouldConsiderGroup`（协作词 / ≥2 产出物 / ≥60 字），明显单句问候不再
+  每次触发一次选人模型调用；Bot 自己 `propose_group` 的路径不受影响。
+- 新增 `tests/capability-proposal.test.ts`（13）与 `tests/proposal-edit.test.ts`（18）。
+
+### 验证
+- `node --test tests/*.test.ts`：**104/104 通过**（selection 9 + ledger-window 9 + room-goal 27 +
+  publish-policy 13 + session-runner-abort 2 + group-task 13 + capability-proposal 13 +
+  proposal-edit 18）。
+- UI/core typecheck（过滤宿主缺失 d.ts 噪声）：0 真实错误；四包 tsdown + check-build = OK。
+- 本轮只同步 GitHub 源码；未安装/未重启、未发布 npm、未更新插件市场。
+
 ## Unreleased — stability batch 3 (S5 stop/interrupt + group orchestration)
 
 修复"停止生成后模型仍继续跑"以及群编排的停摆/死循环问题；只改插件源码，不改任何 Bot。

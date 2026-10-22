@@ -24,6 +24,15 @@ import type {
   PendingGroupProposal, ProposeGroupRequest, RoomTaskState,
 } from './types.ts'
 import type { LlmStream } from './skills-profile.ts'
+import {
+  buildCapabilityCard,
+  chooseValidLeader,
+  fallbackSelection,
+  sanitizeCollaborateSelection,
+  shortlistFor,
+  type CapabilityCard,
+  type RankedCandidate,
+} from './capability.ts'
 
 /** §5.6: one turn may pull in at most four bots. */
 export const MAX_INVITES_PER_ROUND = 4
@@ -48,6 +57,25 @@ export const DEFAULT_PROPOSAL_TIMEOUT_MS = 120_000
 export const INVITE_ROUND_WINDOW_MS = 60_000
 /** The model may propose a handful of members, never the whole roster. */
 const MAX_PROPOSED_MEMBERS = 4
+
+/**
+ * The outcome of asking the direct-chat bot's model which bots should take part.
+ *
+ * `no-group` is a DECISION ("one bot is enough") and must not be overruled; `failed` is the
+ * absence of one (no provider, transport error, unreadable answer) and may fall back to the
+ * deterministic shortlist. Collapsing the two — the old `undefined` did — is what would let a
+ * fallback drag bots into a group the model had explicitly judged unnecessary.
+ */
+type ConsultVerdict =
+  | {
+    readonly kind: 'decided'
+    readonly members: string[]
+    readonly leaderId?: string | undefined
+    readonly name?: string | undefined
+    readonly reason?: string | undefined
+  }
+  | { readonly kind: 'no-group' }
+  | { readonly kind: 'failed' }
 
 /** Everything the flow needs from the host service. */
 export interface GroupFlowPort {
@@ -202,7 +230,17 @@ export class GroupFlowService {
 
     const existing = room.pendingGroupProposal
     if (existing !== undefined && existing.status === 'pending') {
-      if (!this.expired(existing)) return this.toProposal(existing)
+      if (!this.expired(existing)) {
+        // ── A DIFFERENT MESSAGE IS A DIFFERENT TASK ──────────────────────────────
+        //
+        // A pending proposal belongs to the message that produced it. Returning it for a
+        // LATER message showed the user a dialog whose taskText was the previous request, and
+        // confirming it started the group on stale words — the last thing a user who already
+        // reported "the bots don't fit" needs. Only the SAME message may reuse it (the panel
+        // and the bot's own tool can both ask); otherwise the new task gets no proposal until
+        // the user answers the dialog that is already open.
+        return existing.sourceMessageId === message.id ? this.toProposal(existing) : undefined
+      }
       this.resolveExpired(room, existing)
     }
 
@@ -210,6 +248,24 @@ export class GroupFlowService {
     // A group needs at least two participants; with one bot in the community there
     // is nothing to propose and no model call to pay for.
     if (alive.length < 2) return undefined
+
+    // ── WHO COULD ACTUALLY DO THIS? (deterministic, before any model call) ─────
+    //
+    // The cards and the shortlist are built from the live bots and the task text. The model
+    // then chooses INSIDE the shortlist; a model failure falls back to the shortlist too.
+    // This is what stops "pull in whichever bots happen to exist": every candidate carries a
+    // fit score and the hits that produced it, so the proposal can say why it named them.
+    const cards = alive.map(bot => buildCapabilityCard({
+      id: bot.id,
+      name: bot.name,
+      description: bot.description,
+      ...(bot.systemPrompt !== undefined ? { systemPrompt: bot.systemPrompt } : {}),
+      ...(bot.skillProfile !== undefined ? { skillProfile: { names: bot.skillProfile.names } } : {}),
+    }))
+    const shortlist = shortlistFor(message.text, cards, room.directBotId, MAX_PROPOSED_MEMBERS)
+    // The source bot is always on the shortlist, so fewer than two means there is no second
+    // bot to collaborate with.
+    if (shortlist.length < 2) return undefined
 
     const explicit = (input.memberIds ?? []).filter(id => typeof id === 'string' && id !== '')
     const decided = explicit.length > 0
@@ -219,7 +275,7 @@ export class GroupFlowService {
         name: input.name,
         reason: input.reason,
       }
-      : await this.consultModel(room, sourceBot, message.text, alive)
+      : await this.decideMembers(room, sourceBot, message.text, shortlist, cards)
     if (decided === undefined) return undefined
 
     const members: BotId[] = []
@@ -230,9 +286,14 @@ export class GroupFlowService {
     }
     if (members.length < 2) return undefined
 
-    const leaderId = members.find(id => id === decided.leaderId)
-      ?? members.find(id => id === room.directBotId)
-      ?? members[0]!
+    // The leader defaults to the source bot when it is a member — it is the bot that already
+    // holds the task's context — unless the model (or the user, at confirm time) named a
+    // valid member explicitly.
+    const leaderId = chooseValidLeader({
+      members,
+      ...(decided.leaderId !== undefined ? { leaderId: decided.leaderId } : {}),
+      sourceBotId: room.directBotId,
+    }) ?? members[0]!
     const proposal: PendingGroupProposal = {
       id: this.port.nextId(),
       roomId: room.id,
@@ -245,7 +306,7 @@ export class GroupFlowService {
         ? decided.name.trim()
         : `${room.name} + 协作`,
       memberIds: members,
-      leaderId,
+      leaderId: leaderId as BotId,
       reason: decided.reason?.trim() !== undefined && decided.reason?.trim() !== ''
         ? decided.reason.trim()
         : '这个任务更适合由多个 Bot 协作完成',
@@ -316,8 +377,15 @@ export class GroupFlowService {
     if (members.length < 2) {
       throw new Error('A collaboration group needs at least two bots that still exist')
     }
-    const leaderId = members.includes(proposal.leaderId) ? proposal.leaderId : members[0]!
-    const leaderName = alive.get(leaderId)?.name ?? leaderId
+    // The user may pick the leader in the dialog (`input.leaderId`); otherwise the proposal's
+    // leader, otherwise the first surviving member. Every candidate is re-checked against the
+    // live member list — a bot removed while the dialog was open cannot lead.
+    const leaderId = chooseValidLeader({
+      members,
+      ...(input.leaderId !== undefined ? { leaderId: input.leaderId } : {}),
+      fallbackLeaderId: proposal.leaderId,
+    }) ?? members[0]!
+    const leaderName = alive.get(leaderId as BotId)?.name ?? leaderId
     const name = input.name !== undefined && input.name.trim() !== '' ? input.name.trim() : proposal.name
 
     const group = await this.port.createRoom({
@@ -352,7 +420,7 @@ export class GroupFlowService {
     // Exactly one run: the leader decides who works, and pulls people in with
     // `invite_bot`. Starting every member here would be the "全体各跑一次" model
     // the leader-driven design replaced.
-    this.port.queueRun({ roomId: group.id, botId: leaderId, prompt: proposal.taskText, origin: 'user' })
+    this.port.queueRun({ roomId: group.id, botId: leaderId as BotId, prompt: proposal.taskText, origin: 'user' })
     this.port.nudge()
     return group
   }
@@ -752,32 +820,121 @@ export class GroupFlowService {
 
   private readonly roundInviteCounts = new Map<string, number>()
 
-  /** The direct-chat bot's own judgement, via a session-less model call. */
-  private async consultModel(
+  /**
+   * Who takes part, decided by the model INSIDE the shortlist, with a deterministic fallback.
+   *
+   * Three outcomes matter differently:
+   *   · "one bot is enough" — a DECISION: no group is proposed (the model judged the task);
+   *   · a selection — accepted only if it stays inside the shortlist;
+   *   · no usable answer — fall back to the ranked shortlist, which is still a defensible
+   *     proposal (fit-ranked, and the user confirms before anything runs).
+   */
+  private async decideMembers(
     room: BotRoom,
     sourceBot: BotIdentity | undefined,
     text: string,
-    alive: readonly BotIdentity[],
+    shortlist: readonly RankedCandidate[],
+    cards: readonly CapabilityCard[],
   ): Promise<{ members: string[]; leaderId?: string | undefined; name?: string | undefined; reason?: string | undefined } | undefined> {
-    const stream = this.port.stream()
-    if (stream === undefined || sourceBot?.provider === undefined || sourceBot.model === undefined) return undefined
     if (text.trim() === '') return undefined
-    const roster = alive.slice(0, 40).map(b => {
-      const description = (b.description ?? '').replace(/\s+/gu, ' ').slice(0, 120)
-      return `- id=${b.id} 名称=${b.name}${description === '' ? '' : ` 角色=${description}`}`
+    const verdict = await this.consultModel(sourceBot, text, shortlist, cards)
+    if (verdict.kind === 'no-group') return undefined
+    if (verdict.kind === 'decided') {
+      // The prompt asks for ids, but a model naming a bot by its display name is still
+      // unambiguous: resolve a name to the shortlist's id before validating. Anything that
+      // is NEITHER is rejected below — it was never offered.
+      const shortlistIds = shortlist.map(candidate => candidate.botId)
+      const byName = new Map(
+        cards
+          .filter(card => shortlistIds.includes(card.botId))
+          .map(card => [card.name, card.botId] as const),
+      )
+      const resolve = (reference: string): string => byName.get(reference) ?? reference
+      const selection = sanitizeCollaborateSelection(
+        {
+          members: verdict.members.map(resolve),
+          ...(verdict.leaderId !== undefined ? { leaderId: resolve(verdict.leaderId) } : {}),
+        },
+        shortlistIds,
+        room.directBotId,
+        MAX_PROPOSED_MEMBERS,
+      )
+      if (selection !== undefined) {
+        return {
+          members: [...selection.members],
+          leaderId: selection.leaderId,
+          ...(verdict.name !== undefined ? { name: verdict.name } : {}),
+          ...(verdict.reason !== undefined ? { reason: verdict.reason } : {}),
+        }
+      }
+      // The model named bots that were never offered (or too few of them). Falling through
+      // to the deterministic list is the only safe answer: proposing an unvetted roster is
+      // exactly the "it picked bots that do not fit" failure this path exists to remove.
+    }
+    const fallback = fallbackSelection(shortlist, room.directBotId)
+    if (fallback === undefined) return undefined
+    return {
+      members: [...fallback.members],
+      leaderId: fallback.leaderId,
+      reason: '模型未能给出可用的选人结果，已按能力匹配的确定性候选建群（仍由你确认）',
+    }
+  }
+
+  /**
+   * The direct-chat bot's own judgement, via a session-less model call.
+   *
+   * The model only ever sees the SHORTLIST (fit-ranked, with each candidate's score and the
+   * task terms it matched) and its answer is validated against that list afterwards. It also
+   * gets to answer "one bot is enough", which is respected: that is a decision, not a failure.
+   */
+  private async consultModel(
+    sourceBot: BotIdentity | undefined,
+    text: string,
+    shortlist: readonly RankedCandidate[],
+    cards: readonly CapabilityCard[],
+  ): Promise<ConsultVerdict> {
+    const stream = this.port.stream()
+    if (stream === undefined || sourceBot?.provider === undefined || sourceBot.model === undefined) {
+      return { kind: 'failed' }
+    }
+    const cardById = new Map(cards.map(card => [card.botId, card]))
+    // Best fit first: the source bot is on the shortlist for the fallback's sake, but a
+    // stale array order must not look like a preference to the model.
+    const ordered = [...shortlist].sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score
+      const leftName = cardById.get(left.botId)?.name ?? left.botId
+      const rightName = cardById.get(right.botId)?.name ?? right.botId
+      return leftName < rightName ? -1 : leftName > rightName ? 1 : 0
+    })
+    const roster = ordered.map(candidate => {
+      const card = cardById.get(candidate.botId)
+      if (card === undefined) return `- id=${candidate.botId} 适配分=${candidate.score}`
+      return [
+        `- id=${card.botId}`,
+        `名称=${card.name}`,
+        `适配分=${candidate.score}`,
+        `命中=${candidate.matched.slice(0, 6).join('、') || '（无）'}`,
+        ...(card.domains.length > 0 ? [`领域=${card.domains.slice(0, 3).join('、')}`] : []),
+        ...(card.skills.length > 0 ? [`技能=${card.skills.slice(0, 3).join('、')}`] : []),
+        ...(card.deliverables.length > 0 ? [`产出=${card.deliverables.slice(0, 2).join('、')}`] : []),
+        ...(card.boundaries.length > 0 ? [`边界=${card.boundaries.slice(0, 1).join('、')}`] : []),
+      ].join(' ')
     }).join('\n')
     const system = [
-      '你是一个协作调度助手。判断用户这条消息是否需要多个 Bot 协作完成。',
+      '你是一个协作调度助手。下面给出候选 Bot（已按与这条任务的相关度排序，含适配分与命中词）。',
+      '判断用户这条消息是否需要多个 Bot 协作完成：',
+      '- 一个 Bot 就能完成 → 只输出 {"collaborate":false}。',
+      `- 需要协作 → 只输出 {"collaborate":true,"name":"群名","members":["候选 id",...],"leader":"成员 id","reason":"一句话理由"}。`,
+      `规则：members 只能从候选名单里选，至少 2 个、最多 ${MAX_PROPOSED_MEMBERS} 个；`,
+      'leader 必须是 members 之一：默认选发起本次单聊的 Bot（它就是刚接到这条任务的 Bot，掌握第一手上下文）；',
+      '除非某个成员的适配分明显更高、且更适合统筹，才选那个成员。',
       '只输出一个 JSON 对象，不要输出解释或 Markdown 代码块。',
-      '需要协作时：{"collaborate":true,"name":"群名","members":["bot id",...],"leader":"bot id","reason":"一句话理由"}',
-      `members 至少 2 个、最多 ${MAX_PROPOSED_MEMBERS} 个，且必须来自给出的名单（用 id 字段）。`,
-      '一个 Bot 就能完成时：{"collaborate":false}',
     ].join('\n')
     const user = [
       '[用户消息]',
       text.slice(0, 4_000),
       '',
-      '[可选的 Bot 名单]',
+      '[候选 Bot（按与本任务的相关度排序）]',
       roster,
     ].join('\n')
 
@@ -804,46 +961,86 @@ export class GroupFlowService {
           if (chunk.reason?.kind === 'aborted') throw new Error('proposal request aborted')
         }
       }
-      const parsed = parseProposalAnswer(answer)
-      if (parsed === undefined) return undefined
-      return parsed
+      const decision = parseProposalDecision(answer)
+      if (decision.kind === 'no-group') return { kind: 'no-group' }
+      if (decision.kind === 'unreadable') return { kind: 'failed' }
+      return {
+        kind: 'decided',
+        members: decision.members,
+        ...(decision.leaderId !== undefined ? { leaderId: decision.leaderId } : {}),
+        ...(decision.name !== undefined ? { name: decision.name } : {}),
+        ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+      }
     } catch (error: unknown) {
-      // No proposal is always an acceptable answer: the direct chat keeps working.
+      // A failed analysis is not "no group": the caller falls back to the ranked shortlist.
       this.port.logger?.warn?.(`agent-community: group proposal analysis failed: ${String(error)}`)
-      return undefined
+      return { kind: 'failed' }
     } finally {
       clearTimeout(timer)
     }
   }
 }
 
+/** What a model's proposal answer means — keeping "one bot is enough" apart from "unreadable". */
+export type ProposalDecision =
+  | { readonly kind: 'no-group' }
+  | { readonly kind: 'unreadable' }
+  | {
+    readonly kind: 'collaborate'
+    readonly members: string[]
+    readonly leaderId?: string | undefined
+    readonly name?: string | undefined
+    readonly reason?: string | undefined
+  }
+
 /**
- * Read the model's proposal decision.
+ * Read the model's proposal answer.
  *
- * Anything that is not `collaborate: true` — including malformed JSON — means "no
- * group": the failure mode of a bogus roster must be a missing dialog, never a
- * dialog naming bots the user cannot see.
+ * The distinction matters to the caller: `no-group` is a DECISION ("one bot is enough") and
+ * must not be overruled by a deterministic fallback, while `unreadable` is the absence of an
+ * answer and may be. Malformed JSON never produces a dialog that names unvetted bots.
  */
-export function parseProposalAnswer(text: string): { members: string[]; leaderId?: string | undefined; name?: string | undefined; reason?: string | undefined } | undefined {
+export function parseProposalDecision(text: string): ProposalDecision {
   const match = /\{[\s\S]*\}/u.exec(text)
-  if (match === null) return undefined
+  if (match === null) return { kind: 'unreadable' }
   let parsed: unknown
   try {
     parsed = JSON.parse(match[0])
   } catch {
-    return undefined
+    return { kind: 'unreadable' }
   }
-  if (parsed === null || typeof parsed !== 'object') return undefined
+  if (parsed === null || typeof parsed !== 'object') return { kind: 'unreadable' }
   const record = parsed as Record<string, unknown>
-  if (record['collaborate'] !== true) return undefined
+  // Anything but an explicit `true` is "no group": a truthy-looking answer from a confused
+  // model must never be read as permission to build a roster.
+  if (record['collaborate'] !== true) return { kind: 'no-group' }
   const members = Array.isArray(record['members'])
     ? record['members'].filter((m): m is string => typeof m === 'string' && m !== '').slice(0, MAX_PROPOSED_MEMBERS)
     : []
-  if (members.length === 0) return undefined
+  if (members.length === 0) return { kind: 'unreadable' }
   return {
+    kind: 'collaborate',
     members,
     ...(typeof record['leader'] === 'string' && record['leader'] !== '' ? { leaderId: record['leader'] } : {}),
     ...(typeof record['name'] === 'string' && record['name'] !== '' ? { name: record['name'] } : {}),
     ...(typeof record['reason'] === 'string' && record['reason'] !== '' ? { reason: record['reason'] } : {}),
+  }
+}
+
+/**
+ * Read the model's proposal decision, keeping the historical shape.
+ *
+ * Anything that is not `collaborate: true` — including malformed JSON — means "no group":
+ * the failure mode of a bogus roster must be a missing dialog, never a dialog naming bots
+ * the user cannot see.
+ */
+export function parseProposalAnswer(text: string): { members: string[]; leaderId?: string | undefined; name?: string | undefined; reason?: string | undefined } | undefined {
+  const decision = parseProposalDecision(text)
+  if (decision.kind !== 'collaborate') return undefined
+  return {
+    members: decision.members,
+    ...(decision.leaderId !== undefined ? { leaderId: decision.leaderId } : {}),
+    ...(decision.name !== undefined ? { name: decision.name } : {}),
+    ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
   }
 }

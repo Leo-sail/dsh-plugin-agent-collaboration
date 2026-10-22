@@ -13,10 +13,21 @@
  * message and passes it in. See the wiring notes there.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import { NativeDialog } from './NativeDialog.tsx'
+import { NativeCheckbox } from './NativeControls.tsx'
 import { css } from '../styles.ts'
 import type { BotRoom, ConfirmGroupRequest, GroupProposal } from '@dsh-plugin/agent-community'
+import {
+  MIN_PROPOSAL_MEMBERS,
+  initialProposalSelection,
+  setProposalLeader,
+  sortProposalBots,
+  toggleProposalMember,
+  validateProposalSelection,
+  type ProposalSelection,
+} from './proposalEdit.ts'
 import {
   PROPOSAL_CONFIRM, PROPOSAL_CONFIRMING, PROPOSAL_DECLINE, PROPOSAL_LEADER,
   PROPOSAL_MEMBERS_LABEL, PROPOSAL_NAME_LABEL, PROPOSAL_NO_DESCRIPTION,
@@ -150,6 +161,11 @@ export type ProposalChoice =
     /** The (possibly edited) group name. */
     readonly name: string
     readonly memberIds: readonly string[]
+    /**
+     * S7: the leader the USER picked among the members. Omitted only when the selection has
+     * no leader, which validation forbids before this point is reached.
+     */
+    readonly leaderId?: string | undefined
   }
   | { readonly choice: 'solo'; readonly proposalId: string; readonly cause: 'user' | 'timeout' }
 
@@ -169,6 +185,9 @@ export async function applyProposalDecision(
     const room = await deps.confirmGroup({
       proposalId: choice.proposalId,
       memberIds: choice.memberIds,
+      // S7: the user's own leader pick beats the host's suggestion. Sent only when the
+      // dialog actually has one; the host validates it against the members it accepted.
+      ...(choice.leaderId !== undefined ? { leaderId: choice.leaderId } : {}),
       // An emptied name field must not create an unnamed room: the host's default
       // name is better than a blank one.
       ...(name !== '' ? { name } : {}),
@@ -181,7 +200,11 @@ export async function applyProposalDecision(
 
 export interface GroupProposalDialogProps {
   proposal: GroupProposal
-  /** Live directory; member rows and their role descriptions come from here. */
+  /**
+   * The FULL live directory (not just the suggested members): S7 lets the user build the
+   * group from any bot, so the dialog needs every candidate row, its role description and
+   * the set of bots that still exist.
+   */
   bots: readonly ProposalBot[]
   /** Overridable for tests; defaults to {@link PROPOSAL_TIMEOUT_MS}. */
   timeoutMs?: number | undefined
@@ -193,21 +216,65 @@ export interface GroupProposalDialogProps {
   onDeclined(proposalId: string, cause: 'user' | 'timeout'): void
 }
 
+/** The "建议" badge next to a suggested member's name (same chrome as the leader tag). */
+const suggestedBadgeStyle: CSSProperties = {
+  flex: 'none',
+  padding: '1px 6px',
+  borderRadius: 'var(--dsw-radius-sm, 4px)',
+  background: 'var(--dsw-alias-interactive-bg-hover)',
+  color: 'var(--dsw-alias-label-secondary)',
+  fontSize: 11,
+  fontWeight: 500,
+  lineHeight: '16px',
+}
+
+/** The "设为负责人" radio row under a selected member's description. */
+const leaderPickStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  marginTop: 6,
+  color: 'var(--dsw-alias-label-secondary)',
+  fontSize: 12,
+  lineHeight: '18px',
+  cursor: 'pointer',
+}
+
+const leaderRadioStyle: CSSProperties = {
+  flex: 'none',
+  margin: 0,
+  accentColor: 'var(--dsw-alias-brand-primary)',
+}
+
 export function GroupProposalDialog({
   proposal, bots, timeoutMs = PROPOSAL_TIMEOUT_MS, onConfirm, onDecline, onConfirmed, onDeclined,
 }: GroupProposalDialogProps) {
   const view = buildProposalView(proposal, bots)
+  // S7: the member list is the WHOLE live directory (sorted by name), not just the host's
+  // suggestion — the user may add any bot, drop suggested ones and pick the leader. The
+  // suggestion only seeds the selection, and suggested rows keep a 「建议」 badge.
+  const directory = sortProposalBots(bots)
+  const [selection, setSelection] = useState<ProposalSelection>(() => initialProposalSelection({
+    memberIds: view.memberIds,
+    ...(proposal.suggestedLeaderId !== undefined
+      ? { suggestedLeaderId: proposal.suggestedLeaderId }
+      : {}),
+  }))
   const [name, setName] = useState(view.name)
   const [pending, setPending] = useState<'collaborate' | 'solo' | undefined>(undefined)
   const [error, setError] = useState<string | undefined>(undefined)
   const [remainingMs, setRemainingMs] = useState(timeoutMs)
+  // The confirm button follows the pure rule set: two members minimum, and the leader must
+  // be one of them. The reason is shown under the member list, so a disabled button is never
+  // a dead end.
+  const validation = validateProposalSelection(selection)
 
   // Latest props/state behind a ref. CommunityPage re-renders on every snapshot poll
   // (400ms while a run is live), and a timer effect that depended on those values
   // would be re-armed on each render — pushing the deadline out forever.
-  const latest = useRef({ view, name, timeoutMs, onConfirm, onDecline, onConfirmed, onDeclined })
+  const latest = useRef({ view, name, selection, timeoutMs, onConfirm, onDecline, onConfirmed, onDeclined })
   useEffect(() => {
-    latest.current = { view, name, timeoutMs, onConfirm, onDecline, onConfirmed, onDeclined }
+    latest.current = { view, name, selection, timeoutMs, onConfirm, onDecline, onConfirmed, onDeclined }
   })
 
   // One settle per dialog instance: a click that races the timeout must not run both
@@ -222,7 +289,13 @@ export function GroupProposalDialog({
     try {
       const decision = await applyProposalDecision(
         choice === 'collaborate'
-          ? { choice: 'collaborate', proposalId: proposal.id, name: l.name, memberIds: l.view.memberIds }
+          ? {
+            choice: 'collaborate',
+            proposalId: proposal.id,
+            name: l.name,
+            memberIds: l.selection.memberIds,
+            ...(l.selection.leaderId !== undefined ? { leaderId: l.selection.leaderId } : {}),
+          }
           : { choice: 'solo', proposalId: proposal.id, cause },
         { confirmGroup: l.onConfirm, declineGroup: input => l.onDecline(input.proposalId) },
       )
@@ -281,7 +354,12 @@ export function GroupProposalDialog({
           <Button variant="outline" disabled={busy} onClick={() => { void settle('solo', 'user') }}>
             {PROPOSAL_DECLINE}
           </Button>
-          <Button variant="primary" disabled={busy} onClick={() => { void settle('collaborate', 'user') }}>
+          <Button
+            variant="primary"
+            disabled={busy || !validation.ok}
+            {...(!validation.ok && validation.reason !== undefined ? { title: validation.reason } : {})}
+            onClick={() => { void settle('collaborate', 'user') }}
+          >
             {pending === 'collaborate' ? PROPOSAL_CONFIRMING : PROPOSAL_CONFIRM}
           </Button>
         </div>
@@ -299,27 +377,75 @@ export function GroupProposalDialog({
         </div>
 
         <div className="ac-proposal-block">
-          <span className="ac-proposal-field-label">{PROPOSAL_MEMBERS_LABEL}（{view.members.length}）</span>
-          {view.members.length === 0
+          <span className="ac-proposal-field-label">
+            {PROPOSAL_MEMBERS_LABEL}（已选 {selection.memberIds.length} / 共 {directory.length}）
+          </span>
+          <p className="ac-proposal-empty" data-proposal-hint="">
+            建议成员已默认勾选（标「建议」）；可增删任意 Bot，至少 {MIN_PROPOSAL_MEMBERS} 个成员，
+            并在已选成员中指定负责人。
+          </p>
+          {directory.length === 0
             ? <p className="ac-proposal-empty">{PROPOSAL_NO_MEMBERS}</p>
             : (
               <ul className="ac-proposal-members">
-                {view.members.map(m => (
-                  <li key={m.id} className="ac-proposal-member" data-role={m.isLeader ? 'leader' : 'member'}>
-                    <span className="ac-proposal-member-avatar" aria-hidden="true">{m.avatarSeed ?? '🤖'}</span>
-                    <span className="ac-proposal-member-text">
-                      <span className="ac-proposal-member-name">
-                        {m.name}
-                        {m.isLeader && <span className="ac-proposal-leader">{PROPOSAL_LEADER}</span>}
+                {directory.map(bot => {
+                  const checked = selection.memberIds.includes(bot.id)
+                  const suggested = view.memberIds.includes(bot.id)
+                  const isLeader = selection.leaderId === bot.id
+                  return (
+                    <li
+                      key={bot.id}
+                      className="ac-proposal-member"
+                      data-role={isLeader ? 'leader' : 'member'}
+                      {...(checked ? { 'data-selected': 'true' } : {})}
+                      {...(suggested ? { 'data-suggested': 'true' } : {})}
+                    >
+                      <span className="ac-proposal-member-avatar" aria-hidden="true">{bot.avatarSeed ?? '🤖'}</span>
+                      <span className="ac-proposal-member-text">
+                        <span className="ac-proposal-member-name">
+                          <NativeCheckbox
+                            checked={checked}
+                            disabled={busy}
+                            onChange={() => setSelection(prev => toggleProposalMember(prev, bot.id))}
+                            label={(
+                              <>
+                                {bot.name}
+                                {suggested && <span style={suggestedBadgeStyle} data-suggested-badge="">建议</span>}
+                                {isLeader && <span className="ac-proposal-leader">{PROPOSAL_LEADER}</span>}
+                              </>
+                            )}
+                          />
+                        </span>
+                        <span className="ac-proposal-member-desc">
+                          {bot.description !== undefined && bot.description !== ''
+                            ? bot.description
+                            : PROPOSAL_NO_DESCRIPTION}
+                        </span>
+                        {checked && (
+                          <label style={leaderPickStyle}>
+                            <input
+                              type="radio"
+                              name={`ac-proposal-leader-${proposal.id}`}
+                              checked={isLeader}
+                              disabled={busy}
+                              onChange={() => setSelection(prev => setProposalLeader(prev, bot.id, prev.memberIds))}
+                              aria-label={`把 ${bot.name} 设为负责人`}
+                              style={leaderRadioStyle}
+                            />
+                            设为负责人
+                          </label>
+                        )}
                       </span>
-                      <span className="ac-proposal-member-desc">
-                        {m.description !== '' ? m.description : PROPOSAL_NO_DESCRIPTION}
-                      </span>
-                    </span>
-                  </li>
-                ))}
+                    </li>
+                  )
+                })}
               </ul>
             )}
+          {!validation.ok && validation.reason !== undefined && (
+            <p className="ac-proposal-empty" data-proposal-validation="invalid" role="status">
+              {validation.reason}
+            </p>
+          )}
         </div>
 
         {error !== undefined && <p className="ac-proposal-error">{error}</p>}
