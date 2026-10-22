@@ -7,6 +7,13 @@
 - 包版本：bundle **0.3.5**、core **0.3.4**；tools/UI 无代码变化，版本保持 0.3.2/0.3.9。
 - 全量测试 **542/542**；core tsc/build 通过。
 
+### 发布状态（2026-10-22）
+
+- npm：core **0.3.4**、bundle **0.3.5**（latest）；tools 0.3.2 / ui 0.3.9 无变化
+- GitHub Release：`v0.3.5`，同一 tarball（sha256 `c3a180c1…`）
+- 市场 PR：awesome-dsh-plugin#8683 已更新到 v0.3.5，等待维护者合并
+- desktop profile 已从 npm 安装 0.3.5；需重启 DSH 生效
+
 ## Unreleased — long-task active-tool exemption
 
 - `tool/call` / `tool/result` now feed distinct `tool-start` / `tool-end` progress events.
@@ -17,7 +24,7 @@
   bootstrap): a real `sleep 20` tool completed in 25s instead of being killed; the 3s
   control run stopped before the tool started.
 - Test: `activeToolExemptsNoProgress` boundary + full **542/542**; core tsc/build OK.
-- Installed as a local hotfix over the 0.3.4 desktop package; not yet republished.
+- 已发布：npm bundle **0.3.5** / core **0.3.4**；GitHub Release `v0.3.5`；市场 PR #8683 已更新。
 
 ## 0.3.4 — 论文驱动优化：稳定性、记忆、协作与 UI
 
