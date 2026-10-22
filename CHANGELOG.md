@@ -1,3 +1,9 @@
+## Unreleased — diagnose completed-but-empty turns
+
+- 运行诊断补充一种情况：`status=completed` 且 `finishPath=empty`（用户收到空回复）也视为问题，
+  在会话里写灰色「诊断：本轮没有产生任何回复（模型输出为空）…」；正常 completed/reply 不触发。
+- internal 协调 turn 的空输出跳过，避免把内部编排噪声写进房间。
+- `tests/run-diagnosis` 增加空完成/正常完成边界；全量 **541/541**。
 ## Unreleased — group settings: remove members
 
 - 群成员行增加「移除」按钮；点击后行内二次确认「确认移除 / 取消」。

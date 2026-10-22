@@ -5263,6 +5263,9 @@ export class AgentCommunityService extends TypertRemoteService {
    * pause, no task changes.
    */
   private maybeDiagnoseRun(run: BotRun): void {
+    // Internal coordination turns may legitimately finish with no user-facing text; do not
+    // turn that into a grey diagnosis line in the room.
+    if (run.publish === 'internal' && run.evidence?.finishPath === 'empty') return
     const runId = String(run.id)
     if (this.diagnosedRunIds.has(runId)) return
     const diagnosis = diagnoseRunFailure({

@@ -138,6 +138,13 @@ test('the fixed prefix is 诊断： and the line stays a plain grey notice', () 
   }
 })
 
+test('a completed run with empty output is diagnosed, unlike a normal completed reply', () => {
+  const empty = diagnoseRunFailure({ status: 'completed', finishPath: 'empty' })!
+  assert.match(empty.text, /没有产生任何回复/u)
+  assert.equal(diagnoseRunFailure({ status: 'completed', finishPath: 'reply' }), undefined)
+  assert.equal(diagnoseRunFailure({ status: 'completed', finishPath: 'finish_task' }), undefined)
+})
+
 test('colour-label words even inside the error text are stripped', () => {
   const diagnosis = diagnoseRunFailure({
     status: 'failed',

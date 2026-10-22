@@ -101,6 +101,7 @@ function causeOf(input: RunDiagnosisInput): string {
       // No attribution recorded: fall back to what the budget fields say.
       if (budgetTimeout) return '运行超时（框架侧）'
       if (budgetNoProgress) return '运行无进展（框架侧）'
+      if (finishPath === 'empty') return '本轮没有产生任何回复（模型输出为空）'
       return input.status === 'failed' ? '未归因失败' : '框架/运行预算问题'
   }
 }
@@ -133,10 +134,14 @@ function contextOf(
  * a stray fault field is set: a turn the user stopped is not a failure to diagnose.
  */
 export function diagnoseRunFailure(input: RunDiagnosisInput): RunDiagnosis | undefined {
-  if (BENIGN_STATUSES.has(input.status)) return undefined
+  // A completed run with NO output is still a user-visible problem: the turn "succeeded"
+  // technically but the user received nothing. Diagnose it; a normal completed reply does not.
+  const emptyCompletion = input.status === 'completed' && input.finishPath === 'empty'
+  if (BENIGN_STATUSES.has(input.status) && !emptyCompletion) return undefined
   const problematicPath = input.finishPath === 'failed'
     || input.finishPath === 'timeout'
     || input.finishPath === 'no-progress'
+    || input.finishPath === 'empty'
   const problematicSide = input.faultSide !== undefined && input.faultSide !== 'user'
   if (input.status !== 'failed' && !problematicSide && !problematicPath) return undefined
 
