@@ -6,7 +6,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { CSSProperties } from 'react'
 import type { LedgerEntry, AttachmentItem, InFlightMessage } from './types.ts'
-import { mergeLedgerEntries, missingAnswerRunIds, nextBackfillPage } from './ledgerWindow.ts'
+import { ledgerCursor, mergeLedgerEntries, missingAnswerRunIds, nextBackfillPage } from './ledgerWindow.ts'
 import {
   IconChevronDownOutlineRegular, IconPanelLeftOutlineRegular,
 } from './NativeIcons.tsx'
@@ -159,6 +159,8 @@ export interface BotConversationPanelProps {
     beforeSequence?: number
     afterSequence?: number
     changedAfterSequence?: number
+    /** Inclusive change cursor: rows patched since the last poll are re-delivered. */
+    changedAfterChangeSeq?: number
     limit?: number
     /** Ignore cursors and return the room's current rows. */
     force?: boolean
@@ -383,33 +385,45 @@ export function BotConversationPanel({
       inFlight = true
       try {
         const current = entriesRef.current
-        const cursor = current[current.length - 1]?.sequence ?? 0
-        // Inclusive cursor: the entry AT the cursor may have been patched since the
-        // last poll (streaming text grows, then `streaming` flips to false). Asking
-        // for sequence > cursor would never re-deliver it, leaving the turn stuck
-        // on "thinking…" until a full reload. Merging by id makes re-sends harmless.
+        const cursor = ledgerCursor(current)
+        // ── THE CURSOR IS `changeSeq`, NOT `sequence` ─────────────────────────────
         //
-        // `force: true` while a run is live. The host gives a room's rows FRESH
-        // sequence numbers when it re-seeds them from persisted messages, and those
-        // numbers can land BELOW the cursor this client already holds — a cursor
-        // query then returns rows that are all older than the cursor, so the settled
-        // reply and its duration were never delivered. The panel showed the turn as
-        // unfinished until the reader left the room (which re-mounted it with a zero
-        // cursor). Asking for the whole room while it is live is bounded by the
-        // room's own size and removes the ordering assumption entirely.
+        // A patched row keeps its `sequence`: the answer row is reserved when the turn
+        // starts (small sequence) and its final text/duration is written at the end
+        // (large change). A sequence cursor can only answer "new rows", so the settled
+        // reply sat below it for ever — the panel showed the work but not the answer.
+        // The inclusive `changedAfterChangeSeq` cursor re-delivers every row whose
+        // `changeSeq` moved, regardless of how old its `sequence` is; merging by id
+        // makes the re-send harmless.
+        //
+        // `force: true` while a run is live. A re-seed renumbers rows, and a cursor
+        // from before it can land ABOVE every row the room now holds; asking for the
+        // whole room while live is bounded by the room's own size and removes that
+        // ordering assumption. An older host that does not report `changeSeq` falls
+        // back to the previous `changedAfterSequence` cursor.
+        // BOTH cursors are sent on purpose. `changedAfterChangeSeq` is the cursor that
+        // works; `changedAfterSequence` is the compatibility fallback and travels in the
+        // same request so a host build that ignores/strips the new field degrades to the
+        // old cursor instead of erroring (the RPC layer forwards this options object).
         const data = await listLedger(
           roomId,
           isRunning
             ? { limit: 1000, force: true }
-            : { changedAfterSequence: cursor, limit: 300 },
+            : cursor.changeSeq !== undefined
+              ? {
+                changedAfterChangeSeq: cursor.changeSeq,
+                changedAfterSequence: cursor.sequence,
+                limit: 300,
+              }
+              : { changedAfterSequence: cursor.sequence, limit: 300 },
         )
         if (!mounted) return
         setLedgerError(undefined)
         if (data.length > 0) {
-          // `mergeLedgerEntries` compares `rev` (bumped by the host on every in-place
-          // update) and returns the SAME array when the page carries nothing new. That
-          // is what keeps React from re-rendering the whole transcript on every tick —
-          // the merge used to rebuild and re-sort the room on each poll regardless.
+          // `mergeLedgerEntries` compares `changeSeq` (or `rev` on an older host) and
+          // returns the SAME array when the page carries nothing new. That is what
+          // keeps React from re-rendering the whole transcript on every tick — the
+          // merge used to rebuild and re-sort the room on each poll regardless.
           setEntries(prev => mergeLedgerEntries(prev, data))
         }
       } catch (e) {

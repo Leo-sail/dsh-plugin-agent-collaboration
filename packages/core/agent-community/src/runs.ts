@@ -24,7 +24,7 @@ import { toolSchemas, ToolRunner, type ToolInvocation } from './tools.ts'
 import { buildPerception, type Perception, type PerceptionValue } from './perception.ts'
 import { optionalService } from './session-runner.ts'
 import { renderMemoryDelta } from './bot-memory.ts'
-import { windowForPrompt } from './compact.ts'
+import { buildHistoryWindow } from './context-window.ts'
 import type { ProgressKind, SessionRunner } from './session-runner.ts'
 import type { LedgerProjector } from './ledger.ts'
 import {
@@ -1529,11 +1529,25 @@ export class RunExecutor {
   ): string {
     const roomForFold = this.svc.getRoom(run.roomId)
     const messages = this.svc.listMessages(run.roomId)
-    const history = windowForPrompt(messages, roomForFold?.foldedSeqs, this.historyMessages)
-      // Prefer the model-facing payload: a `/skill` message carries the expanded
-      // skill body there while `text` stays the plain draft for display.
-      .map(m => `${m.sender.name}: ${m.modelText ?? m.text}`)
-      .join('\n')
+    // Folding is a window operation: the folded rows keep their place in the transcript
+    // but must not be sent again. `windowForPrompt` used to apply the fold AND the count
+    // slice; the budgeted window below owns the slice, so only the fold filter stays.
+    const folded = new Set(roomForFold?.foldedSeqs ?? [])
+    const visible = folded.size === 0 ? messages : messages.filter(m => !folded.has(m.id))
+    // `buildHistoryWindow` drops THIS TURN'S input row (the user's message is already in
+    // the transcript, and `[本轮输入]` below repeats it) and enforces a byte budget.
+    const history = buildHistoryWindow(
+      visible.map(message => ({
+        id: message.id,
+        // Prefer the model-facing payload: a `/skill` message carries the expanded
+        // skill body there while `text` stays the plain draft for display.
+        text: message.modelText ?? message.text,
+        displayText: message.text,
+        senderKind: message.sender.kind,
+        senderName: message.sender.name,
+      })),
+      { maxMessages: this.historyMessages, runPrompt: run.prompt },
+    )
 
     // ── THE ROOM'S ROSTER, NEVER THE COMMUNITY'S ────────────────────────────────
     //
@@ -1611,7 +1625,14 @@ export class RunExecutor {
       if (delta.block !== undefined) parts.push(delta.block)
       if (delta.newestId !== undefined) this.injectedMemory.set(key, delta.newestId)
     }
-    if (history) parts.push(`[最近 ${this.historyMessages} 条消息]\n${history}`)
+    if (history.text !== '') {
+      // Say so when the block was clipped: a model that is told the window is partial
+      // asks for the file/command instead of assuming the transcript ends there.
+      const header = history.truncated
+        ? `[最近 ${this.historyMessages} 条消息（已按长度截断）]`
+        : `[最近 ${this.historyMessages} 条消息]`
+      parts.push(`${header}\n${history.text}`)
+    }
     parts.push(`[本轮输入]\n${run.prompt}`)
     return parts.join('\n\n')
   }

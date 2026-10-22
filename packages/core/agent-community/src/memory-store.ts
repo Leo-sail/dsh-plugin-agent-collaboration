@@ -92,20 +92,58 @@ function renderEntry(entry: BotMemoryEntry): string {
 
 const ENTRY_RE = /^- \[(task|note) ([^\s\]]+)(?: run=([^\]]+))?\] (.*)$/u
 
-/** Read back what {@link renderRoomMemory} wrote. Unparseable lines are ignored, never fatal. */
+/**
+ * FNV-1a (32-bit) over UTF-16 code units — a small, dependency-free stable hash.
+ *
+ * The memory delta engine remembers the id of the newest entry it already showed the
+ * model. Ids used to be positional (`${at}#${index}`), so trimming an old entry shifted
+ * every surviving index and the boundary lookup failed: the delta degraded into a full
+ * baseline re-send on every turn once a partition was full. A content hash keeps the id
+ * of a surviving entry identical across trims.
+ */
+export function stableHash(text: string): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+/** Stable id for one memory entry: same (kind, at, text) parses to the same id, always. */
+export function stableEntryId(input: {
+  readonly kind: string
+  readonly at: string
+  readonly text: string
+}): string {
+  return `${input.at}#${stableHash(`${input.kind}\u0000${input.text}`)}`
+}
+
+/**
+ * Read back what {@link renderRoomMemory} wrote. Unparseable lines are ignored, never fatal.
+ *
+ * A line that parses twice (the same entry rendered twice, e.g. a retried append) yields
+ * ONE entry: the id is content-derived, so duplicates would otherwise collide. Dropping
+ * the repeat is the only stable answer — the two lines are indistinguishable.
+ */
 export function parseRoomMemory(text: string): BotMemoryEntry[] {
   const out: BotMemoryEntry[] = []
-  let index = 0
+  const seen = new Set<string>()
   for (const line of text.split('\n')) {
     const match = ENTRY_RE.exec(line.trim())
     if (match === null) continue
-    index += 1
+    const kind = match[1] === 'note' ? 'note' : 'task'
+    const at = match[2]!
+    const text_ = match[4] ?? ''
+    const id = stableEntryId({ kind, at, text: text_ })
+    if (seen.has(id)) continue
+    seen.add(id)
     out.push({
-      id: `${match[2]}#${index}`,
-      kind: match[1] === 'note' ? 'note' : 'task',
-      at: match[2]!,
+      id,
+      kind,
+      at,
       ...(match[3] !== undefined ? { runId: match[3] } : {}),
-      text: match[4] ?? '',
+      text: text_,
     })
   }
   return out

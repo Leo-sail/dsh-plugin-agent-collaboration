@@ -258,10 +258,27 @@ const OWNED_SEP = ':'
  */
 export const AGENT_TEAMS_TOOLS: readonly string[] = [
   'list_agents', 'send_message', 'interrupt_agent', 'spawn_teammate', 'wait_agent',
+  // ── THE HOST'S OWN TASK BOARD (DUP-17) ────────────────────────────────────────
+  //
+  // DSH's Agent Teams bundle registers `team_task_create/list/get/update` ON the bot agent's
+  // scope. A room ALREADY has a task board — the leader's `assign_task`/`dispatch`, the members'
+  // `message_member` reports and `finish_task`'s single summary, all backed by `room.taskState`
+  // — so the host board is a second, conflicting one: work recorded there is invisible to the
+  // room (and its "owner"/"target" are Agent Teams targets, not room members). The names below
+  // are what the host actually registers (verified against the shipped DSH build).
+  'team_task_create', 'team_task_list', 'team_task_get', 'team_task_update', 'team_task_delete',
   // Not Agent Teams, but the same class: mounted by another composition, not ours to remove, and
   // meaningless in a bot's own workspace.
   'load_workspace_dependencies',
 ]
+
+/**
+ * Host tool families refused as a PREFIX, not just by exact name.
+ *
+ * The exact list above can lag a host release that adds `team_task_…` tools; refusing the whole
+ * family keeps a room's task board single no matter which variant appears.
+ */
+export const AGENT_TEAMS_TOOL_PREFIXES: readonly string[] = ['team_task_']
 
 /** The tool name a guard/interceptor was handed, whatever shape the runtime uses. */
 export function toolNameOf(exec: unknown): string | undefined {
@@ -276,10 +293,19 @@ export function toolNameOf(exec: unknown): string | undefined {
 /** The refusal a room gives for an Agent Teams tool, or undefined when the call is allowed. */
 export function agentTeamsDenial(exec: unknown): string | undefined {
   const name = toolNameOf(exec)
-  if (name === undefined || !AGENT_TEAMS_TOOLS.includes(name)) return undefined
-  return `${name} 属于 DSH 的 Agent Teams，不属于本房间。房间里的事只用 `
-    + 'agent_community_dispatch / assign_task / message_member / finish_task 这一套；'
-    + '要和其他成员说话就用 message_member。'
+  if (name === undefined) return undefined
+  const denied = AGENT_TEAMS_TOOLS.includes(name)
+    || AGENT_TEAMS_TOOL_PREFIXES.some(prefix => name.startsWith(prefix))
+  if (!denied) return undefined
+  // The host's task board (team_task_*) gets its own sentence: the generic "use the room's
+  // tools" answer would not say WHY a second board is the wrong place for the work.
+  const hostTaskBoard = AGENT_TEAMS_TOOL_PREFIXES.some(prefix => name.startsWith(prefix))
+  return `${name} 属于 DSH 的 Agent Teams${hostTaskBoard ? ' 任务板' : ''}，不属于本房间。房间里的事只用 `
+    + 'agent_community_dispatch / assign_task / message_member / finish_task 这一套：'
+    + '分活用 assign_task / dispatch，过程用 message_member 向 leader 汇报，收尾用 finish_task 一次性汇总。'
+    + (hostTaskBoard
+      ? '本房间的任务记录由这套工具维护，不要用宿主 team_task_* 另开一套。'
+      : '要和其他成员说话就用 message_member。')
 }
 
 export const DEFAULT_DENIED_TOOLS: readonly string[] = [
@@ -293,6 +319,9 @@ export const DEFAULT_DENIED_TOOLS: readonly string[] = [
   'exit_plan_mode', 'present', 'load_workspace_dependencies',
   // Agent Teams is a different thing from room members.
   'list_agents', 'send_message', 'interrupt_agent',
+  // The host's second task board (DUP-17). `restrict` skips names a scope registered itself, so
+  // the guard above is the real block; listing them here is the belt for hosts that show them.
+  'team_task_create', 'team_task_list', 'team_task_get', 'team_task_update', 'team_task_delete',
   // DSH goals require a top-level human request, which never happens in a bot turn; the
   // room's own goal replaces them. `get_goal` stays and is re-pointed at the current room.
   'create_goal', 'update_goal',

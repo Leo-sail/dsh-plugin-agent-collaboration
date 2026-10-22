@@ -44,10 +44,20 @@ interface LedgerEntryBase {
   /**
    * Bumped on every in-place update. `sequence` stays put for an entry's whole
    * life, so a client that already fetched an entry cannot detect later edits
-   * (streaming text, `streaming: false`) from the sequence alone — this is the
-   * cursor that moves.
+   * (streaming text, `streaming: false`) from the sequence alone.
    */
   readonly rev: number
+  /**
+   * Global change counter — bumped by EVERY `push` and EVERY `patch` in this projector.
+   *
+   * `rev` says "this ROW changed"; it cannot say "something changed SINCE you polled".
+   * The incremental poll used to be keyed on `sequence`, and a patched row keeps its
+   * sequence: a reply whose row was reserved at the start of the turn (small sequence)
+   * and settled at the end (large change) sat BELOW the client's cursor for ever, so the
+   * panel showed the turn's work but never its answer. This is the cursor that moves for
+   * the whole room: `changedAfterChangeSeq` compares against it.
+   */
+  readonly changeSeq: number
 }
 
 export interface LedgerUserEntry extends LedgerEntryBase {
@@ -198,8 +208,8 @@ export type LedgerEntry =
 /**
  * A ledger entry as callers supply it.
  *
- * `id`, `sequence` and `rev` are assigned by {@link LedgerProjector.push}. `at` is
- * optional there too: `push` stamps it when absent, so every entry carries a time
+ * `id`, `sequence`, `rev` and `changeSeq` are assigned by {@link LedgerProjector.push}.
+ * `at` is optional there too: `push` stamps it when absent, so every entry carries a time
  * whether or not the caller remembered. Leaving `at` REQUIRED here did not prevent
  * omissions — callers bypassed it with `as never` casts — it only stopped the
  * compiler from noticing that the streaming path never passed one, which left live
@@ -207,7 +217,7 @@ export type LedgerEntry =
  */
 export type LedgerEntryInput = LedgerEntry extends infer T
   ? T extends LedgerEntry
-    ? Omit<T, 'id' | 'sequence' | 'rev' | 'at'> & { readonly at?: string | undefined }
+    ? Omit<T, 'id' | 'sequence' | 'rev' | 'changeSeq' | 'at'> & { readonly at?: string | undefined }
     : never
   : never
 
@@ -270,7 +280,10 @@ export interface SeedRoomItem {
 export class LedgerProjector {
   private readonly svc: LedgerStateAccessor
   private readonly byRoom = new Map<string, LedgerEntry[]>()
+  /** Creation counter: a row's `sequence`, assigned once and never moved. */
   private seq = 0
+  /** Change counter: every `push`/`patch`/settle write bumps it (see `changeSeq`). */
+  private change = 0
   private readonly subscribers = new Map<string, Set<(batch: LedgerEntry[]) => void>>()
   private pendingBatch = new Map<string, LedgerEntry[]>()
   private flushTimer: ReturnType<typeof setTimeout> | undefined
@@ -309,15 +322,23 @@ export class LedgerProjector {
     items: ReadonlyArray<SeedRoomItem>,
   ): number {
     if (items.length === 0) return 0
-    // Built as inputs (no id/sequence/rev); the projector state holds entries.
-    const list: LedgerEntryInput[] = []
+    // Built as full entries: a seeded row needs the same `rev`/`changeSeq` a live push
+    // gets, or a client that already holds the row cannot tell it was rebuilt/updated.
+    const list: LedgerEntry[] = []
     // One row per message id. A rebuild must never produce two rows for the same
     // message — that rendered as the same chat message appearing twice in the panel.
     const seenIds = new Set<string>()
     for (const item of items) {
       if (seenIds.has(item.id)) continue
       seenIds.add(item.id)
-      const base = { id: item.id, roomId, at: item.at, sequence: ++this.seq }
+      const base = {
+        id: item.id,
+        roomId,
+        at: item.at,
+        sequence: ++this.seq,
+        rev: 1,
+        changeSeq: ++this.change,
+      }
       if (item.kind === 'user') {
         list.push({
           ...base,
@@ -439,10 +460,24 @@ export class LedgerProjector {
         return true
       })
       for (const e of byRun.values()) merged.push(e)
-      this.byRoom.set(roomId, merged as LedgerEntry[])
+      // ── ONE ORDER, EVEN AFTER A MERGE ─────────────────────────────────────────
+      //
+      // Seeded rows get FRESH sequence numbers (the counter only moves forward), while a
+      // live row keeps the sequence it was pushed with — so appending the live rows at
+      // the end left the array ordered by neither `at` nor `sequence`. `listLedger` pages
+      // by array position (`slice(-limit)`) and the client sorts by time, so the two
+      // disagreed and a merge could hand the first screen the wrong page. Sort by time
+      // (the transcript's order), sequence as the tiebreaker for rows of one timestamp.
+      merged.sort((a, b) => {
+        const atA = Date.parse(a.at)
+        const atB = Date.parse(b.at)
+        if (Number.isFinite(atA) && Number.isFinite(atB) && atA !== atB) return atA - atB
+        return a.sequence - b.sequence
+      })
+      this.byRoom.set(roomId, merged)
       return merged.length
     }
-    this.byRoom.set(roomId, list as LedgerEntry[])
+    this.byRoom.set(roomId, list)
     return list.length
   }
 
@@ -478,6 +513,7 @@ export class LedgerProjector {
         : randomUUID(),
       sequence: ++this.seq,
       rev: 1,
+      changeSeq: ++this.change,
     } as LedgerEntry
     const list = this.byRoom.get(full.roomId) ?? []
     list.push(full)
@@ -499,6 +535,10 @@ export class LedgerProjector {
   /**
    * Patch an existing entry in-place (e.g. resolve an approval outcome or
    * finalise a streaming bot-text entry). Notifies subscribers immediately.
+   *
+   * `rev` marks THIS row's version; `changeSeq` is the room-wide "something changed"
+   * counter, and it is what the panel's incremental poll keys on — a settled answer keeps
+   * its (older) sequence but must still be delivered.
    */
   patch(id: string, roomId: string, patch: Partial<LedgerEntry>): void {
     const list = this.byRoom.get(roomId)
@@ -510,6 +550,7 @@ export class LedgerProjector {
       ...prev,
       ...patch,
       rev: prev.rev + 1,
+      changeSeq: ++this.change,
     } as LedgerEntry
     const subs = this.subscribers.get(roomId)
     if (subs !== undefined) for (const cb of subs) cb([list[idx]!])
@@ -748,14 +789,12 @@ export class LedgerProjector {
   }
 
   /**
-   * Paginated read in one of three modes:
-   *  • `afterSequence` / `changedAfterSequence` — the forward poll: the NEWEST
-   *    `limit` entries at or after the cursor. The panel polls this every few tens of
-   *    ms, so it must transfer only the delta rather than the whole room history.
-   *    Newest page, not oldest: a re-seed / replay can move more than `limit` rows at
-   *    or above the cursor at once, and returning the oldest page of that range meant
-   *    the newest rows (the settled reply) were never delivered — the transcript
-   *    stayed one page behind for ever.
+   * Paginated read in one of four modes:
+   *  • `changedAfterChangeSeq` — the forward poll the panel uses. Returns the NEWEST
+   *    `limit` rows whose `changeSeq` is at or after the cursor, so a row that was
+   *    PATCHED since the last poll is delivered even though its `sequence` never moved.
+   *  • `afterSequence` / `changedAfterSequence` — the old sequence-based forward poll,
+   *    kept for compatibility. It cannot re-deliver a patched row below the cursor.
    *  • `beforeSequence` — backwards paging for "load earlier".
    *  • neither — the newest `limit` entries (initial load).
    */
@@ -765,6 +804,15 @@ export class LedgerProjector {
       beforeSequence?: number
       afterSequence?: number
       changedAfterSequence?: number
+      /**
+       * Inclusive change cursor: rows with `changeSeq >= this` are candidates.
+       *
+       * This is the cursor that survives an in-place patch: `sequence` is assigned once
+       * and never moves, so `changedAfterSequence` could only ever answer "new rows",
+       * never "rows that changed" — a settled reply reserved early in the turn stayed
+       * below the client's sequence cursor and never reached the panel.
+       */
+      changedAfterChangeSeq?: number
       limit?: number
       /**
        * Ignore every cursor and return the room's rows as they are now.
@@ -778,8 +826,24 @@ export class LedgerProjector {
     } = {},
   ): LedgerEntry[] {
     const all = this.byRoom.get(roomId) ?? []
-    const { beforeSequence, afterSequence, changedAfterSequence, limit = 50, force = false } = opts
+    const {
+      beforeSequence,
+      afterSequence,
+      changedAfterSequence,
+      changedAfterChangeSeq,
+      limit = 50,
+      force = false,
+    } = opts
     if (force) return all.slice(-limit)
+    if (changedAfterChangeSeq !== undefined) {
+      // A cursor above this projector's own counter cannot be satisfied (a reload resets
+      // the counters while the client keeps its cursor). Same recovery as the sequence
+      // branch below: answer with the newest page, which the client re-merges by id.
+      if (changedAfterChangeSeq > this.change) return all.slice(-limit)
+      // Inclusive on the boundary: the row AT the cursor may be the very one that was
+      // patched last poll, and re-sending it is how its edit reaches the client.
+      return all.filter(e => e.changeSeq >= changedAfterChangeSeq).slice(-limit)
+    }
     if (changedAfterSequence !== undefined) {
       // ── A CURSOR ABOVE THIS LEDGER'S OWN COUNTER CANNOT BE SATISFIED ─────────
       //
@@ -859,6 +923,10 @@ export class LedgerProjector {
         ...(durationMs !== undefined ? { durationMs } : {}),
         ...(e.streaming === true ? { streaming: false } : {}),
         rev: e.rev + 1,
+        // This row keeps its sequence, so the sequence cursor would never re-deliver it;
+        // the change cursor must (the duration/streaming flip is exactly what the panel
+        // needs to stop showing the turn as live).
+        changeSeq: ++this.change,
       } as LedgerEntry
       ;(list as LedgerEntry[])[i] = next
       if (e.streaming === true || durationMs !== undefined) settled++

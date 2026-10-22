@@ -124,9 +124,15 @@ export interface CommunityRemote {
     beforeSequence?: number
     afterSequence?: number
     changedAfterSequence?: number
+    /** Inclusive change cursor: also returns rows patched since the last poll. */
+    changedAfterChangeSeq?: number
     limit?: number
+    /** Ignore cursors and return the room's current rows. */
+    force?: boolean
   }): Promise<Array<{
     id: string; type: string; roomId: string; at: string; sequence: number;
+    /** Room-wide change counter, bumped by every push AND every patch. */
+    changeSeq?: number;
     text?: string; senderName?: string;
     botId?: string; botName?: string; runId?: string; streaming?: boolean;
     usage?: { outputTokens?: number; totalTokens?: number };

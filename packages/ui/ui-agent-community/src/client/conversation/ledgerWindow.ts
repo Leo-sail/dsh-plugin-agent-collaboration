@@ -56,16 +56,64 @@ export interface BackfillCursor {
   readonly limit: number
 }
 
+/**
+ * The forward cursor the incremental poll sends.
+ *
+ * `changeSeq` is the room-wide change counter (bumped by every host push AND every
+ * in-place patch). `sequence` is only the fallback for a host that does not report
+ * `changeSeq` yet (an older build): it can express "new rows", never "rows that
+ * changed", so a patched reply below it would never be re-delivered.
+ */
+export interface LedgerCursor {
+  /** Highest `changeSeq` in the held window, or undefined when no row carries one. */
+  readonly changeSeq?: number | undefined
+  /** Highest `sequence` in the held window — the compatibility cursor. */
+  readonly sequence: number
+}
+
 /** A row's `rev`, treating a missing/NaN value as 0 so ordering is total. */
 function revisionOf(entry: LedgerEntry): number {
   const rev = entry.rev
   return typeof rev === 'number' && Number.isFinite(rev) ? rev : 0
 }
 
+/**
+ * A row's global `changeSeq`, 0 when the host did not report one.
+ *
+ * The client's `LedgerEntry` type does not declare the field on purpose (it is optional
+ * on the wire and the panel must keep working against an older host), so it is read
+ * structurally here rather than added to the shared type.
+ */
+function changeSeqOf(entry: LedgerEntry): number {
+  const value = (entry as LedgerEntry & { readonly changeSeq?: number }).changeSeq
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
 /** Epoch ms of a row's `at`, 0 when it is missing or unparseable. */
 function timeOf(entry: LedgerEntry): number {
   const at = Date.parse(entry.at)
   return Number.isFinite(at) ? at : 0
+}
+
+/**
+ * The incremental poll's cursor: the highest `changeSeq` held, plus the highest
+ * `sequence` as the fallback for hosts that do not report `changeSeq`.
+ *
+ * The panel used to derive the cursor from the LAST row of the window, which is the
+ * newest by event time, not by counter — after a re-seed mixed the two, the last row was
+ * not the greatest sequence. Taking the max is the only value that cannot move backwards.
+ */
+export function ledgerCursor(entries: readonly LedgerEntry[]): LedgerCursor {
+  let changeSeq: number | undefined
+  let sequence = 0
+  for (const entry of entries) {
+    const change = changeSeqOf(entry)
+    if (change > 0 && (changeSeq === undefined || change > changeSeq)) changeSeq = change
+    if (typeof entry.sequence === 'number' && Number.isFinite(entry.sequence) && entry.sequence > sequence) {
+      sequence = entry.sequence
+    }
+  }
+  return changeSeq === undefined ? { sequence } : { changeSeq, sequence }
 }
 
 /**
@@ -93,12 +141,12 @@ function compareEntries(a: LedgerEntry, b: LedgerEntry): number {
  * replace used to reorder the whole transcript in one commit — the visible flash
  * and the duplicated row.
  *
- * `rev` decides which copy of a row wins: the host bumps it on every in-place update
- * (streaming text grows, then `streaming` flips to false), so a greater `rev` is a
- * strictly newer copy and everything else would either regress the transcript or
- * change nothing. When no row was added or updated the SAME array reference is
- * returned: the panel's poll runs up to 4×/s and a fresh array would re-render the
- * whole transcript on every tick.
+ * Which copy wins: `changeSeq` when both copies carry one (the host bumps it on every
+ * push AND every in-place patch), otherwise `rev` (bumped on every in-place update).
+ * Either way a greater value is a strictly newer copy; an equal or lower one would
+ * either regress the transcript or change nothing. When no row was added or updated the
+ * SAME array reference is returned: the panel's poll runs up to 4×/s and a fresh array
+ * would re-render the whole transcript on every tick.
  */
 export function mergeLedgerEntries(
   prev: LedgerEntry[],
@@ -115,7 +163,14 @@ export function mergeLedgerEntries(
       changed = true
       continue
     }
-    if (revisionOf(entry) > revisionOf(before)) {
+    const incomingChange = changeSeqOf(entry)
+    const beforeChange = changeSeqOf(before)
+    // A `changeSeq` on either side means the host supports the change cursor, and the
+    // higher one is newer. Both zero means an older host: fall back to `rev`.
+    const newer = incomingChange !== 0 || beforeChange !== 0
+      ? incomingChange > beforeChange
+      : revisionOf(entry) > revisionOf(before)
+    if (newer) {
       byId.set(entry.id, entry)
       changed = true
     }

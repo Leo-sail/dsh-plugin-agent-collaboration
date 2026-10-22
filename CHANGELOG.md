@@ -1,3 +1,51 @@
+## Unreleased — stability batch 6 (S10 + S11 + S12)
+
+P1 收尾：消息源/游标/上下文治理、自动运行与运行状态 UI、宿主工具面/提示词/leader 收敛。
+只改插件源码，不改任何 Bot。
+
+### S10 · 消息源 / 游标 / 上下文 / 记忆
+- `LedgerEntry` 新增必填 `changeSeq`：`push` / `patch` / `settleRunEntries` / `seedRoom` 每次写都递增；
+  `listLedger` 新增 `changedAfterChangeSeq`（返回 changeSeq ≥ 游标的最新一页）。这修复了"回复行
+  sequence 很小、settle 时被 patch，但 sequence 游标永远送不到终稿"的问题。
+- UI 轮询改取窗口内 **MAX changeSeq**（缺省回退 sequence），同时带旧游标兜底；`ledgerWindow.merge`
+  先比 changeSeq 再退 rev，按 id 去重，无变化返回同引用；running 时仍 force 重载兜底。
+- `seedRoom` 合并 live 行后按 `at`（sequence 兜底）排序，修正 seed 新序号 + live 旧序号造成的
+  数组序/首屏分页错位。
+- 新增 `context-window.ts`：`buildHistoryWindow` 排除本轮用户消息（id 或最后一条同 prompt 的
+  user 消息），单条截断 + UTF-8 字节预算（12KB），返回 included/omitted/truncated；
+  `runs.buildPrompt` 改用它，用户输入不再在「最近 N 条」与「本轮输入」出现两次。
+- `memory-store.parseRoomMemory` 的 id 改为 `${at}#FNV1a(kind\0text)`：写满 12 条后裁剪不再
+  平移幸存 id，`renderMemoryDelta` 不再每轮退化 baseline；旧文件零迁移。
+- 新增 `tests/ledger-cursor.test.ts`（8）、`tests/context-window.test.ts`（7）、
+  `tests/memory-delta.test.ts`（6）。
+
+### S11 · 自动续跑 / 运行状态 UI
+- `GoalStrip` 顶部新增「自动续跑：开/关」摘要（待确认 / 已暂停 / 未授权 / 已用 x/y 轮）与开关：
+  开 → pause，关 → authorize(3 轮)；与原有 允许/暂停/继续 按钮共用 handler + busy 守卫。
+- 新增 `runStatusView.ts` + `RunStatusStrip.tsx`：显示本房间最新 run 的运行中已用时间/预计截止、
+  `运行超时已停止`、`无进展已停止`、`已停止`、`运行失败`；completed 隐藏；30s tick。
+- `ConversationArea` 改为 `auto auto minmax(0,1fr)` 三行，transcript 滚动不变。
+- 新增 `tests/run-status.test.ts`（15）。
+
+### S12 · 宿主工具面 / 提示词 / leader 收敛
+- `AGENT_TEAMS_TOOLS` 增加宿主 `team_task_create/list/get/update/delete`，并新增
+  `team_task_` 前缀拒绝；拒绝理由指向房间的 assign_task / dispatch / message_member /
+  finish_task，模型不能再误用另一块任务板。
+- `bot-prompt.ts` 群聊段统一口径：回答即产出，已回复不再补总结；成员过程用 message_member
+  向 leader 汇报（内部不发布），成员最终产出照常可见；最终交付由 leader finish_task 一次性
+  汇总，不重复已发布内容。`group-task.integratePrompt` 同步。
+- 新增 `room-leader.ts`：`resolveRoomLeader`（team.leader 是现存成员则用之，否则 memberIds[0]）
+  + `isRoomLeader`；`index.leaderOfRoom` / `ensureRoomSession` / `messageMember`、
+  `group-flow.leaderIdOf/leaderBoard/remove` 全部走同一函数，无 team 的手工群也能正常
+  advanceRound/finish_task/remove_bot。`handoffLeadership` 仍按持久 team.leader 判断并注释分工。
+- `a2aMinIntervalMs` 确认无读取，标 @deprecated（保留解析兼容）。
+- 新增 `tests/room-leader.test.ts`（6）、`tests/agent-tools.test.ts`（6）。
+
+### 验证
+- `node --test tests/*.test.ts`：**172/172 通过**。
+- UI/core typecheck（过滤宿主缺失 d.ts 噪声）：0 真实错误；四包 tsdown + check-build = OK。
+- 本轮只同步 GitHub 源码；未安装/未重启、未发布 npm、未更新插件市场。
+
 ## Unreleased — stability batch 5 (S8 adaptive task-time allowance)
 
 修复"运行超时必须按实际任务时间配置，不能写死"（P1）。只改插件源码，不改任何 Bot。

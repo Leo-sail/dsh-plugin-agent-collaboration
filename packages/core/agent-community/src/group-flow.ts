@@ -24,6 +24,7 @@ import type {
   PendingGroupProposal, ProposeGroupRequest, RoomTaskState,
 } from './types.ts'
 import type { LlmStream } from './skills-profile.ts'
+import { resolveRoomLeader } from './room-leader.ts'
 import {
   buildCapabilityCard,
   chooseValidLeader,
@@ -605,11 +606,21 @@ export class GroupFlowService {
    * `removedBotId` is tolerated either way — present in `memberIds` (the caller has
    * not stripped it yet) or already gone — because both orders occur in practice:
    * a delete strips first, an `updateRoom` may not.
+   *
+   * WHAT THIS READS, AND WHY NOT `leaderIdOf`. This method REPAIRS the stored record, so it
+   * compares against the stored leader, not the resolved one. `leaderIdOf` now falls back to
+   * `memberIds[0]`; after the caller has already stripped the removed bot, the fallback would
+   * point at its successor and the comparison would miss — leaving `team.leader` pointing at a
+   * bot that is gone (functionally covered by the fallback, but the record and the "负责人已
+   * 变更" note would both be stale). A group with no stored leader has no record to repair:
+   * its leadership already resolves by join order (see `room-leader.ts`).
    */
   handoffLeadership(roomId: string, removedBotId: string): BotId | undefined {
     const room = this.port.getRoom(roomId)
     if (room === undefined || room.directBotId !== undefined) return undefined
-    if (this.leaderIdOf(room) !== removedBotId) return undefined
+    const stored = room.team?.leader
+    const storedLeaderId = stored !== undefined && stored.kind === 'bot' ? stored.botId : undefined
+    if (storedLeaderId !== removedBotId) return undefined
     const alive = new Map(this.port.listBots().map(b => [b.id, b]))
     const next = room.memberIds.find(id => id !== removedBotId && alive.has(id))
     if (next === undefined) return undefined
@@ -627,10 +638,15 @@ export class GroupFlowService {
     return nextBot.id
   }
 
-  /** The room's leader bot id, when the room is a leader-driven group. */
+  /**
+   * The room's leader bot id — the SAME rule the service and the task board use.
+   *
+   * A hand-made or legacy group may carry no `team` at all; the fallback to the first member in
+   * join order is what lets its leader-only board calls work instead of refusing every one of
+   * them with "this room has no leader" (see `room-leader.ts`).
+   */
   leaderIdOf(room: BotRoom): BotId | undefined {
-    const leader = room.team?.leader
-    return leader !== undefined && leader.kind === 'bot' ? leader.botId : undefined
+    return resolveRoomLeader(room)
   }
 
   // ── Background task board (§5.4 / §6) ───────────────────────────────────────

@@ -74,6 +74,7 @@ import { MemoryStore, memoryPaths, type RoomMemoryMeta } from './memory-store.ts
 import { scanPromotions } from './memory-promote.ts'
 import { Maintenance, type MaintenanceHost } from './maintenance.ts'
 import { findBotByName, requireBot, requireRoom, NotFoundError } from './lookup.ts'
+import { resolveRoomLeader } from './room-leader.ts'
 import {
   COMPACT_SENDER_NAME,
   clampKeepLast,
@@ -183,7 +184,12 @@ export interface Config {
   readonly hardLimit?: number
   /** Number of recent room messages to include in each Bot prompt (default 10). */
   readonly historyMessagesInPrompt?: number
-  /** Min interval between a2a messages from the same Bot in ms (default 3_000). */
+  /**
+   * @deprecated NOT READ BY ANY CODE (verified across the package): a2a chattiness is bounded
+   * by the one-hop rule instead — a bot answering a peer message never starts another run
+   * (see `postBotMessage`). Kept only so existing config files and the schema keep parsing;
+   * removing it is a separate, user-visible config change.
+   */
   readonly a2aMinIntervalMs?: number
   /**
    * How long the user has to answer a group proposal before it counts as a refusal
@@ -272,6 +278,8 @@ export const Config: z<Config> = z.object({
   /** Ceiling on total live agents; RUNNING ones may push the total up to here. */
   hardLimit: z.number().step(1).min(1).default(24),
   historyMessagesInPrompt: z.number().step(1).min(0).default(10),
+  // Deprecated and unread (see Config.a2aMinIntervalMs): not deleted so existing user configs
+  // keep parsing. New throttling belongs next to the code that enqueues a2a runs.
   a2aMinIntervalMs: z.number().step(1).min(0).default(3_000),
   groupProposalTimeoutMs: z.number().step(1).min(1000).default(120_000),
   sessionsDir: z.string().required(false),
@@ -1163,19 +1171,18 @@ export class AgentCommunityService extends TypertRemoteService {
    * model the leader-driven design replaced.
    */
   /**
-   * The group's coordinator.
+   * The group's coordinator — the SAME answer the group flow and the task board use.
    *
-   * Read from `room.team.leader`, which is where every leader-only check looks. A
-   * stored leader that has since been removed falls back to the first member, so a
-   * group can never end up leaderless while it still has members.
+   * The stored `team.leader` wins while it is a bot that is still a member; otherwise the first
+   * member in join order, so a group can never end up leaderless while it still has members and
+   * a hand-made/legacy room (no `team` at all) still has a working coordinator. Delegated to
+   * `resolveRoomLeader` so there is exactly one implementation of that rule.
    */
   private leaderOfRoom(roomId: string): string | undefined {
-    const room = this.state.rooms.find(r => r.id === roomId)
-    if (room === undefined) return undefined
-    const leader = room.team?.leader
-    const id = leader?.kind === 'bot' ? leader.botId : undefined
-    if (id !== undefined && room.memberIds.includes(id)) return id
-    return room.memberIds[0]
+    // ONE rule for every caller (service, group flow, task board): the stored leader while it
+    // is a live member, otherwise the first member in join order. See `room-leader.ts` for why
+    // two resolvers used to disagree about hand-made and legacy groups.
+    return resolveRoomLeader(this.state.rooms.find(r => r.id === roomId))
   }
 
   /**
@@ -1341,11 +1348,11 @@ export class AgentCommunityService extends TypertRemoteService {
       // (`toBotName` → a mailbox entry with origin 'a2a'), so this is only the tool-side adapter:
       // the sender's session is derived from the pair, never from the model.
       messageMember: async (input) => {
-        // Leadership is the room's own record (`team.leader`), so this needs no guessing: the
-        // bot that created the team is the one whose orders are folded into its stage report.
+        // The same leader rule as everywhere else (`resolveRoomLeader`): the stored leader while
+        // it is a live member, otherwise the first member. A raw `team.leader` read here would
+        // be a second resolver — and it is wrong for hand-made groups that carry no team.
         const room = this.state.rooms.find(r => r.id === input.roomId)
-        const leader = room?.team?.leader
-        const senderIsLeader = leader?.kind === 'bot' && leader.botId === input.botId
+        const senderIsLeader = resolveRoomLeader(room) === input.botId
         try {
           await this.postBotMessage({
             roomId: brandId<BotRoomId>(input.roomId),
@@ -3387,7 +3394,7 @@ export class AgentCommunityService extends TypertRemoteService {
       }
       return { sessionId, isGroup }
     }
-    const leaderId = this.groupFlow.leaderIdOf(room) ?? room.memberIds[0]
+    const leaderId = resolveRoomLeader(room)
     if (leaderId === undefined) {
       // A group with no members has no session to name. This used to fabricate
       // `ac-<roomId>` — a THIRD id format that matched neither the runner's scheme nor
@@ -5538,6 +5545,8 @@ export class AgentCommunityService extends TypertRemoteService {
       beforeSequence?: number
       afterSequence?: number
       changedAfterSequence?: number
+      /** Monotonic change cursor; unlike sequence it also re-delivers patched old rows. */
+      changedAfterChangeSeq?: number
       limit?: number
       /** Ignore cursors and return the room's current rows. */
       force?: boolean
