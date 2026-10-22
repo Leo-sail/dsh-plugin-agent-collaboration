@@ -120,6 +120,14 @@ export interface TurnOutcome {
   /** True when even the repair turns produced no visible text. */
   readonly textChannelFailed: boolean
   /**
+   * True when the turn was stopped before it could answer: the caller (run executor) asked
+   * for the abort, so the run must settle as `interrupted`, never as a completed answer.
+   *
+   * This is the difference between "the model produced nothing" (a failure worth reporting)
+   * and "the user pressed stop" (not a failure, and no retry may follow).
+   */
+  readonly stopped?: boolean | undefined
+  /**
    * The bot left the room during this turn (it executed its own removal, or was kicked).
    *
    * Not a model failure and not something to repair: the turn ended because the bot's membership
@@ -511,6 +519,18 @@ export class SessionRunner {
     return `${roomId}\u0000${botId}`
   }
 
+  /**
+   * Whether the caller's signal has fired.
+   *
+   * A helper rather than an inline `signal?.aborted === true`: TypeScript narrows the
+   * property to literal `false` after the first guard returns, and then treats every later
+   * comparison as unreachable — even though the listener (which fires asynchronously) can
+   * flip it between statements. Reading it through a parameter keeps the honest type.
+   */
+  private static aborted(signal: AbortSignal | undefined): boolean {
+    return signal?.aborted === true
+  }
+
   private static split(key: string): { roomId: string; botId: string } {
     const at = key.indexOf('\u0000')
     return { roomId: key.slice(0, at), botId: key.slice(at + 1) }
@@ -519,6 +539,45 @@ export class SessionRunner {
   /** Live agent count — used by the queue to decide whether a slot is free. */
   get liveCount(): number {
     return this.agents.size
+  }
+
+  /**
+   * Stop the live turn for one `(room, bot)` pair — the piece that makes 「停止生成」 real.
+   *
+   * WHY THE EXECUTOR CANNOT DO THIS ITSELF: the `Agent` object lives in this runner, keyed by
+   * the pair, and `agent.cancel` is the only call that interrupts the model request in flight.
+   * The executor used to abort its own `AbortController` and then look the agent up in a map
+   * it never populated, so the model kept streaming (and billing) after the user pressed stop.
+   *
+   * `keepInbox: true` because a stop must not silently drop a prompt that is queued behind
+   * the current turn (the next user message is not the stop button's to delete). The host
+   * signature is called with the same shape the runner's own dispose path uses; a runtime
+   * that rejects that second argument gets the bare-options retry, so the cancel still
+   * happens instead of the whole stop silently failing.
+   *
+   * No-op when there is no live agent — a stop on an already-idle pair is not an error.
+   */
+  cancel(roomId: string, botId: string, reason = 'user interrupted'): void {
+    const agent = this.agents.get(SessionRunner.key(roomId, botId))
+    if (agent === undefined) return
+    const request = { kind: 'hook' as const, reason }
+    try {
+      agent.cancel(request, { keepInbox: true })
+    } catch {
+      // Older host shapes accept only the request: the cast keeps this fallback compiling
+      // against host typings while still trying the minimal call before giving up.
+      try {
+        (agent as unknown as { cancel(request: unknown): void }).cancel(request)
+      } catch { /* best-effort: the turn may already be over */ }
+    }
+  }
+
+  /** Stop every live turn for one room — used when the room is deleted or its agents are torn down. */
+  cancelRoom(roomId: string, reason = 'room removed'): void {
+    for (const key of [...this.agents.keys()]) {
+      const parsed = SessionRunner.split(key)
+      if (parsed.roomId === roomId) this.cancel(parsed.roomId, parsed.botId, reason)
+    }
   }
 
   /**
@@ -548,11 +607,36 @@ export class SessionRunner {
      * session was never seeded and the bot answered knowing nothing about the room.
      */
     seed?: boolean | undefined,
+    /**
+     * Abort signal owned by the caller's run.
+     *
+     * Registered BEFORE the turn starts: when it fires, the runner cancels the live agent
+     * (which interrupts the model request in flight) and the turn returns a `stopped`
+     * outcome instead of repairing or continuing. Optional so every existing caller keeps
+     * working; a caller that omits it keeps the historical behaviour.
+     */
+    signal?: AbortSignal | undefined,
   ): Promise<TurnOutcome> {
     const key = SessionRunner.key(roomId, botId)
     return this.mutex.run(key, async () => {
+      // ── ABORT PATH ───────────────────────────────────────────────────────────────
+      //
+      // Two independent things happen on abort, and both are needed:
+      //   · this listener asks the RUNNER to cancel the agent (the only call that stops the
+      //     in-flight model request; aborting the executor's controller alone did nothing);
+      //   · every loop boundary below re-checks `signal.aborted`, so no repair round and no
+      //     tool round is started after the user pressed stop.
+      // The listener is removed in `finally` (a long-lived signal must not accumulate one
+      // listener per run), and a signal that is already aborted never registers at all.
+      const onAbort = (): void => { this.cancel(roomId, botId, 'run aborted') }
+      if (SessionRunner.aborted(signal)) return this.abortedOutcome()
+      signal?.addEventListener('abort', onAbort, { once: true })
       try {
-      await this.ensureSlot()
+      // A signal that fired between the check and `addEventListener` would otherwise lose
+      // its wake-up (the listener was not attached yet) — re-check once inside the guard.
+      if (SessionRunner.aborted(signal)) return this.abortedOutcome()
+      const slot = await this.ensureSlot(signal)
+      if (!slot) return this.abortedOutcome()
       const agent = await this.ensureAgent(roomId, botId)
       this.touch(key)
       this.running.add(key)
@@ -589,6 +673,10 @@ export class SessionRunner {
       let repairs = 0
 
       for (let attempt = 0; attempt <= turns; attempt++) {
+        // THE STOP CHECK COMES FIRST: a repair turn must never be started after the user
+        // pressed stop, and a stop during setup/seed has no model request to cancel — this
+        // check is what turns that into a clean `stopped` outcome instead of a phantom turn.
+        if (SessionRunner.aborted(signal)) return this.abortedOutcome(reasoning, repairs)
         // ── IT MAY HAVE LEFT THE ROOM DURING THE PREVIOUS ATTEMPT ────────────────
         //
         // Observed in a group: the user asked to remove the coordinator, the coordinator
@@ -614,6 +702,10 @@ export class SessionRunner {
         // an `agent/request` override, so the model has only the text channel left.
         if (attempt >= turns && attempt > 0) this.armTextOnlyRequest(roomId, botId)
 
+        // No prompt is queued after a stop: `followup` would start another model request,
+        // which is exactly the "I pressed stop and it kept working" bug.
+        if (SessionRunner.aborted(signal)) return this.abortedOutcome(reasoning, repairs)
+
         // `followup` queues a next-turn prompt and wakes the driver. The source is
         // `user` so the loop treats it as ordinary input; for repairs we mark it as a
         // plugin message so it is distinguishable in the transcript.
@@ -625,6 +717,9 @@ export class SessionRunner {
           source: { kind: 'user' },
         }))
         await agent.whenIdle()
+        // A cancelled turn resolves `whenIdle` with whatever it had produced; it must not be
+        // read as an answer, repaired, or retried — the run settles as interrupted.
+        if (SessionRunner.aborted(signal)) return this.abortedOutcome(reasoning, repairs)
 
         const outcome = this.readTurn(roomId, botId, turnStart)
         reasoning = outcome.reasoning
@@ -664,11 +759,34 @@ export class SessionRunner {
         textChannelFailed: true,
       }
       } finally {
+        // The listener must not outlive the turn: the signal belongs to the run, and a
+        // stack of stale listeners would call `cancel` on whatever agent the pair holds
+        // next time. Removed before the busy flag so an abort cannot race the next run.
+        signal?.removeEventListener('abort', onAbort)
         // Cleared even on throw, or a failed turn would leave the agent marked busy
         // forever and eviction would never reclaim it.
         this.running.delete(key)
       }
     })
+  }
+
+  /**
+   * The outcome of a turn the caller aborted.
+   *
+   * Empty text and `stopped: true`: the executor settles the run as `interrupted`, which is
+   * not a failure and must not be retried. Partial output stays in the session log and the
+   * ledger rows already streamed, but it is not published as the answer to a task the user
+   * stopped.
+   */
+  private abortedOutcome(reasoning = '', repairs = 0): TurnOutcome {
+    return {
+      text: '',
+      reasoning,
+      stopReason: 'aborted',
+      repairs,
+      textChannelFailed: false,
+      stopped: true,
+    }
   }
 
   /**
@@ -1389,10 +1507,13 @@ export class SessionRunner {
    * waits — the loop below polls rather than evicting a working agent, because
    * evicting one would kill a task in flight.
    */
-  private async ensureSlot(): Promise<void> {
+  private async ensureSlot(signal?: AbortSignal): Promise<boolean> {
     await this.evictIdle()
     const deadline = Date.now() + 10 * 60_000
     while (!this.disposed && this.agents.size >= this.opts.hardLimit) {
+      // A stop must not wait behind the hard limit: the queued turn never started, and the
+      // run loop turns `false` into a `stopped` outcome.
+      if (SessionRunner.aborted(signal)) return false
       if (Date.now() > deadline) {
         throw new Error(
           `agent-community: no free agent slot after 10 minutes (live=${this.agents.size} `
@@ -1402,6 +1523,7 @@ export class SessionRunner {
       await new Promise((resolve) => setTimeout(resolve, 250))
       await this.evictIdle()
     }
+    return !SessionRunner.aborted(signal)
   }
 
   /** Dispose least-recently-used IDLE agents until the idle count fits the budget. */

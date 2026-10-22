@@ -1,3 +1,37 @@
+## Unreleased — stability batch 3 (S5 stop/interrupt + group orchestration)
+
+修复"停止生成后模型仍继续跑"以及群编排的停摆/死循环问题；只改插件源码，不改任何 Bot。
+
+### S5-A · 停止/中断链路
+- `SessionRunner.cancel(roomId,botId)` 调到 live agent 的 `agent.cancel`，这是唯一能打断在途模型
+  请求的调用；`cancelRoom()` 供删房扫尾。
+- `SessionRunner.run(..., signal?)` 增可选 AbortSignal：注册 listener（finally 移除）、在
+  ensureSlot/每轮 repair/followup/whenIdle 后检查；已中断返回 `stopped:true`，不 repair、不再排队。
+  `ensureSlot` 可被中断提前返回，不再等满 10 分钟。
+- `RunExecutor`：`callModelViaSession` 把 run 的 AbortSignal 传进 runner；`interruptRun` 改为
+  abort controller + 真正 cancel agent；`abortRoom`/dispose 路径同样 cancel，并对非 controlRun
+  的 abort 补一次 interrupted settle 兜底；删除从不填充的死 `agents` map。
+- 新增 `tests/session-runner-abort.test.ts`（2 个用例）。
+
+### S5-B · 群编排死锁/轮次/新任务
+- `GroupTaskDriver.forgetMember()`：移除运行中成员时清 `runningBotIds`/该成员汇报，running
+  assignment 标 failed；确有清理且无人运行时唤醒 leader 集成（internal）。修复"移除成员后
+  leader 永不集成、整组静默停摆"。
+- 新增 `stop()`（写 finished、清 running/pending，之后不再集成）、`adoptRound()`（把
+  `groupFlow.advanceRound` 的板值镜像回 driver，防止下一次保存回滚预算）、`isFinished()`。
+- `sendMessage` 群消息 hook：新用户指令 `beginTask` + `beginRound`（每条指令一份轮次预算）；
+  `afterRunSettled` 的 leader 回合接 `advanceRound`（maxRounds 生效）与 `onLeaderIdle`
+  （连续 3 轮无进展 → notice + stop）。
+- `removeBots` 在 cleanup 后逐 bot `forgetMember`；修复 `integratePrompt` 先清汇报再入队导致
+  入队失败丢汇报的问题。
+- 新增 `tests/group-task.test.ts`（13 个用例，fake accessor 覆盖集成/移除/stall/轮次）。
+
+### 验证
+- `node --test tests/*.test.ts`：**73/73 通过**（selection 9 + ledger-window 9 + room-goal 27 +
+  publish-policy 13 + session-runner-abort 2 + group-task 13）。
+- UI/core typecheck（过滤宿主缺失 d.ts 噪声）：0 真实错误；四包 tsdown + check-build = OK。
+- 本轮只同步 GitHub 源码；未安装/未重启、未发布 npm、未更新插件市场。
+
 ## Unreleased — stability batch 2 (S3 auto-run authorization, S4 publish policy)
 
 修复用户反馈的问题 3（Bot 单聊没收到消息却自己启动）与问题 5（群聊仍重复回答）；

@@ -174,15 +174,71 @@ export class GroupTaskDriver {
     // task is done; if it has something to deliver, that is `finish_task`'s report, which
     // the settle path publishes once. Rendering the turn's prose as well is what the user
     // saw as "the bot answered twice" — so it runs internal.
+    const prompt = this.integratePrompt(input.roomId, state)
     const ok = this.accessor.enqueueRun(
       input.roomId,
       leader,
-      this.integratePrompt(input.roomId, state),
+      prompt,
       { internal: true },
     )
-    if (ok) state.runningBotIds.add(leader)
+    if (ok) {
+      // Drained only once the turn is really queued: a refused enqueue keeps the reports for
+      // the next attempt, and they count as progress for the stall guard meanwhile.
+      state.pendingReports.length = 0
+      state.runningBotIds.add(leader)
+    }
     this.save(input.roomId, state)
     return { leaderRuns: ok }
+  }
+
+  /**
+   * A member left the room (removed by the leader, kicked by the user, or its run was
+   * cancelled as part of that removal).
+   *
+   * `maintenance.cleanupRemovedMembers` cancels the member's runs by writing state directly,
+   * so `settleRun`/`afterRunSettled` never run for them — this driver would keep the member
+   * in `runningBotIds` for ever, and `onMemberFinished`'s "integrate only once the whole
+   * fan-out has settled" check (`runningBotIds.size > 0`) would never pass again. The room
+   * then stalls silently: members answered, nobody integrates, no report.
+   *
+   * This is the missing half of a removal. It drops the member from the board, forgets its
+   * report (it can no longer be integrated), and — when nothing else is outstanding — lets
+   * the leader continue exactly as `onMemberFinished` would.
+   */
+  forgetMember(roomId: string, botId: string): void {
+    const state = this.ensure(roomId)
+    let changed = false
+    if (state.runningBotIds.delete(botId)) changed = true
+    for (const assignment of state.assignments) {
+      if (assignment.botId !== botId || assignment.status !== 'running') continue
+      assignment.status = 'failed'
+      assignment.result ??= '成员已离开本群，任务未完成'
+      changed = true
+    }
+    const keptReports = state.pendingReports.filter(report => report.botId !== botId)
+    if (keptReports.length !== state.pendingReports.length) {
+      changed = true
+      state.pendingReports.length = 0
+      state.pendingReports.push(...keptReports)
+    }
+    this.save(roomId, state)
+
+    // Nothing of this member was outstanding. Removing an idle member must not wake the
+    // leader — that would be an integration turn for a message nobody sent.
+    if (!changed) return
+    if (state.finished !== undefined && !this.finishedIsStale(roomId, state)) return
+    // Somebody else is still working: their own settle will integrate once the fan-out is done.
+    if (state.runningBotIds.size > 0) return
+    const leader = this.accessor.leaderOf(roomId)
+    if (leader === undefined) return
+    state.stalledRounds = 0
+    const prompt = this.integratePrompt(roomId, state)
+    const ok = this.accessor.enqueueRun(roomId, leader, prompt, { internal: true })
+    if (ok) {
+      state.pendingReports.length = 0
+      state.runningBotIds.add(leader)
+    }
+    this.save(roomId, state)
   }
 
   /**
@@ -233,14 +289,49 @@ export class GroupTaskDriver {
     // epoch is also undefined) compared equal to it and kept blocking every later task.
     const epochChanged = at !== undefined && at !== state.instructionAt
     if (epochChanged) state.instructionAt = at
+    // ── A NEW INSTRUCTION GETS A FRESH ROUND BUDGET ────────────────────────────
+    //
+    // The persisted board counts leader turns (`group-flow.advanceRound`) and stops the task
+    // at `maxRounds`. That budget belongs to ONE instruction: without this reset a room that
+    // had used up its rounds would finalise every later task on its first leader turn.
+    const roundReset = state.round !== 0
+    if (roundReset) state.round = 0
     if (state.finished === undefined) {
-      if (epochChanged) this.save(roomId, state)
+      if (epochChanged || roundReset) this.save(roomId, state)
       return
     }
     state.finished = undefined
     state.pendingReports.length = 0
     state.stalledRounds = 0
     this.save(roomId, state)
+  }
+
+  /**
+   * Mirror the persisted board's round into the driver.
+   *
+   * The board is the authority for the round budget: `group-flow.advanceRound` increments it
+   * and finalises it at `maxRounds`. Every `saveTaskState` writes THIS state's `round` back to
+   * the board, so without the mirror the next save (a member finishing, a report arriving)
+   * would roll the board back to the driver's stale value and the budget could never be spent.
+   */
+  adoptRound(roomId: string, round: number): void {
+    const state = this.ensure(roomId)
+    if (state.round === round) return
+    state.round = round
+    this.save(roomId, state)
+  }
+
+  /**
+   * Whether the room's CURRENT task is already closed.
+   *
+   * `finished` is a property of a task, not of the room (see `finishedIsStale`): a record
+   * written for an earlier instruction must not report the current one as done. The service
+   * asks this before spending a round or moving the stall clock, so the leader turn that
+   * called `finish_task` (and any turn after `stop`) is not counted against the next task.
+   */
+  isFinished(roomId: string): boolean {
+    const state = this.ensure(roomId)
+    return state.finished !== undefined && !this.finishedIsStale(roomId, state)
   }
 
   async finish(input: { roomId: string; report: string }): Promise<void> {
@@ -251,6 +342,32 @@ export class GroupTaskDriver {
 
     const leader = this.accessor.leaderOf(input.roomId)
     if (leader !== undefined) this.accessor.postReport(input.roomId, leader, input.report)
+  }
+
+  /**
+   * Stop coordinating this room's task, from the driver's side.
+   *
+   * Budget exhaustion and the no-progress guard both end automation WITHOUT a `finish_task`:
+   * the board is closed (so a late member settle cannot start another integration turn),
+   * outstanding assignments are marked failed so the board does not keep claiming work that
+   * nobody is doing, and queued reports are dropped (there is no turn left to read them).
+   * The service records the user-facing notice: this class owns no transcript.
+   *
+   * `finished` (not a separate flag) is what suppresses later integration — exactly the same
+   * record `finish_task` writes, so `onMemberFinished`/`forgetMember` need no new condition.
+   */
+  stop(roomId: string, reason: string): void {
+    const state = this.ensure(roomId)
+    state.finished = { report: reason, at: new Date().toISOString(), epoch: state.instructionAt }
+    for (const assignment of state.assignments) {
+      if (assignment.status !== 'running') continue
+      assignment.status = 'failed'
+      assignment.result ??= reason
+    }
+    state.runningBotIds.clear()
+    state.pendingReports.length = 0
+    state.stalledRounds = 0
+    this.save(roomId, state)
   }
 
   /** Record work the leader assigned through the `assign_task` tool. */
@@ -389,12 +506,18 @@ export class GroupTaskDriver {
       return latest !== undefined && done.at < latest
     }
 
-  /** The leader's integrate prompt, with what came back since it last ran. */
+  /**
+   * The leader's integrate prompt, with what came back since it last ran.
+   *
+   * DELIBERATELY PURE: the caller clears `pendingReports` only after the integration run was
+   * actually queued. Clearing here lost the reports whenever the enqueue was refused (a paused
+   * room, an executor that could not start) — the leader never saw what its members delivered,
+   * and the next idle turn looked like a stall because the reports were gone.
+   */
   private integratePrompt(roomId: string, state: GroupTaskState): string {
     const reports = state.pendingReports
       .map((r) => `· ${this.accessor.botName(r.botId)}${r.ok ? '' : '（失败）'}：${r.text}`)
       .join('\n')
-    state.pendingReports.length = 0
     const outstanding = state.assignments
       .filter((a) => a.status === 'running')
       .map((a) => `· ${this.accessor.botName(a.botId)}：${a.task}`)

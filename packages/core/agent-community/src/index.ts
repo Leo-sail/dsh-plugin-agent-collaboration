@@ -2252,6 +2252,19 @@ export class AgentCommunityService extends TypertRemoteService {
     const allRuns = [...this.state.runs, ...newRuns]
     this.state = { ...this.state, messages, runs: allRuns }
     this.enqueueWrite()
+    // ── A NEW GROUP INSTRUCTION OPENS A NEW TASK ────────────────────────────────
+    //
+    // A group user message used to reach the driver through NO hook at all: `beginTask` was
+    // only called from `queueRoomRun`, which this path never uses (the runs above are built
+    // inline). Two things were therefore wrong per instruction: the previous task's
+    // `finished` outlived it, and the round budget had no reset. Both belong here — after the
+    // message is state, so `lastUserMessageAt` sees the instruction being served.
+    if (room.directBotId === undefined) {
+      this.groupTask?.beginTask(room.id)
+      // A turn boundary for the invite budget (§5.6: at most four invites per turn). Group
+      // turns never called this, so the cap degraded to a rolling 60-second window.
+      this.groupFlow.beginRound(room.id)
+    }
     // P0-2: push user message to ledger so group chat panels see it immediately
     this.ledger.push({
       type: 'user',
@@ -3646,8 +3659,18 @@ export class AgentCommunityService extends TypertRemoteService {
     if (!result.ok) {
       return { ok: false, removed: [], refused: result.refused, error: result.error }
     }
+    // Stop the removed members' work first (runs cancelled, sessions purged). After that the
+    // orchestration state is told they are gone: cleanup writes `state.runs` directly, so
+    // `settleRun` never sees those runs and the driver would otherwise keep them as
+    // "running" for ever — the fan-out never settles and the leader is never woken again.
     await this.maintenance.cleanupRemovedMembers(input.roomId, result.removed, 'removed by request')
+    // A removed LEADER was already handed off by `groupFlow.remove` (leadership is written
+    // before this call), so `forgetMember` resolves the NEW leader and lets it continue.
+    for (const botId of result.removed) this.groupTask?.forgetMember(input.roomId, botId)
     const dissolved = await this.groupFlow.dissolveIfEmpty(input.roomId)
+    // A dissolved room has no room-scoped state left; drop the driver's copy so a later
+    // room that reuses nothing is not matched by an old board.
+    if (dissolved) this.groupTask?.forget(input.roomId)
     const room = dissolved ? undefined : this.getRoom(input.roomId)
     return {
       ok: true,
@@ -4883,7 +4906,8 @@ export class AgentCommunityService extends TypertRemoteService {
     const room = this.state.rooms.find(r => r.id === run.roomId)
     if (room === undefined) return
 
-    // 1. A member that was handed work: let the driver decide whether to wake the leader.
+    // 1. A group turn: members feed the driver's integrate path, the leader's own turn
+    //    spends a round and moves the no-progress clock.
     if (room.directBotId === undefined) {
       const leader = this.leaderOfRoom(run.roomId)
       if (leader !== undefined && leader !== run.botId) {
@@ -4898,6 +4922,14 @@ export class AgentCommunityService extends TypertRemoteService {
           ok: status === 'completed',
           fromLeader,
         })
+      } else if (leader !== undefined && leader === run.botId) {
+        // ── THE LEADER'S TURN CLOSES A ROUND ──────────────────────────────────────
+        //
+        // Two guards used to have no caller at all: the round budget (`advanceRound`) and
+        // the no-progress stop (`onLeaderIdle`). Both are about a leader TURN, so this is
+        // the only place they can be evaluated — on every leader settle, after the member
+        // fan-out has already been booked by `onMemberFinished` above.
+        this.afterLeaderTurnSettled(run.roomId, run.botId, replyText)
       }
     }
 
@@ -4985,6 +5017,54 @@ export class AgentCommunityService extends TypertRemoteService {
     } else {
       this.patchRoom(run.roomId, r => ({ ...r, goal: { ...goal, stalledRounds: stalled, updatedAt: nowIso() } }))
     }
+  }
+
+  /**
+   * One leader turn closed: spend a round of the task budget and move the stall clock.
+   *
+   * WHY HERE AND NOT IN THE DRIVER: the budget lives on the persisted board
+   * (`room.taskState.round`, compared against `maxRounds` by `group-flow.advanceRound`), and
+   * the stall guard lives in the driver. A leader turn is the unit both count, and the only
+   * signal that a turn ended is its run settling — so this is the joint point.
+   *
+   * Two stop conditions, both ending automation without `finish_task` (the room is told,
+   * the driver closes its board, no further integration turn can start):
+   *   · the round budget is exhausted (`round > maxRounds`, §5.5);
+   *   · nothing moved for three consecutive leader turns (`onLeaderIdle`).
+   *
+   * A hand-made group may carry no `team.leader`; the board refuses the advance and the
+   * fallback leader still coordinates, so that is not an error — the stall guard still runs.
+   */
+  private afterLeaderTurnSettled(roomId: string, leaderId: string, replyText: string): void {
+    // The user paused automation: no new run would start, so closing the task or spending
+    // its round budget here would be a decision they did not ask for.
+    if (this.state.rooms.find(r => r.id === roomId)?.paused === true) return
+    // A closed task spends no round and moves no stall clock: the leader turn that called
+    // `finish_task` (and every turn after `stop`) belongs to a task that is already delivered.
+    if (this.groupTask?.isFinished(roomId) === true) return
+    try {
+      const board = this.groupFlow.advanceRound({ roomId, actorBotId: leaderId })
+      // The driver writes `round` back on every save; mirror the board's count so the next
+      // save cannot roll the budget back (see `GroupTaskDriver.adoptRound`).
+      this.groupTask?.adoptRound(roomId, board.round)
+      if (board.round > board.maxRounds) {
+        const reason = `已达轮次上限 ${board.maxRounds} 轮，协作已暂停；请用户确认下一步。`
+        this.recordNotice(roomId, reason)
+        this.groupTask?.stop(roomId, reason)
+        return
+      }
+    } catch {
+      // No strict leader on the board (a hand-made group): the round budget cannot be spent,
+      // but the stall guard below does not depend on it.
+    }
+    void this.groupTask?.onLeaderIdle({ roomId, producedText: replyText.trim() !== '' })
+      .then((result) => {
+        if (!result.stalled) return
+        const reason = '协作已暂停：连续3轮没有进展，请用户确认下一步'
+        this.recordNotice(roomId, reason)
+        this.groupTask?.stop(roomId, reason)
+      })
+      .catch(() => undefined)
   }
 
   snapshot(): BotCommunitySnapshot {

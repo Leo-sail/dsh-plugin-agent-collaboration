@@ -11,7 +11,6 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
-import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
   BotId,
   BotIdentity,
@@ -310,19 +309,21 @@ export class RunExecutor {
   /** Keys whose baseline perception block has already been delivered. */
   private readonly perceptionBaselineSent = new Set<string>()
 
-  // Live agents managed by this executor, keyed by sessionId
-  private readonly agents = new Map<string, Agent>()
   // AgentHandle objects for disposal on bot/room deletion, keyed by sessionId
   private readonly handles = new Map<string, { dispose(): void }>()
   // Runs currently being driven by this process
   private readonly active = new Set<string>()
   //
-  // Abort handles for in-flight runs, keyed by RUN id. The `agents` map above is
-  // keyed by session id and is never populated, so routing a stop through it made
-  // the stop button a no-op: the bot kept streaming and answered anyway.
+  // WHAT A STOP NEEDS, keyed by RUN id: the controller that aborts the stream, and the
+  // `(room, bot)` pair whose LIVE AGENT lives inside the session runner.
+  //
+  // The executor cannot interrupt a model request itself — `agent.cancel` belongs to the
+  // runner's private agent map, and the executor's own `agents` map was never populated, so
+  // aborting this controller alone left the provider stream running (and billing) after
+  // 「停止生成」. The pair is what lets `interruptRun`/`abortRoom` reach the real turn.
   private readonly runAborts = new Map<string, AbortController>()
-  /** Room of each live run, so a room deletion can abort everything inside it. */
-  private readonly runRooms = new Map<string, string>()
+  /** The pair each live run is driving, so a stop/room-abort can cancel the REAL agent turn. */
+  private readonly runTargets = new Map<string, { readonly roomId: string; readonly botId: string }>()
   // Heartbeat timer references
   private readonly heartbeats = new Map<string, ReturnType<typeof setInterval>>()
 
@@ -408,6 +409,8 @@ export class RunExecutor {
   ): Promise<{
     text: string
     sessionSeq: SessionSeq
+    /** True when the caller's abort stopped the turn: settle as interrupted, never retry. */
+    stopped?: boolean | undefined
     reasoning?: string
     /** Tool cards of this turn, persisted with the reply so they survive a reload. */
     toolActivity?: readonly { name: string; status: string; detail?: string }[]
@@ -435,9 +438,14 @@ export class RunExecutor {
     this.ledger?.reserveLiveRow(run.roomId, bot.id, bot.name, run.id)
 
     const delta = this.perceptionDelta(run.roomId, bot.id)
+    // THE ABORT SIGNAL is how 「停止生成」 reaches the live model request: the runner
+    // registers it, cancels the agent on abort, and returns a `stopped` outcome instead of
+    // an answer. Without it the executor only flipped run state while the provider stream
+    // kept running and billing.
+    const runAbort = this.runAborts.get(run.id)
     let outcome: Awaited<ReturnType<typeof runner.run>>
     try {
-      outcome = await runner.run(run.roomId, bot.id, prompt, delta, true)
+      outcome = await runner.run(run.roomId, bot.id, prompt, delta, true, runAbort?.signal)
     } catch (error: unknown) {
       // A failed turn must not leave a row on `streaming: true`, or the panel shows
       // "处理中…" over an answer that will never come and the turn looks live forever.
@@ -447,6 +455,16 @@ export class RunExecutor {
       this.ledger?.discardDeliverables(run.roomId, run.id)
       this.ledger?.releaseLiveRow(run.roomId, bot.id)
       throw error
+    }
+
+    // A STOP IS NOT AN ANSWER. The turn was interrupted after the user pressed stop (or the
+    // room/bot was removed): settle it as interrupted, publish nothing, and never retry.
+    // The streamed ledger rows stay as the visible trace of what had been produced.
+    if (outcome.stopped === true) {
+      this.ledger?.settleRunText(run.roomId, run.id)
+      this.ledger?.discardDeliverables(run.roomId, run.id)
+      this.ledger?.releaseLiveRow(run.roomId, bot.id)
+      return { text: '', sessionSeq: outcome.sessionSeq ?? (0 as SessionSeq), stopped: true }
     }
 
     // A turn that only produced reasoning is a FAILURE, not a silent success. The
@@ -593,6 +611,10 @@ export class RunExecutor {
    */
   async disposeRoomAgents(roomId: string): Promise<void> {
     this.forgetPerception(roomId)
+    // CANCEL BEFORE DISPOSING. Disposing a handle under an in-flight model request leaves
+    // the provider stream alive with no session to consume it; cancelling the live runs
+    // first is what makes "删房/清空" actually stop the work (and stops the billing).
+    this.abortRoom(roomId)
     const runner = this.sessionRunner
     if (runner === undefined) return
     runner.forgetRoom(roomId)
@@ -650,42 +672,97 @@ export class RunExecutor {
     }
   }
 
-  /** Release every live agent for one bot, in every room. Called on bot deletion. */
+  /**
+   * Release every live agent for one bot, in every room. Called on bot deletion.
+   *
+   * The live turns are CANCELLED first: disposing an agent handle while its model request
+   * is in flight tears down the session under the provider call — the process then keeps
+   * paying for a stream nobody can consume. `stopRun` also marks the run aborted, so its
+   * settle path does not report a model failure for a bot the user just removed.
+   */
   disposeBotAgents(botId: string): void {
+    for (const [runId, target] of [...this.runTargets]) {
+      if (target.botId === botId) this.stopRun(runId, 'bot removed')
+    }
     const runner = this.sessionRunner
     if (runner === undefined) return
     void runner.disposeBot(botId).catch(() => undefined)
   }
 
-  /** Called by controlRun(action='interrupt') to actually cancel the live agent. */
   /**
-   * Cancel an in-flight run. Accepts either a run id (what the stop button has) or
-   * a session id, and resolves the latter through the run table.
+   * Cancel an in-flight run — the executor side of 「停止生成」.
+   *
+   * Accepts either a run id (what the stop button has) or a session id (older callers), and
+   * resolves both through the run table. A stop always has THREE effects, applied by
+   * {@link stopRun}: abort this executor's controller, cancel the LIVE agent turn through the
+   * session runner (the only call that interrupts the provider request), and let the caller
+   * settle the run as `interrupted`. A stop on a turn that already finished is a no-op.
    */
   interruptRun(idOrSession: string): void {
-    const byRun = this.runAborts.get(idOrSession)
-    if (byRun !== undefined) {
-      try { byRun.abort(new Error('user interrupted')) } catch { /* best-effort */ }
-      return
-    }
-    // Fall back to the legacy session-keyed path, and to matching a live run whose
-    // session id was passed in.
-    for (const [runId, controller] of this.runAborts) {
-      if (runId === idOrSession) { try { controller.abort() } catch { /* noop */ } }
-    }
-    const agent = this.agents.get(idOrSession)
-    if (agent === undefined) return
-    try {
-      agent.cancel({ kind: 'hook', reason: 'user interrupted' }, { keepInbox: true })
-    } catch { /* best-effort */ }
+    const run = this.resolveLiveRun(idOrSession)
+    if (run === undefined) return
+    this.stopRun(run.id, 'user interrupted')
   }
 
-  /** Abort every live run belonging to a room — used when a room is deleted. */
+  /**
+   * Abort every live run belonging to a room — used when a room is deleted or its agents are
+   * torn down. Each run gets the same real cancel as the stop button (`room removed`).
+   */
   abortRoom(roomId: string): void {
-    for (const [runId, controller] of this.runAborts) {
-      if (this.runRooms.get(runId) === roomId) {
-        try { controller.abort(new Error('room removed')) } catch { /* noop */ }
-      }
+    const runs = this.svc.listRuns()
+    for (const [runId, target] of [...this.runTargets]) {
+      if (target.roomId === roomId) this.stopRun(runId, 'room removed')
+    }
+    // A run that registered an abort controller but not yet its target (the window between
+    // `driveRun`'s registration and its claim) still needs its stream aborted.
+    for (const [runId, controller] of [...this.runAborts]) {
+      if (this.runTargets.has(runId)) continue
+      const run = runs.find(r => r.id === runId)
+      if (run?.roomId !== roomId) continue
+      try { controller.abort(new Error('room removed')) } catch { /* best-effort */ }
+    }
+    // SWEEP: an agent can outlive its run row (state cleared, or a run settled while the
+    // turn was still winding down). Cancelling by room closes that gap before the caller
+    // disposes the agents.
+    this.sessionRunner?.cancelRoom(roomId, 'room removed')
+  }
+
+  /** The run an id names: a run id first, else a LIVE run whose session id was passed. */
+  private resolveLiveRun(idOrSession: string): RunSnapshot | undefined {
+    const runs = this.svc.listRuns()
+    const byId = runs.find(r => r.id === idOrSession)
+    if (byId !== undefined) return byId
+    return runs.find(r =>
+      String(r.sessionId) === idOrSession && (r.status === 'running' || r.status === 'queued'),
+    )
+  }
+
+  /**
+   * Apply one stop to one run: abort the executor's controller, then cancel the live agent
+   * turn through the session runner.
+   *
+   * ORDER MATTERS. The controller tells the local loop (`callModel`'s round timer and the
+   * runner's `signal` boundary) to stop; `cancel` is what actually tears down the in-flight
+   * model request inside DSH. Idempotent and best-effort: an unclaimed/queued run has no
+   * agent to cancel, and a second stop is harmless.
+   */
+  private stopRun(runId: string, reason: string): void {
+    const controller = this.runAborts.get(runId)
+    if (controller !== undefined) {
+      try { controller.abort(new Error(reason)) } catch { /* best-effort */ }
+    }
+    const target = this.runTargets.get(runId)
+    if (target !== undefined) {
+      this.sessionRunner?.cancel(target.roomId, target.botId, reason)
+      return
+    }
+    // No registered target: only a run this process is actually driving has an agent to
+    // cancel, and only while it is still live (a stale stop must not hit the NEXT run of the
+    // same pair — the pair key is the same, the turn is not).
+    if (controller === undefined) return
+    const run = this.svc.listRuns().find(r => r.id === runId)
+    if (run !== undefined && (run.status === 'running' || run.status === 'queued')) {
+      this.sessionRunner?.cancel(run.roomId, run.botId, reason)
     }
   }
 
@@ -704,11 +781,13 @@ export class RunExecutor {
     if (this.tickTimer !== undefined) clearTimeout(this.tickTimer)
     for (const interval of this.heartbeats.values()) clearInterval(interval)
     this.heartbeats.clear()
-    for (const agent of this.agents.values()) {
-      try { agent.cancel({ kind: 'hook', reason: 'executor disposed' }, { keepInbox: false }) }
-      catch { /* best-effort */ }
+    // Stop every live model turn through the runner — the executor does not own the agents,
+    // so dropping its own controllers here would leave the provider streams alive.
+    for (const target of this.runTargets.values()) {
+      this.sessionRunner?.cancel(target.roomId, target.botId, 'executor disposed')
     }
-    this.agents.clear()
+    this.runTargets.clear()
+    this.runAborts.clear()
     // B-5: release all AgentHandles so sessions are properly torn down
     for (const handle of this.handles.values()) {
       try { handle.dispose() } catch { /* best-effort */ }
@@ -876,10 +955,11 @@ export class RunExecutor {
 
   private async driveRun(run: RunSnapshot): Promise<void> {
     this.active.add(run.id)
-    // One controller per run, published so a stop can reach the live stream.
+    // One controller per run, published so a stop can reach the live stream, plus the pair
+    // its live agent belongs to, so the stop can cancel the REAL model turn (see `stopRun`).
     const runAbort = new AbortController()
     this.runAborts.set(run.id, runAbort)
-    this.runRooms.set(run.id, run.roomId)
+    this.runTargets.set(run.id, { roomId: run.roomId, botId: run.botId })
     try {
       // Claim the run (queued → running)
       const leaseExpiresAt = new Date(Date.now() + 60_000).toISOString()
@@ -964,6 +1044,20 @@ export class RunExecutor {
             this.ctx.logger?.info?.(
               `agent-community: run ${run.id} aborted by the user`,
             )
+            // SETTLE THE ABORTED RUN, not just the flag. `controlRun('interrupt')` already
+            // wrote `interrupted`, so this CAS usually loses and is ignored — but a stop
+            // that did NOT come through controlRun (room/bot removal, executor dispose)
+            // would otherwise leave the run `running` until lease recovery.
+            try {
+              await this.svc.settleRun({
+                id: run.id,
+                expectedRevision: claimed.controlRevision,
+                leaseOwner: LEASE_OWNER,
+                status: 'interrupted',
+              })
+            } catch {
+              // Already settled by controlRun (revision moved on), or gone: both fine.
+            }
             settled = true
           } else {
             const msg = error instanceof Error ? error.message : String(error)
@@ -998,7 +1092,7 @@ export class RunExecutor {
     } finally {
       this.active.delete(run.id)
       this.runAborts.delete(run.id)
-      this.runRooms.delete(run.id)
+      this.runTargets.delete(run.id)
     }
   }
 
@@ -1138,7 +1232,7 @@ export class RunExecutor {
     text: string
     sessionSeq: SessionSeq
     /** True when the user stopped the run; the caller must NOT report a failure. */
-    stopped?: boolean
+    stopped?: boolean | undefined
     reasoning?: string
     usage?: {
       inputTokens?: number
