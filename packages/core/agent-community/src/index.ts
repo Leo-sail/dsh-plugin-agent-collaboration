@@ -24,7 +24,7 @@ import type {
   DecomposeTasksRequest, AssignTasksRequest, ReportTaskRequest,
   PostBotMessageRequest, SubmitFinalRequest,
   GroupProposal, ConfirmGroupRequest, DeclineGroupRequest, ProposeGroupRequest,
-  BotSkillProfile, PendingGroupProposal, RoomTaskState,
+  BotSkillProfile, PendingGroupProposal, RoomTaskState, RoomTaskAssignment,
   AnswerBotQuestionRequest,
   MarkRoomReadRequest,
   NoticeRoomRequest,
@@ -56,6 +56,7 @@ import { LedgerProjection } from './ledger-projection.ts'
 import { GroupTaskDriver, type GroupTaskState } from './group-task.ts'
 import { chooseFinalDelivery, publishOf, type RunPublish } from './publish-policy.ts'
 import { checkFinishEvidence } from './finish-gate.ts'
+import { taskAdherence } from './adherence.ts'
 import { buildGroupPatternCard, mergeGroupPatterns, renderGroupPatternsBlock } from './group-patterns.ts'
 import { assessGoalDrift } from './goal-drift.ts'
 import { auditNotice, selectAuditSamples } from './handoff-audit.ts'
@@ -121,6 +122,14 @@ import {
  * side cannot silently disappear from the other.
  */
 function toRoomTaskState(state: GroupTaskState, previous?: RoomTaskState | undefined): RoomTaskState {
+  const assignments = state.assignments.map(a => ({
+    id: `${a.botId}:${a.at}`,
+    botId: brandId<BotId>(a.botId),
+    task: a.task,
+    at: a.at,
+    status: a.status === 'running' ? 'working' : a.status === 'done' ? 'done' : 'blocked',
+    ...(a.result !== undefined ? { report: { text: a.result, at: a.at } } : {}),
+  })) as readonly RoomTaskAssignment[]
   return {
     round: state.round,
     // ⚠️ WAS HARD-CODED 0. `group-flow.ts` compares `round > state.maxRounds` against the PERSISTED
@@ -128,14 +137,9 @@ function toRoomTaskState(state: GroupTaskState, previous?: RoomTaskState | undef
     // with "已达轮次上限 0，收尾" — the giveaway was the dock card showing "0/1". Carry the existing
     // budget forward and default to the configured one for a board that has none yet.
     maxRounds: previous?.maxRounds ?? DEFAULT_MAX_ROUNDS,
-    assignments: state.assignments.map(a => ({
-      id: `${a.botId}:${a.at}`,
-      botId: brandId<BotId>(a.botId),
-      task: a.task,
-      at: a.at,
-      status: a.status === 'running' ? 'working' : a.status === 'done' ? 'done' : 'blocked',
-      ...(a.result !== undefined ? { report: { text: a.result, at: a.at } } : {}),
-    })),
+    assignments,
+    // P2: the adherence scorecard is DERIVED from the persisted board, never a writer's claim.
+    adherence: taskAdherence({ assignments, finished: state.finished }),
     // The user's original task text survives a conversion; a member hand-off restates it verbatim.
     ...(previous?.objective !== undefined ? { objective: previous.objective } : {}),
     ...(state.finished !== undefined ? { finished: state.finished } : {}),

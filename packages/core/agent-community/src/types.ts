@@ -980,6 +980,8 @@ export interface RoomTaskState {
   readonly version?: number | undefined
   /** When the board last changed (ISO); stamped by the writer that bumped `version`. */
   readonly updatedAt?: string | undefined
+  /** P2 collaboration-adherence counts/score, derived from this board at save time. */
+  readonly adherence?: import('./adherence.ts').TaskAdherence | undefined
 }
 
 /**

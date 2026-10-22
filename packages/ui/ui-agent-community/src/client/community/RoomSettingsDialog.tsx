@@ -164,6 +164,7 @@ export function RoomSettingsDialog({
   const patternCards = [...(room.patternCards ?? [])].sort(
     (a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0),
   )
+  const adherence = room.taskState?.adherence
 
   const toggleMember = (id: BotId) => {
     setMembers(prev => prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id])
@@ -226,6 +227,24 @@ export function RoomSettingsDialog({
           暂停（不创建新运行）
         </label>
       </form>
+
+      {/* ── 协作遵从度 (P2) — read-only ─────────────────────────────────────────────
+          A scorecard derived from the persisted board: how much was actually assigned vs
+          finished, whether the finish passed the evidence gate, and why not. */}
+      {adherence !== undefined && (
+        <section style={blockStyle} data-task-adherence="">
+          <h4 style={blockTitleStyle}>协作遵从度</h4>
+          <div style={cardStyle}>
+            <span style={{ color: 'var(--dsw-alias-label-primary)', fontWeight: 500 }}>
+              {adherence.score}/100 · 完成 {adherence.done}/{adherence.assigned}
+              {adherence.verifiedFinish ? ' · 证据门通过' : adherence.bypassed ? ' · 未验证放行' : ''}
+            </span>
+            {adherence.issues.length === 0
+              ? <span style={mutedLineStyle}>没有发现未完成或未验证项。</span>
+              : <span style={mutedLineStyle}>{adherence.issues.join('；')}</span>}
+          </div>
+        </section>
+      )}
 
       {/* ── 群协作模式 (OP-09) — read-only ──────────────────────────────────────────
           Cards the host learned from finished tasks in THIS group. Display only: there is

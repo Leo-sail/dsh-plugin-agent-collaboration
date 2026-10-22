@@ -1,3 +1,12 @@
+## Unreleased — P2 adherence scorecard
+
+- 新增 `adherence.ts`：从持久化任务板派生 `TaskAdherence`（assigned/done/failed/pending、
+  coverage、verifiedFinish、bypassed、evidenceCount、0–100 score、issues）；只统计
+  `status=done` 为完成（`reported` 仍是待验收），bypassed finish 扣分并列入 issues。
+- `RoomTaskState.adherence` additive 字段；`toRoomTaskState` 每次保存时由板派生，不信任写入方自述。
+- UI「群聊设置」新增只读「协作遵从度」：score、完成数/总数、证据门状态、未完成/未验证原因。
+- `tests/adherence.test.ts` 4 例；全量 **428/428**；core/UI typecheck、构建/check-build OK。
+- 未发布 npm / 未更新市场。
 ## Unreleased — UI display layer (patterns, threads, context cost, audit notices)
 
 只改 UI 包；不改 core/后端/Bot。
