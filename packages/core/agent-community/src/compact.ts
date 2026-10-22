@@ -327,6 +327,29 @@ export function summaryMessageText(removed: number, summary: string): string {
   return `以下是此前 ${removed} 条消息的压缩摘要（原文已不再保留）：\n\n${summary}`
 }
 
+/**
+ * When the checkpoint row should sit, so the user can actually see it.
+ *
+ * It marks the fold boundary — just before the first KEPT message. Stamping it with the
+ * OLDEST replaced message (the old behaviour) put the row at the very start of the rebuilt
+ * room; the panel loads the newest page (last 50 rows), so the summary only appeared after
+ * 「加载更早」, which is not "the panel shows the summary". One millisecond earlier than the
+ * first kept message keeps it ordered before the tail while still landing in the newest page
+ * for any normal compaction.
+ *
+ * Falls back to the oldest replaced message only when the tail has no parseable timestamp.
+ */
+export function checkpointCreatedAt(
+  older: readonly { readonly createdAt: string }[],
+  tail: readonly { readonly createdAt: string }[],
+): string {
+  const anchor = tail[0]?.createdAt ?? older[0]?.createdAt
+  if (anchor === undefined) return new Date(0).toISOString()
+  const ms = Date.parse(anchor)
+  return Number.isFinite(ms) ? new Date(Math.max(0, ms - 1)).toISOString() : anchor
+}
+
+
 /** `compactRoom`'s request, as the RPC carries it. */
 export interface CompactRoomRequest {
   readonly roomId: string

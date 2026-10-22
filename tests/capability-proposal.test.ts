@@ -15,6 +15,7 @@ import { test } from 'node:test'
 import {
   buildCapabilityCard,
   chooseValidLeader,
+  defaultProposalLeader,
   fallbackSelection,
   rankCandidates,
   sanitizeCollaborateSelection,
@@ -383,4 +384,13 @@ test('confirm honours the user-picked leader and ignores an invalid one', async 
   } as never)
   // The invalid pick falls back to the proposal's leader, not to a random member.
   assert.equal(room2.team?.leader.botId, 'content')
+})
+
+test('a model-driven proposal starts with the source bot as leader, but an explicit caller can choose', () => {
+  assert.equal(defaultProposalLeader(['source', 'other'], 'source'), 'source')
+  assert.equal(defaultProposalLeader(['other', 'third'], 'source'), 'other')
+  assert.equal(defaultProposalLeader([], 'source'), undefined)
+  // The helper does not override an explicit choice; the proposal flow only applies it to the
+  // model path (see group-flow.ts).
+  assert.equal(chooseValidLeader({ leaderId: 'other', members: ['source', 'other'], sourceBotId: 'source' }), 'other')
 })

@@ -372,6 +372,23 @@ export function chooseValidLeader(input: {
 }
 
 /**
+ * The leader a MODEL-driven proposal starts with: the source bot when it is a member.
+ *
+ * The dialog always lets the user change it. Keeping the default deterministic is the point:
+ * the model may see a higher "fit score" on another member, but a proposal that starts with a
+ * bot the user was not talking to is exactly the surprise the S7 report described. An explicit
+ * bot/user `propose_group` call can still name its own leader; only the model's suggestion is
+ * overridden here.
+ */
+export function defaultProposalLeader(
+  members: readonly string[],
+  sourceBotId: string | undefined,
+): string | undefined {
+  if (sourceBotId !== undefined && members.includes(sourceBotId)) return sourceBotId
+  return members[0]
+}
+
+/**
  * Accept a model's selection only if it stays inside the shortlist.
  *
  * Members outside `allowedIds` are dropped (they were never offered), the list is deduped and

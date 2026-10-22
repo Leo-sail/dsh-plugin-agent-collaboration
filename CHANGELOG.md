@@ -1,3 +1,38 @@
+## Unreleased — stability batch 8 (fixes found by end-to-end testing)
+
+两个在隔离实例 + Playwright 真机验收中发现的问题（不是推断，是复现后修掉）：
+
+### 压缩摘要落在"最旧"而不是折叠边界，面板首屏看不到
+- 隔离实例压缩 61 条消息后，`compacted: true`、`foldedSeqs` 正确，但面板首屏没有摘要：
+  checkpoint 的 `createdAt` 被设成最旧被替换消息，`seedLedgerRoom` 按时间排序后它落在第 0 行，
+  而面板只加载最新 50 行，必须点「加载更早」才看得到。
+- 新增 `checkpointCreatedAt(older, tail)`：把 checkpoint 放在**第一条保留消息前 1ms**
+  （折叠边界），既保持顺序又落在最新页；摘要可见性在隔离实例重测通过（`HAS_SUMMARY true`，
+  不需要「加载更早」）。补充了边界/无 tail 的纯函数测试。
+
+### 模型建群提案默认 leader 不是源 Bot
+- 实测提案对话里 leader 仍是模型偏好的成员（如小刘），而方案要求默认固定源 Bot、只在弹窗里
+  由用户改。新增 `defaultProposalLeader(members, sourceBotId)`：模型驱动的提案一律默认源 Bot；
+  Bot/用户的**显式** `propose_group`/`confirmGroup` 选择仍然优先（不破坏自主权）。
+- 隔离实例重测：同一 DM 的新提案 leader 单选默认「小董」（源 Bot），members 仍可编辑。
+- 新增能力层测试；全量 `node --test tests/*.test.ts` = **191/191**。
+
+### 本轮端到端验收（隔离 profile + Playwright）
+- 问题1 切换：连续点 4 个 DM + 快速三连点，选中立即生效且 6s 轮询不拉回 ✅
+- 问题2 回复可见：工具回合结束后最终回复直接在首屏 ✅
+- 问题3 自动运行：目标提议显示「自动续跑：关」，空闲 12s 无自动 run；点授权后显示
+  「自动续跑 1/3」+ notice + routine run；暂停生效、goal paused ✅
+- 问题4 建群：提案弹窗出现 9 个 Bot 可勾选、建议成员默认选中、可改 leader；取消一个成员后
+  confirm 得到 3 人新群且 leader 与选择一致 ✅
+- 问题5 群回复：成员回答可见，短群任务无重复回答；leader 集成重复由 191 个单测覆盖 ✅
+- 停止：长任务点「停止生成」后 2s 内停止按钮消失、run 变 cancelled ✅
+- 运行状态：显示「运行中 · 已用 Xs · 预计截止 HH:mm 剩余 …」，群任务预计 31m（自适应，
+  不是固定 10m）✅
+- 快照：真实隔离数据下 snapshot RPC **663,595 B**（改动前全量约 6MB 级）✅
+- 压缩：修复后摘要行在首屏可见；`foldedSeqs` 61 条、keepLast 6 条 ✅
+
+### 说明
+- 只改插件源码，不改任何 Bot；本轮只同步 GitHub 源码并安装到本机 profile，未发布 npm、未更新市场。
 ## Unreleased — stability batch 7 (S13 snapshot/persistence + S14 compaction)
 
 P2 收尾：快照与状态写瘦身、退出不丢写、压缩折叠与摘要进面板。只改插件源码，不改任何 Bot。

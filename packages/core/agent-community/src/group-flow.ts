@@ -28,6 +28,7 @@ import { resolveRoomLeader } from './room-leader.ts'
 import {
   buildCapabilityCard,
   chooseValidLeader,
+  defaultProposalLeader,
   fallbackSelection,
   sanitizeCollaborateSelection,
   shortlistFor,
@@ -288,13 +289,16 @@ export class GroupFlowService {
     if (members.length < 2) return undefined
 
     // The leader defaults to the source bot when it is a member — it is the bot that already
-    // holds the task's context — unless the model (or the user, at confirm time) named a
-    // valid member explicitly.
-    const leaderId = chooseValidLeader({
-      members,
-      ...(decided.leaderId !== undefined ? { leaderId: decided.leaderId } : {}),
-      sourceBotId: room.directBotId,
-    }) ?? members[0]!
+    // holds the task's context — unless an EXPLICIT caller (bot or user) named a valid member.
+    // A model-driven suggestion does not get to replace that default: the user may not have
+    // talked to the model's favourite bot at all. The dialog still lets the user change it.
+    const leaderId = explicit.length > 0
+      ? chooseValidLeader({
+        members,
+        ...(decided.leaderId !== undefined ? { leaderId: decided.leaderId } : {}),
+        sourceBotId: room.directBotId,
+      }) ?? members[0]!
+      : defaultProposalLeader(members, room.directBotId) ?? members[0]!
     const proposal: PendingGroupProposal = {
       id: this.port.nextId(),
       roomId: room.id,

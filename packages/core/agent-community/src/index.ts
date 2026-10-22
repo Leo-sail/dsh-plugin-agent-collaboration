@@ -81,6 +81,7 @@ import { findBotByName, requireBot, requireRoom, NotFoundError } from './lookup.
 import { resolveRoomLeader } from './room-leader.ts'
 import {
   COMPACT_SENDER_NAME,
+  checkpointCreatedAt,
   clampKeepLast,
   foldedMessageIds,
   splitForCompaction,
@@ -2685,20 +2686,21 @@ export class AgentCommunityService extends TypertRemoteService {
       sender: { kind: 'routine', name: COMPACT_SENDER_NAME },
       text: summaryMessageText(older.length, summary),
       mentions: [],
-      // Stamped at the OLDEST replaced message so the row sorts where those messages were
-      // instead of jumping to the bottom of the transcript.
-      createdAt: older[0]!.createdAt,
+      // Stamped at the FOLD BOUNDARY — just before the first kept message — so the rebuilt
+      // transcript shows the checkpoint in the newest page. The first version used the oldest
+      // replaced message, which put the row at the very start of the room; the panel loads the
+      // newest page and the summary was invisible until 「加载更早」 (found in an E2E run).
+      createdAt: checkpointCreatedAt(older, tail),
       kind: 'summary',
     }
     // The ORIGINAL rows stay. The checkpoint is ADDED, and the folded ids are recorded so the
     // prompt can skip them — folding is a window operation, not a delete.
     //
     // THE IDS COME FROM THE SPLIT, NEVER FROM TIMESTAMPS. `older` IS the segment the summary
-    // replaced, so its ids are the fold set by construction. This used to be recomputed as
-    // `createdAt < summaryMessage.createdAt`, but the summary is deliberately stamped with the
-    // OLDEST replaced message's time (so the panel sorts the checkpoint where the replaced
-    // messages were) — the two conditions can never both hold, so `foldedIds` was always empty
-    // and the prompt kept replaying everything the summary had replaced.
+    // replaced, so its ids are the fold set by construction. Recomputing it from
+    // `createdAt < summaryMessage.createdAt` was always empty (the checkpoint is stamped at the
+    // boundary, not at the oldest replaced row), which is how the prompt kept replaying
+    // everything the summary had replaced.
     const foldedIds = foldedMessageIds(older)
     this.state = {
       ...this.state,

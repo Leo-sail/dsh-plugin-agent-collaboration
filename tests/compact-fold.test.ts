@@ -25,6 +25,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import {
+  checkpointCreatedAt,
   foldedMessageIds,
   splitForCompaction,
   summaryMessageText,
@@ -192,4 +193,19 @@ test('without the `summary` actor a runId-less bot message is still a coordinati
     { id: 's1', at: iso(60_000), kind: 'bot', senderName: '压缩摘要', text: '摘要正文' },
   ])
   assert.deepEqual(ledger.listLedger(ROOM, { force: true, limit: 10 }), [])
+})
+
+test('the checkpoint sits at the fold boundary, inside the newest page', () => {
+  // The panel loads the newest 50 rows. Stamping the summary with the OLDEST replaced
+  // message put it at row 0 of the rebuilt room and made it invisible until 「加载更早」.
+  const older = [{ id: 'o1', createdAt: iso(0) }, { id: 'o2', createdAt: iso(1000) }]
+  const tail = [{ id: 't1', createdAt: iso(60_000) }, { id: 't2', createdAt: iso(120_000) }]
+  const at = checkpointCreatedAt(older, tail)
+  assert.equal(at, iso(59_999))
+  assert.ok(at > older[1]!.createdAt)
+  assert.ok(at < tail[0]!.createdAt)
+})
+
+test('checkpointCreatedAt falls back to the oldest replaced row without a usable tail', () => {
+  assert.equal(checkpointCreatedAt([{ id: 'o1', createdAt: 'not-a-date' }], []), 'not-a-date')
 })
