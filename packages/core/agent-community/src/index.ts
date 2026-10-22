@@ -34,6 +34,7 @@ import type {
   DeliveredFile,
   AbstainRequest,
   RoomPatternRequest,
+  UpdateRoomExperienceRequest,
   HarnessAttribution,
   FinishEvidence,
   RunEvidence,
@@ -59,7 +60,13 @@ import { chooseFinalDelivery, publishOf, type RunPublish } from './publish-polic
 import { checkFinishEvidence } from './finish-gate.ts'
 import { taskAdherence } from './adherence.ts'
 import { ReputationWatchdog } from './reputation.ts'
-import { buildGroupPatternCard, mergeGroupPatterns, renderGroupPatternsBlock } from './group-patterns.ts'
+import {
+  buildGroupPatternCard,
+  composeExperienceText,
+  mergeGroupPatterns,
+  renderExperienceBlock,
+  renderGroupPatternsBlock,
+} from './group-patterns.ts'
 import { normalizeSubscriptions } from './intent-subscription.ts'
 import { assessGoalDrift } from './goal-drift.ts'
 import { diagnoseRunFailure } from './run-diagnosis.ts'
@@ -5116,6 +5123,9 @@ export class AgentCommunityService extends TypertRemoteService {
   roomPatternsBlock(roomId: string): string | undefined {
     const room = this.state.rooms.find(r => r.id === roomId)
     if (room === undefined) return undefined
+    // ONE editable card wins over the legacy per-pattern list. An EXPLICIT empty user card
+    // suppresses the fallback too, so clearing the textarea really removes the block.
+    if (room.experienceCard !== undefined) return renderExperienceBlock(room.experienceCard.text)
     return renderGroupPatternsBlock(room.patternCards)
   }
 
@@ -5142,10 +5152,19 @@ export class AgentCommunityService extends TypertRemoteService {
       now: nowIso(),
       status: verified ? 'active' : 'pending',
     })
-    this.patchRoom(roomId, current => ({
-      ...current,
-      patternCards: mergeGroupPatterns(current.patternCards, card),
-    }))
+    this.patchRoom(roomId, current => {
+      const patternCards = mergeGroupPatterns(current.patternCards, card)
+      // Auto-seed the ONE experience card from active patterns until the user takes it over.
+      const autoText = composeExperienceText(patternCards)
+      const experienceCard = current.experienceCard?.source === 'user' || autoText === undefined
+        ? current.experienceCard
+        : { text: autoText, updatedAt: nowIso(), source: 'auto' as const }
+      return {
+        ...current,
+        patternCards,
+        ...(experienceCard !== undefined ? { experienceCard } : {}),
+      }
+    })
   }
 
   /** Remove one learned experience card from a room (user management; no prompt side effects beyond). */
@@ -5172,6 +5191,22 @@ export class AgentCommunityService extends TypertRemoteService {
       patternCards: (current.patternCards ?? []).map(card => card.id === input.patternId
         ? { ...card, status: 'active' as const }
         : card),
+    }))
+    return { ok: true }
+  }
+
+  /**
+   * Save the room's ONE editable experience card. Manual text wins over auto-generation; an
+   * empty string is a deliberate clear (and suppresses the legacy fallback).
+   */
+  async updateRoomExperience(input: UpdateRoomExperienceRequest): Promise<{ ok: boolean; reason?: string }> {
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room === undefined) return { ok: false, reason: '房间不存在。' }
+    const points = [...input.text.replace(/\r\n?/gu, '\n').trim()]
+    const text = points.length <= 3000 ? points.join('') : `${points.slice(0, 2999).join('')}…`
+    this.patchRoom(input.roomId, current => ({
+      ...current,
+      experienceCard: { text, updatedAt: nowIso(), source: 'user' },
     }))
     return { ok: true }
   }
@@ -6563,7 +6598,7 @@ const REMOTE_METHODS = [
   // automatic continuation. A Bot's own tool can only PROPOSE a goal, never authorize it.
   'authorizeRoomGoal', 'pauseRoomGoal', 'resumeRoomGoal',
   // Experience-card management from room settings (delete / confirm pending).
-  'deleteRoomPattern', 'confirmRoomPattern',
+  'deleteRoomPattern', 'confirmRoomPattern', 'updateRoomExperience',
 ] as const
 
 for (const method of REMOTE_METHODS) {

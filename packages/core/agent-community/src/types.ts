@@ -153,6 +153,19 @@ export interface GroupPatternCard {
   readonly status?: 'active' | 'pending' | undefined
 }
 
+/**
+ * The room's ONE editable experience card (group memory).
+ *
+ * Auto-generated from finished-task pattern cards until the user edits it; after a manual save
+ * `source` becomes `user` and later finishes never overwrite the text. An empty user card means
+ * "no experience block" (it suppresses the legacy pattern-card fallback).
+ */
+export interface RoomExperienceCard {
+  readonly text: string
+  readonly updatedAt: string
+  readonly source: 'auto' | 'user'
+}
+
 export interface BotRoom {
   readonly directBotId?: BotId | undefined
   readonly id: BotRoomId
@@ -197,6 +210,8 @@ export interface BotRoom {
    * `[本群经验卡]` and never shared across rooms.
    */
   readonly patternCards?: readonly GroupPatternCard[] | undefined
+  /** The single editable group-memory card rendered into prompts (legacy patternCards remain). */
+  readonly experienceCard?: RoomExperienceCard | undefined
   /**
    * Messages folded into a checkpoint: kept in the transcript, EXCLUDED from the prompt.
    *
@@ -556,6 +571,12 @@ export interface NoticeRoomRequest {
 export interface RoomPatternRequest {
   readonly roomId: string
   readonly patternId: string
+}
+
+/** Save the room's one editable experience card (empty text clears it). */
+export interface UpdateRoomExperienceRequest {
+  readonly roomId: string
+  readonly text: string
 }
 
 /**

@@ -1,3 +1,15 @@
+## Unreleased — one editable group-experience card
+
+- 将「群经验卡」从多张自动卡列表改为**一张可编辑卡**：设置里一个 textarea +「保存经验卡」。
+- 后端 `RoomExperienceCard { text, updatedAt, source:'auto'|'user' }`：
+  * 已验证完成的任务会自动用 active pattern 组成卡文本（source=auto）；
+  * 用户保存后 source=user，后续自动提炼**不再覆盖**；清空文本会清除该卡并抑制旧 pattern fallback；
+  * prompt 的 `[本群经验卡]` 优先使用这张卡，旧 `patternCards` 仅在无 experienceCard 时兼容回退。
+- 新增 RPC `updateRoomExperience`（REMOTE_METHODS allowlist + UI remote + descriptor）；保存实时持久化，
+  已实测 state 落 `{source:'user'}`。
+- `HARNESS_REVISION=paper-batch8-2026-10-22`；`PROMPT_CONTRACT_VERSION` 保持 4（标题未变）。
+- 测试：compose/render 单卡 2 例 + 全量 **540/540**；core/UI tsc、build、check-build OK。
+- 未发布 npm / 未更新市场。
 ## Unreleased — rename to “群经验卡” + user management
 
 - 群聊设置里的「群协作模式」更名为 **「群经验卡」**；prompt 注入标题同步为 `[本群经验卡]`。

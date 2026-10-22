@@ -12,10 +12,12 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   buildGroupPatternCard,
+  composeExperienceText,
   GROUP_PATTERNS_MAX,
   GROUP_PATTERNS_RENDER_LIMIT,
   mergeGroupPatterns,
   normalizePatternTask,
+  renderExperienceBlock,
   renderGroupPatternsBlock,
 } from '../packages/core/agent-community/src/group-patterns.ts'
 import type { GroupPatternCard } from '../packages/core/agent-community/src/types.ts'
@@ -128,6 +130,25 @@ test('only active cards enter the prompt; a pending card waits for confirmation'
   assert.match(block, /已确认任务/u)
   assert.doesNotMatch(block, /待确认任务/u)
   assert.equal(renderGroupPatternsBlock([card({ task: '只有待确认', status: 'pending' })]), undefined)
+})
+
+test('composeExperienceText builds the single card from active cards only', () => {
+  const text = composeExperienceText([
+    card({ task: '任务甲', approach: '做法甲', status: 'active' }),
+    card({ task: '任务乙', approach: '做法乙', status: 'pending' }),
+    card({ task: '任务丙', approach: '做法丙', pitfalls: ['坑一'], status: 'active' }),
+  ])
+  assert.match(text!, /任务甲/u)
+  assert.match(text!, /任务丙/u)
+  assert.doesNotMatch(text!, /任务乙/u)
+  assert.match(text!, /注意：坑一/u)
+  assert.equal(composeExperienceText([]), undefined)
+})
+
+test('renderExperienceBlock trims and returns undefined for an empty card', () => {
+  assert.equal(renderExperienceBlock('  '), undefined)
+  assert.equal(renderExperienceBlock(undefined), undefined)
+  assert.equal(renderExperienceBlock(' 先做 A，再做 B '), '[本群经验卡]\n先做 A，再做 B')
 })
 
 test('render returns undefined when there is nothing usable, and respects the limit', () => {

@@ -146,6 +146,40 @@ export function mergeGroupPatterns(
   return [card, ...kept].slice(0, limit)
 }
 
+/** Hard cap for the single editable experience text (kept small: it is injected every turn). */
+export const EXPERIENCE_TEXT_LIMIT = 3_000
+
+/**
+ * Compose the single experience text from ACTIVE cards (newest first).
+ *
+ * This is only the AUTO seed: once the user edits the card, the service stops calling this.
+ * Pending cards (bypassed finishes) are deliberately absent — an unverified pattern must not
+ * become standing group memory without the user's word.
+ */
+export function composeExperienceText(
+  cards: readonly GroupPatternCard[] | undefined,
+  limit: number = EXPERIENCE_TEXT_LIMIT,
+): string | undefined {
+  const active = (cards ?? [])
+    .filter(card => (card.status ?? 'active') === 'active')
+    .filter(card => card.task.trim() !== '' && card.approach.trim() !== '')
+  if (active.length === 0) return undefined
+  const lines = active.map((card) => {
+    const pitfalls = (card.pitfalls ?? []).filter(item => item.trim() !== '')
+    return `· ${card.task}：${card.approach}${pitfalls.length > 0 ? `（注意：${pitfalls.join('；')}）` : ''}`
+  })
+  const text = lines.join('\n')
+  const points = [...text]
+  return points.length <= limit ? text : `${points.slice(0, Math.max(0, limit - 1)).join('')}…`
+}
+
+/** Render the single experience card as the `[本群经验卡]` prompt section. */
+export function renderExperienceBlock(text: string | undefined): string | undefined {
+  const flat = (text ?? '').trim()
+  if (flat === '') return undefined
+  return `[本群经验卡]\n${flat}`
+}
+
 /**
  * Render the newest cards as the `[本群经验卡]` prompt section.
  *

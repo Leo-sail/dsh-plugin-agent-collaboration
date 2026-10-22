@@ -157,6 +157,8 @@ export interface CommunityRemote {
   deleteRoomPattern(input: { roomId: string; patternId: string }): Promise<{ ok: boolean; reason?: string }>
   /** Confirm a pending experience card so it may enter future prompts. */
   confirmRoomPattern(input: { roomId: string; patternId: string }): Promise<{ ok: boolean; reason?: string }>
+  /** Save the room's single editable experience card (empty clears it). */
+  updateRoomExperience(input: { roomId: string; text: string }): Promise<{ ok: boolean; reason?: string }>
   /**
    * S3: grant THIS room's goal a bounded number of automatic continuation rounds.
    *

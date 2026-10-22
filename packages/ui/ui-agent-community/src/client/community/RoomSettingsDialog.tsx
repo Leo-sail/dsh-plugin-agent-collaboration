@@ -37,16 +37,6 @@ export interface RoomSettingsDialogProps {
   onSaved: () => void
 }
 
-/** `2026-10-22 10:05` in local time; the raw string when unparseable. */
-function whenText(iso: string): string {
-  const ms = Date.parse(iso)
-  if (!Number.isFinite(ms)) return iso
-  const date = new Date(ms)
-  const pad = (value: number): string => String(value).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
-    + `${pad(date.getHours())}:${pad(date.getMinutes())}`
-}
-
 const blockStyle = {
   display: 'grid',
   gap: 6,
@@ -73,13 +63,6 @@ const cardStyle = {
   color: 'var(--dsw-alias-label-secondary)',
 } as const
 
-const scrollerStyle = {
-  display: 'grid',
-  gap: 6,
-  maxHeight: 240,
-  overflowY: 'auto',
-} as const
-
 const mutedLineStyle = {
   margin: 0,
   color: 'var(--dsw-alias-label-tertiary)',
@@ -96,36 +79,31 @@ export function RoomSettingsDialog({
   const [paused, setPaused] = useState(room.paused ?? false)
   const [error, setError] = useState<string>()
 
-  const [patternCards, setPatternCards] = useState(() => [...(room.patternCards ?? [])].sort(
-    (a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0),
-  ))
-  const [patternError, setPatternError] = useState<string>()
-  const [patternBusy, setPatternBusy] = useState(false)
+  const [experienceText, setExperienceText] = useState(room.experienceCard?.text ?? '')
+  const [experienceSource, setExperienceSource] = useState<'auto' | 'user' | undefined>(room.experienceCard?.source)
+  const [experienceError, setExperienceError] = useState<string>()
+  const [experienceBusy, setExperienceBusy] = useState(false)
   const adherence = room.taskState?.adherence
 
   const toggleMember = (id: BotId) => {
     setMembers(prev => prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id])
   }
 
-  async function actOnPattern(patternId: string, action: 'confirm' | 'delete'): Promise<void> {
-    if (patternBusy) return
-    setPatternBusy(true)
-    setPatternError(undefined)
+  async function saveExperience(): Promise<void> {
+    if (experienceBusy) return
+    setExperienceBusy(true)
+    setExperienceError(undefined)
     try {
-      const result = action === 'confirm'
-        ? await remote.confirmRoomPattern({ roomId: room.id, patternId })
-        : await remote.deleteRoomPattern({ roomId: room.id, patternId })
+      const result = await remote.updateRoomExperience({ roomId: room.id, text: experienceText })
       if (!result.ok) {
-        setPatternError(result.reason ?? '操作失败')
+        setExperienceError(result.reason ?? '保存失败')
         return
       }
-      setPatternCards(prev => action === 'delete'
-        ? prev.filter(card => card.id !== patternId)
-        : prev.map(card => card.id === patternId ? { ...card, status: 'active' as const } : card))
+      setExperienceSource('user')
     } catch (e) {
-      setPatternError(describe(e))
+      setExperienceError(describe(e))
     } finally {
-      setPatternBusy(false)
+      setExperienceBusy(false)
     }
   }
 
@@ -204,54 +182,40 @@ export function RoomSettingsDialog({
         </section>
       )}
 
-      {/* ── 群经验卡 (OP-09) — manageable ────────────────────────────────────────────
-          Cards learned from tasks THIS group finished. A card from a verified finish is
-          active immediately; a card from a bypassed finish stays PENDING until the user
-          confirms it. Only active cards enter the bot prompt. */}
-      <section style={blockStyle} data-pattern-cards="">
+      {/* ── 群经验卡 — ONE editable memory card ─────────────────────────────────────
+          The host auto-seeds this from verified group finishes; after the user saves it,
+          later finishes must not overwrite the text. Empty text clears the block. */}
+      <section style={blockStyle} data-experience-card="">
         <h4 style={blockTitleStyle}>群经验卡</h4>
         <p style={mutedLineStyle}>
-          完成群任务后从最终汇报提炼，只影响本群；只有「已启用」的卡会进入 Bot 上下文。
+          本群的任务经验，只影响这个群，并会进入 Bot 上下文。可手动修改；保存后后续自动提炼不会覆盖你的版本。
         </p>
-        {patternCards.length === 0
-          ? <p style={mutedLineStyle}>暂无</p>
-          : (
-            <div style={scrollerStyle}>
-              {patternCards.map(card => {
-                const pending = (card.status ?? 'active') === 'pending'
-                return (
-                  <article key={card.id} style={cardStyle} data-pattern-card={card.id} data-pattern-status={pending ? 'pending' : 'active'}>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                      <span style={{ flex: 1, minWidth: 0, color: 'var(--dsw-alias-label-primary)', fontWeight: 500 }}>{card.task}</span>
-                      <span style={{
-                        flexShrink: 0, padding: '0 5px', borderRadius: 'var(--dsw-radius-sm, 4px)',
-                        border: '0.5px solid var(--dsw-alias-border-l3)',
-                        color: pending ? 'var(--dsw-alias-state-warning-primary, var(--dsw-alias-label-secondary))' : 'var(--dsw-alias-label-tertiary)',
-                        fontSize: 10, lineHeight: '16px',
-                      }}>{pending ? '待确认' : '已启用'}</span>
-                    </span>
-                    <span>做法：{card.approach}</span>
-                    {card.pitfalls !== undefined && card.pitfalls.length > 0 && (
-                      <span>注意：{card.pitfalls.join('；')}</span>
-                    )}
-                    {card.evidence !== undefined && card.evidence.length > 0 && (
-                      <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>
-                        证据：{card.evidence.join('、')}
-                      </span>
-                    )}
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dsw-alias-label-tertiary)' }}>
-                      <span style={{ flex: 1 }}>{whenText(card.createdAt)}</span>
-                      {pending && (
-                        <button type="button" disabled={patternBusy} onClick={() => { void actOnPattern(card.id, 'confirm') }}>启用</button>
-                      )}
-                      <button type="button" disabled={patternBusy} onClick={() => { void actOnPattern(card.id, 'delete') }}>删除</button>
-                    </span>
-                  </article>
-                )
-              })}
-            </div>
-          )}
-        {patternError !== undefined && <p style={mutedLineStyle} role="alert">{patternError}</p>}
+        <textarea
+          data-experience-input=""
+          value={experienceText}
+          onChange={e => setExperienceText(e.target.value)}
+          rows={6}
+          maxLength={3000}
+          placeholder="还没有经验卡。完成群任务后会自动生成，也可以在这里直接写。"
+          style={{
+            width: '100%', boxSizing: 'border-box', resize: 'vertical',
+            padding: '8px 10px', borderRadius: 'var(--dsw-radius-md, 8px)',
+            border: '0.5px solid var(--dsw-alias-border-l3)',
+            background: 'var(--dsw-alias-bg-layer-1)',
+            color: 'var(--dsw-alias-label-primary)',
+            font: 'inherit', fontSize: 12, lineHeight: '18px',
+          }}
+        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dsw-alias-label-tertiary)', fontSize: 11 }}>
+          <span style={{ flex: 1 }}>
+            {experienceSource === 'user' ? '已手动编辑' : experienceSource === 'auto' ? '自动生成（可修改）' : '暂无（可手动填写）'}
+            {' · '}{[...experienceText].length}/3000
+          </span>
+          <Button variant="outline" type="button" disabled={experienceBusy} onClick={() => { void saveExperience() }}>
+            {experienceBusy ? '保存中…' : '保存经验卡'}
+          </Button>
+        </div>
+        {experienceError !== undefined && <p style={mutedLineStyle} role="alert">{experienceError}</p>}
       </section>
 
       {error !== undefined && (
