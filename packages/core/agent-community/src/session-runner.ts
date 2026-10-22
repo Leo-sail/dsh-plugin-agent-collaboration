@@ -109,6 +109,15 @@ interface SessionView {
 /** Why a turn ended, in the vocabulary the UI already understands. */
 export type TurnEndReason = 'completed' | 'max-tokens' | 'aborted' | 'error'
 
+/**
+ * A real sign of work inside a turn — what the run's deadline is extended on.
+ *
+ * `frame` = a model stream frame arrived (thinking or answer text; tokens are being
+ * produced); `tool` = a tool call started or finished. A heartbeat is NOT progress: a hung
+ * provider still heartbeats, and treating it as progress would make "no-progress" useless.
+ */
+export type ProgressKind = 'frame' | 'tool'
+
 export interface TurnOutcome {
   /** Visible text the model put in the message channel. Empty means it said nothing. */
   readonly text: string
@@ -433,6 +442,15 @@ export class SessionRunner {
    * "clear then immediately send" sequence safe.
    */
   private readonly disposal = new Map<string, Promise<void>>()
+  /**
+   * Progress callbacks of the turn currently running per pair, keyed like `agents`.
+   *
+   * The executor registers one through `run(..., onProgress)`; the global observers below
+   * turn DSH's frame/tool events back into that callback, which is what lets an adaptive
+   * deadline tell "still working" from "hung" without polling the session store.
+   */
+  private readonly progressHandlers = new Map<string, (kind: ProgressKind) => void>()
+  private progressUninstall: (() => void) | undefined
   private tick = 0
   private disposed = false
 
@@ -454,6 +472,56 @@ export class SessionRunner {
     this.noteToolMask(
       `boot deny=[${(opts.deniedTools ?? []).join(',')}] guard=[${AGENT_TEAMS_TOOLS.join(',')}]`,
     )
+    // Observation must never be able to break construction: the same rule the boot line
+    // above learned the hard way (a diagnostic that throws here leaves no executor at all).
+    try {
+      this.installProgressObservers()
+    } catch {
+      // A host without an event bus simply has no adaptive progress signal.
+    }
+  }
+
+  /**
+   * Subscribe to the two global streams that prove a turn is working.
+   *
+   * `global: true` is required for the same reason the ledger projection documents: frames
+   * are emitted from each agent's own scoped dispatcher, so a non-global listener only sees
+   * the first agent. Both listeners are no-ops until a run registers a progress handler, so a
+   * runner used only for one-shot turns pays nothing.
+   */
+  private installProgressObservers(): void {
+    const bus = this.ctx as unknown as {
+      on?(
+        event: string,
+        handler: (...args: unknown[]) => void,
+        opts?: { global?: boolean },
+      ): () => void
+    }
+    if (typeof bus.on !== 'function') return
+    const offFrame = bus.on('agent/assistant-stream', (payload) => {
+      const frame = (payload as { frame?: { attemptId?: unknown } } | undefined)?.frame
+      const attemptId = frame?.attemptId
+      if (typeof attemptId !== 'string') return
+      // DSH's attempt id is `${sessionId}:${attempt}` — drop the counter, parse the pair.
+      const cut = attemptId.lastIndexOf(':')
+      const owner = cut < 0 ? undefined : SessionRunner.parseSessionId(attemptId.slice(0, cut))
+      if (owner === undefined) return
+      this.progressHandlers.get(SessionRunner.key(owner.roomId, owner.botId))?.('frame')
+    }, { global: true })
+    const offEvent = bus.on('session/event', (...args: unknown[]) => {
+      // Listener contract is `(session, event)`; a harness that emits one array is accepted.
+      const [first, second] = args.length === 1 && Array.isArray(args[0])
+        ? (args[0] as [unknown, unknown])
+        : (args as [unknown, unknown])
+      const sessionId = (first as { id?: unknown } | undefined)?.id
+      const type = (second as { type?: unknown } | undefined)?.type
+      if (typeof sessionId !== 'string' || typeof type !== 'string') return
+      if (type !== 'tool/call' && type !== 'tool/result') return
+      const owner = SessionRunner.parseSessionId(sessionId)
+      if (owner === undefined) return
+      this.progressHandlers.get(SessionRunner.key(owner.roomId, owner.botId))?.('tool')
+    }, { global: true })
+    this.progressUninstall = () => { offFrame(); offEvent() }
   }
 
   /**
@@ -616,6 +684,15 @@ export class SessionRunner {
      * working; a caller that omits it keeps the historical behaviour.
      */
     signal?: AbortSignal | undefined,
+    /**
+     * Called once per REAL sign of work inside this turn: a model stream frame, or a tool
+     * call starting/ending. The executor turns these into `lastProgressAt` for the adaptive
+     * deadline (a heartbeat is not progress — see {@link ProgressKind}).
+     *
+     * Observation only: it changes no result and is removed with the turn. Optional so every
+     * existing caller keeps working unchanged.
+     */
+    onProgress?: ((kind: ProgressKind) => void) | undefined,
   ): Promise<TurnOutcome> {
     const key = SessionRunner.key(roomId, botId)
     return this.mutex.run(key, async () => {
@@ -635,6 +712,9 @@ export class SessionRunner {
       // A signal that fired between the check and `addEventListener` would otherwise lose
       // its wake-up (the listener was not attached yet) — re-check once inside the guard.
       if (SessionRunner.aborted(signal)) return this.abortedOutcome()
+      // Register only inside the guarded section: every early return below passes through
+      // `finally`, which is the one place the handler is removed again.
+      if (onProgress !== undefined) this.progressHandlers.set(key, onProgress)
       const slot = await this.ensureSlot(signal)
       if (!slot) return this.abortedOutcome()
       const agent = await this.ensureAgent(roomId, botId)
@@ -763,6 +843,11 @@ export class SessionRunner {
         // stack of stale listeners would call `cancel` on whatever agent the pair holds
         // next time. Removed before the busy flag so an abort cannot race the next run.
         signal?.removeEventListener('abort', onAbort)
+        // Same for the progress callback: only this turn's handler may be removed (a later
+        // turn registers its own under the same pair key).
+        if (onProgress !== undefined && this.progressHandlers.get(key) === onProgress) {
+          this.progressHandlers.delete(key)
+        }
         // Cleared even on throw, or a failed turn would leave the agent marked busy
         // forever and eviction would never reclaim it.
         this.running.delete(key)
@@ -1626,6 +1711,15 @@ export class SessionRunner {
   /** Dispose everything. Called on plugin teardown. */
   async disposeAll(): Promise<void> {
     this.disposed = true
+    // Drop the global observers with the runner: a listener left on the host bus would keep
+    // this (dead) instance alive and call into a disposed progress map.
+    try {
+      this.progressUninstall?.()
+    } catch {
+      // Best-effort teardown: the host may already have dropped the bus.
+    }
+    this.progressUninstall = undefined
+    this.progressHandlers.clear()
     for (const key of [...this.agents.keys()]) await this.releaseKey(key)
   }
 

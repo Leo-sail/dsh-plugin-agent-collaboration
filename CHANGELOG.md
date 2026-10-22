@@ -1,3 +1,41 @@
+## Unreleased — stability batch 5 (S8 adaptive task-time allowance)
+
+修复"运行超时必须按实际任务时间配置，不能写死"（P1）。只改插件源码，不改任何 Bot。
+
+### 自适应超时 ATA
+- 新增 `run-budget.ts`（纯函数，无主机依赖）：
+  * `taskClassOf`：user-task / goal-continuation / schedule / member-report / a2a / task-board；
+  * `percentile` / `median` + `deriveDeadlineBudget`：按 (bot,origin,taskClass) ≥5 样本取 p95×1.5；
+    不足则 origin ≥5；再不足用全量；仍不足用配置的 bootstrap（15min 冷启动，不再是写死
+    10min），最后 clamp 到 `max(floor 180s, 3×median) .. cap 7200s`，返回来源与样本数；
+  * `noProgressLimitMs`：noProgressFactor×实测进展间隔 p95，clamp 2min–30min；
+  * `shouldExtend` / `nextExtensionDeadline`：有进展最多延长 2 次、每次 +50% 基础预算，
+    受 cap 约束；无进展或次数用尽 → timed-out；
+  * 重试策略：仅 provider/tool/lease-lost 可重试，退避 `backoff × 2^attempt`。
+- `BotRun` 新增 `deadlineAt`/`lastProgressAt`/`progressEvents`/`extensions`/`failureKind`/
+  `timeoutOverrideMs`（后半为后续面板入口预留；本批已支持覆盖）。
+- `RunExecutor`：claim 后按历史为每个 run 派生 deadline 并持久化；`SessionRunner.run` 新增
+  `onProgress`（宿主 stream/tool 事件）节流更新 lastProgressAt；tick 每 250ms 检查：
+  * 静默超过 no-progress 窗口 → cancel agent + settle `failed/no-progress`（不重试）；
+  * 到 deadline 且有进展 → 延长并写 ledger「运行时限延长 N/2」；
+  * 到 deadline 且无进展/延长用尽 → cancel + settle `failed/timeout`（不重试）。
+- 租约/心跳接线：`runLeaseMs` 真正被 claim/heartbeat 读取（heartbeat=lease/4），不再是死配置。
+- 重试：`SettleBotRunRequest.failureKind` 写入 run；按 `runRetryPolicy` 写
+  `nextRetryAt=now+backoff×2^attempt`，`pickQueued` 只在到期后取；claim 后清空旧 attempt 的
+  预算/失败字段。
+- `Config` 新增 `runTimeoutPolicy` / `runRetryPolicy`；`runTimeoutMs` 标为 deprecated（不再有
+  运行时 600000 截止值）。`onRunTimedOut` 写房间 notice；若超时的是 `[继续目标]` 续跑轮，
+  自动把 goal 置 paused，不再自动续跑。
+- 新增 `tests/run-budget.test.ts`（20 个纯函数用例，含"源码不得出现 600000"守卫、
+  真实历史 [82,261,317,606,1516,1931,5052]s → 预算 7200s > 5052s 且 ≠600000）。
+
+### 验证
+- 只读回放真实 state.json（370 条 completed）：固定 600000 会误杀 14 条；ATA 派生预算
+  180s（goal 续跑）–2897s（长任务），0 条被 600s 误杀。
+- `node --test tests/*.test.ts`：**124/124 通过**（新增 run-budget 20）。
+- UI/core typecheck（过滤宿主噪声）：0 真实错误；四包 tsdown + check-build = OK。
+- 本轮只同步 GitHub 源码；未安装/未重启、未发布 npm、未更新插件市场。
+
 ## Unreleased — stability batch 4 (S7 group-member selection)
 
 修复用户问题 4：单聊 Bot 拉群协作时选中的 Bot 与本任务不适配。只改插件源码，不改任何 Bot。

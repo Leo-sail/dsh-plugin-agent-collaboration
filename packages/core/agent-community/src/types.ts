@@ -1,4 +1,5 @@
 import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
+import type { FailureKind } from './run-budget.ts'
 
 export type BotId = string & { readonly __brand: 'BotId' }
 export type BotRoomId = string & { readonly __brand: 'BotRoomId' }
@@ -315,6 +316,19 @@ export interface BotRun {
    * one type; absent keeps the historical origin-based behaviour.
    */
   readonly publish?: 'visible' | 'internal' | undefined
+  // ── ADAPTIVE TIMEOUT (S8) ────────────────────────────────────────────────────
+  /** Wall-clock deadline derived from this deployment's history; absent = not evaluated yet. */
+  readonly deadlineAt?: string | undefined
+  /** Last real progress (stream frame / tool start / tool end), NOT a heartbeat. */
+  readonly lastProgressAt?: string | undefined
+  /** How many times the deadline was extended because the run was still progressing. */
+  readonly extensions?: number | undefined
+  /** Progress events observed, for the panel/diagnostics. */
+  readonly progressEvents?: number | undefined
+  /** Why the run failed; retry is decided from this (timeout is never retried). */
+  readonly failureKind?: FailureKind | undefined
+  /** Per-run deadline override from the panel; absent = derived from history. */
+  readonly timeoutOverrideMs?: number | undefined
 }
 
 export interface BotCommunitySnapshot {
@@ -567,6 +581,8 @@ export interface SettleBotRunRequest {
   readonly error?: string | undefined
   readonly retry?: boolean | undefined
   readonly leaseOwner?: string | undefined
+  /** The failure category: decides whether a retry is allowed and is persisted on the run. */
+  readonly failureKind?: FailureKind | undefined
   readonly reply?: {
     readonly text: string
     readonly sessionSeq: SessionSeq

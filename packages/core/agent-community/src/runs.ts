@@ -25,8 +25,25 @@ import { buildPerception, type Perception, type PerceptionValue } from './percep
 import { optionalService } from './session-runner.ts'
 import { renderMemoryDelta } from './bot-memory.ts'
 import { windowForPrompt } from './compact.ts'
-import type { SessionRunner } from './session-runner.ts'
+import type { ProgressKind, SessionRunner } from './session-runner.ts'
 import type { LedgerProjector } from './ledger.ts'
+import {
+  classifyFailure,
+  deriveDeadlineBudget,
+  isRetryableFailureKind,
+  nextExtensionDeadline,
+  noProgressLimitMs,
+  percentile,
+  resolveRetryPolicy,
+  resolveTimeoutPolicy,
+  retryBackoffMs,
+  shouldExtend,
+  taskClassOf,
+  type FailureKind,
+  type RunRetryPolicy,
+  type RunTimeoutPolicy,
+  type TaskClass,
+} from './run-budget.ts'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -38,8 +55,17 @@ const CLAIM_ATTEMPT_LIMIT = 5
 const STALE_QUEUE_MS = 90_000
 
 const TICK_INTERVAL_MS = 250              // polling fallback when no event wakes us
-const HEARTBEAT_INTERVAL_MS = 15_000     // how often a running run is heartbeated
 const MAX_TOOL_ROUNDS = 8                // tool rounds allowed before answering
+/**
+ * How often a live run's progress is written to state.
+ *
+ * Progress arrives per stream frame (many per second); persisting each one would turn the
+ * timer into a write amplifier. The in-memory value is authoritative for the deadline check,
+ * and this interval is only about what a restart/panel can see.
+ */
+const PROGRESS_PERSIST_INTERVAL_MS = 5_000
+/** Default lease when the caller passes none (schematised config supplies the real value). */
+const DEFAULT_RUN_LEASE_MS = 60_000
 
 /** Per-result budget for tool text handed to the model. */
 const MAX_TOOL_RESULT_CHARS = 8_000
@@ -142,6 +168,13 @@ interface RunSnapshot {
   readonly leaseOwner?: string | undefined
   readonly leaseExpiresAt?: string | undefined
   readonly nextRetryAt?: string | undefined
+  // ── adaptive timeout state (S8), persisted on the run row ──────────────────
+  readonly deadlineAt?: string | undefined
+  readonly lastProgressAt?: string | undefined
+  readonly extensions?: number | undefined
+  readonly progressEvents?: number | undefined
+  readonly failureKind?: FailureKind | undefined
+  readonly timeoutOverrideMs?: number | undefined
   /** When the run was first created; NOT when it entered the queue. */
   readonly createdAt?: string | undefined
   /** When this run's status last changed — the queue clock for `cancelStaleQueuedRuns`. */
@@ -177,6 +210,32 @@ interface RoomAgentSessionEntry {
   readonly roomId: BotRoomId
   readonly botId: BotId
   readonly sessionId: SessionId
+}
+
+/**
+ * The live budget of one running turn.
+ *
+ * In memory on purpose: the deadline is judged every 250 ms by the process that owns the
+ * turn, and the persisted copy (`deadlineAt`, `lastProgressAt`) exists for the panel and for
+ * a restart — not for the hot loop.
+ */
+interface RunBudgetState {
+  readonly roomId: string
+  readonly botId: string
+  readonly origin: string | undefined
+  readonly prompt: string
+  readonly taskClass: TaskClass
+  readonly startedAtMs: number
+  deadlineAtMs: number
+  readonly baseBudgetMs: number
+  readonly derivedSource: string
+  extensions: number
+  lastProgressAtMs: number
+  progressEvents: number
+  lastPersistMs: number
+  lastProgressSeenMs: number
+  /** Gaps between progress events (bounded), so a chatty run gets a wider silence window. */
+  readonly progressGapsMs: number[]
 }
 
 // The community service exposes these accessors; typed minimally to avoid
@@ -249,6 +308,8 @@ export interface CommunityStateAccessor {
     status: 'completed' | 'interrupted' | 'failed'
     error?: string
     retry?: boolean
+    /** Failure category; timeout / no-progress / user-cancel must never be retried. */
+    failureKind?: FailureKind
     reply?: {
       text: string
       sessionSeq: SessionSeq
@@ -279,6 +340,32 @@ export interface CommunityStateAccessor {
     now: number
   }): RunSnapshot
   heartbeatRun(id: string, leaseOwner: string, expiresAt: string): void
+  /**
+   * Persist the adaptive-timeout state of a running run.
+   *
+   * Called at claim (deadline), on progress (throttled by the executor), and on each
+   * extension. The hot loop reads its own in-memory copy; this is what a panel or a restart
+   * can see.
+   */
+  updateRunBudget(id: string, patch: {
+    deadlineAt?: string
+    lastProgressAt?: string
+    extensions?: number
+    progressEvents?: number
+  }): void
+  /**
+   * Called BEFORE a budget-exceeded run is settled, so the service can react where only it
+   * has state: pause a goal whose continuation round timed out, and write the room notice.
+   */
+  onRunTimedOut?(input: {
+    readonly runId: string
+    readonly roomId: string
+    readonly botId: string
+    readonly origin: string | undefined
+    readonly prompt: string
+    readonly kind: 'timeout' | 'no-progress'
+    readonly detail: string
+  }): void
   resolveDefaultWorkspace(): Promise<string>
   /** All session ids currently tracked in roomAgentSessions. */
   listKnownSessionIds(): readonly string[]
@@ -292,7 +379,19 @@ export class RunExecutor {
   /** Consecutive claim failures per run, before it is settled instead of retried. */
   private readonly claimFailures = new Map<string, number>()
   private readonly maxConcurrent: number
-  private readonly runTimeoutMs: number
+  // ── ADAPTIVE TIMEOUT (S8) ────────────────────────────────────────────────────
+  // The deadline is derived per run from measured durations (run-budget.ts); these are the
+  // knobs, all configurable. No fixed run timeout is stored on the executor any more.
+  private readonly timeoutPolicy: RunTimeoutPolicy
+  private readonly retryPolicy: RunRetryPolicy
+  /** Lease length; the previous code hardcoded 60 s here and in the heartbeat. */
+  private readonly runLeaseMs: number
+  /** Heartbeat cadence derived from the lease (lease / 4), not a second hardcoded number. */
+  private readonly heartbeatIntervalMs: number
+  /** Live budget of every run THIS process is driving, keyed by run id. */
+  private readonly runBudgets = new Map<string, RunBudgetState>()
+  /** Runs whose budget failure is already being settled (ticks can overlap via `nudge`). */
+  private readonly budgetFailures = new Set<string>()
   private readonly historyMessages: number
   private readonly visibility: VisibilityController
   private ledger: LedgerProjector | undefined
@@ -346,7 +445,12 @@ export class RunExecutor {
     svc: CommunityStateAccessor,
     opts: {
       maxConcurrent?: number
-      runTimeoutMs?: number
+      /** Overrides over DEFAULT_RUN_TIMEOUT_POLICY (bootstrap only matters before data). */
+      timeoutPolicy?: Partial<RunTimeoutPolicy> | undefined
+      /** Attempts + exponential backoff for retryable failures. */
+      retryPolicy?: Partial<RunRetryPolicy> | undefined
+      /** Lease length in ms; heartbeat is derived as lease / 4. */
+      runLeaseMs?: number
       historyMessages?: number
       /**
        * How many remembered entries one turn sees. 0 removes the block entirely — memory is
@@ -368,7 +472,10 @@ export class RunExecutor {
     // Matches the service default: a group's members must be able to answer at the
     // same time, and the slot count is global rather than per room.
     this.maxConcurrent = opts.maxConcurrent ?? 8
-    this.runTimeoutMs = opts.runTimeoutMs ?? 600_000
+    this.timeoutPolicy = resolveTimeoutPolicy(opts.timeoutPolicy)
+    this.retryPolicy = resolveRetryPolicy(opts.retryPolicy)
+    this.runLeaseMs = Math.max(5_000, Math.round(opts.runLeaseMs ?? DEFAULT_RUN_LEASE_MS))
+    this.heartbeatIntervalMs = Math.max(1_000, Math.floor(this.runLeaseMs / 4))
     this.historyMessages = opts.historyMessages ?? 10
     this.memoryPromptEntries = opts.memoryPromptEntries ?? 8
     this.defaultReasoningEffort = opts.defaultReasoningEffort ?? ''
@@ -406,6 +513,7 @@ export class RunExecutor {
     run: RunSnapshot,
     bot: BotSnapshot,
     prompt: string,
+    onProgress?: ((kind: ProgressKind) => void) | undefined,
   ): Promise<{
     text: string
     sessionSeq: SessionSeq
@@ -445,7 +553,7 @@ export class RunExecutor {
     const runAbort = this.runAborts.get(run.id)
     let outcome: Awaited<ReturnType<typeof runner.run>>
     try {
-      outcome = await runner.run(run.roomId, bot.id, prompt, delta, true, runAbort?.signal)
+      outcome = await runner.run(run.roomId, bot.id, prompt, delta, true, runAbort?.signal, onProgress)
     } catch (error: unknown) {
       // A failed turn must not leave a row on `streaming: true`, or the panel shows
       // "处理中…" over an answer that will never come and the turn looks live forever.
@@ -788,6 +896,8 @@ export class RunExecutor {
     }
     this.runTargets.clear()
     this.runAborts.clear()
+    this.runBudgets.clear()
+    this.budgetFailures.clear()
     // B-5: release all AgentHandles so sessions are properly torn down
     for (const handle of this.handles.values()) {
       try { handle.dispose() } catch { /* best-effort */ }
@@ -813,6 +923,9 @@ export class RunExecutor {
   private async tick(): Promise<void> {
     if (this.disposed) return
     try {
+      // Deadline/no-progress first: it is the reason a stuck run stops even when every
+      // concurrency slot is busy (no slot means no pick, not no supervision).
+      await this.enforceRunBudgets()
       const slots = this.maxConcurrent - this.active.size
       if (slots > 0) {
         // Reclaim the queue from runs that will never start before handing slots out,
@@ -831,6 +944,7 @@ export class RunExecutor {
               expectedRevision: run.controlRevision,
               leaseOwner: LEASE_OWNER,
               status: 'failed',
+              failureKind: 'unknown',
               error: `运行未能启动：${msg}`,
             }).catch(() => undefined)
           })
@@ -888,6 +1002,7 @@ export class RunExecutor {
           expectedRevision: run.controlRevision,
           leaseOwner: LEASE_OWNER,
           status: 'failed',
+          failureKind: 'unknown',
           error: `agent-community: abandoned after waiting ${waited}s in the queue `
             + 'without starting — a run this old is stuck, and it blocked every newer one',
         })
@@ -931,17 +1046,19 @@ export class RunExecutor {
           leaseOwner: LEASE_OWNER,
           now,
         })
+        const canRetry = this.retryAllowed(reclaimed.attempt, 'lease-lost')
         await this.svc.settleRun({
           id: reclaimed.id,
           expectedRevision: reclaimed.controlRevision,
           leaseOwner: LEASE_OWNER,
           status: 'failed',
           error: 'lease expired on startup — retrying',
-          retry: reclaimed.attempt < reclaimed.maxAttempts,
+          failureKind: 'lease-lost',
+          retry: canRetry,
         })
         this.ctx.logger?.warn?.(
           `agent-community: reclaimed stale run ${run.id} (owner ${run.leaseOwner ?? 'none'} `
-          + `→ ${LEASE_OWNER}); it is ${reclaimed.attempt < reclaimed.maxAttempts ? 'queued for retry' : 'failed'}`,
+          + `→ ${LEASE_OWNER}); it is ${canRetry ? 'queued for retry' : 'failed'}`,
         )
       } catch (error: unknown) {
         // Lost the race to a live successor (revision moved on or the lease was
@@ -961,8 +1078,9 @@ export class RunExecutor {
     this.runAborts.set(run.id, runAbort)
     this.runTargets.set(run.id, { roomId: run.roomId, botId: run.botId })
     try {
-      // Claim the run (queued → running)
-      const leaseExpiresAt = new Date(Date.now() + 60_000).toISOString()
+      // Claim the run (queued → running). The lease length is CONFIG (runLeaseMs), which
+      // was a dead option before S8: both this and the heartbeat hardcoded 60 s.
+      const leaseExpiresAt = new Date(Date.now() + this.runLeaseMs).toISOString()
       let claimed: RunSnapshot
       try {
         claimed = await this.svc.claimRun({
@@ -987,6 +1105,7 @@ export class RunExecutor {
               expectedRevision: run.controlRevision,
               leaseOwner: LEASE_OWNER,
               status: 'failed',
+              failureKind: 'unknown',
               error: `agent-community: run could not be claimed after ${failures} attempts (${msg})`,
             })
           } catch {
@@ -1005,18 +1124,40 @@ export class RunExecutor {
         return
       }
 
-      // Heartbeat so the lease stays alive during a long turn
+      // ── DERIVE THIS RUN'S DEADLINE (S8) ──────────────────────────────────────────
+      //
+      // The budget is measured, not configured as a constant: p95 of this deployment's
+      // completed runs for the same (bot, origin, task-class), with the documented fallbacks
+      // and clamp (see `run-budget.ts`). A panel override wins for this run only.
+      const budget = this.openRunBudget(claimed)
+      this.runBudgets.set(run.id, budget)
+      this.svc.updateRunBudget(run.id, {
+        deadlineAt: new Date(budget.deadlineAtMs).toISOString(),
+        lastProgressAt: new Date(budget.lastProgressAtMs).toISOString(),
+        extensions: 0,
+        progressEvents: 0,
+      })
+      this.ctx.logger?.info?.(
+        `agent-community: run ${run.id} budget ${Math.round(budget.baseBudgetMs / 1000)}s `
+        + `(${budget.derivedSource}, class=${budget.taskClass}) lease=${Math.round(this.runLeaseMs / 1000)}s`,
+      )
+
+      // Heartbeat so the lease stays alive during a long turn. Cadence is lease/4, so a
+      // deployment that configures a longer lease does not keep a second hardcoded 15 s.
       const hbInterval = setInterval(() => {
-        const newExpiry = new Date(Date.now() + 60_000).toISOString()
+        const newExpiry = new Date(Date.now() + this.runLeaseMs).toISOString()
         this.svc.heartbeatRun(run.id, LEASE_OWNER, newExpiry)
-      }, HEARTBEAT_INTERVAL_MS)
+      }, this.heartbeatIntervalMs)
       this.heartbeats.set(run.id, hbInterval)
 
       let settled = false
       try {
         const bot = this.svc.getBot(run.botId)
         const prompt = this.buildPrompt(run, bot, run.botId)
-        const reply = await this.callModel(run, bot, prompt)
+        // Progress = a stream frame or a tool event, fed back into the budget state. It is
+        // what lets a long-but-working turn be extended instead of killed at the deadline.
+        const onProgress = (kind: ProgressKind): void => { this.noteProgress(run.id, kind) }
+        const reply = await this.callModel(run, bot, prompt, onProgress)
 
         // P0-2: push bot-text ledger entry — but never an empty one. A bot that
         // The bot-text (and any reasoning / tool) ledger entries were already
@@ -1061,7 +1202,10 @@ export class RunExecutor {
             settled = true
           } else {
             const msg = error instanceof Error ? error.message : String(error)
-            const shouldRetry = claimed.attempt < claimed.maxAttempts
+            const failureKind = classifyFailure('failed', msg)
+            // A retry is only for TRANSIENT failures and only inside the configured policy;
+            // timeout / no-progress / a user stop are terminal (S8).
+            const shouldRetry = this.retryAllowed(claimed.attempt, failureKind)
             try {
               await this.svc.settleRun({
                 id: run.id,
@@ -1069,6 +1213,7 @@ export class RunExecutor {
                 leaseOwner: LEASE_OWNER,
                 status: 'failed',
                 error: msg,
+                failureKind,
                 retry: shouldRetry,
               })
             } catch {
@@ -1093,9 +1238,280 @@ export class RunExecutor {
       this.active.delete(run.id)
       this.runAborts.delete(run.id)
       this.runTargets.delete(run.id)
+      this.runBudgets.delete(run.id)
     }
   }
 
+
+
+  // ── ADAPTIVE TIMEOUT (S8) ──────────────────────────────────────────────────
+
+  /**
+   * Build the live budget for a claimed run: the deadline it may run to, and the state the
+   * 250 ms tick needs to judge progress.
+   *
+   * HISTORY IS THE SOURCE. `svc.listRuns()` already carries `startedAt`/`finishedAt` for every
+   * settled run, so a deadline needs no new counter: sort the measured durations into the
+   * (bot, origin, task-class), origin, and all-run samples and let `deriveDeadlineBudget`
+   * pick p95 × safety with its clamps. A small deployment therefore starts at the configured
+   * bootstrap and converges to its own real task times as runs complete.
+   */
+  private openRunBudget(run: RunSnapshot): RunBudgetState {
+    const now = Date.now()
+    const origin = run.origin
+    const prompt = run.prompt ?? ''
+    const taskClass = taskClassOf(prompt, origin)
+    const window = this.timeoutPolicy.sampleWindow
+
+    const durationOf = (candidate: RunSnapshot): number | undefined => {
+      if (candidate.status !== 'completed') return undefined
+      if (candidate.startedAt === undefined || candidate.finishedAt === undefined) return undefined
+      const started = Date.parse(candidate.startedAt)
+      const finished = Date.parse(candidate.finishedAt)
+      const duration = finished - started
+      return Number.isFinite(duration) && duration > 0 ? duration : undefined
+    }
+    const keyDurations: number[] = []
+    const originDurations: number[] = []
+    const allDurations: number[] = []
+    for (const candidate of this.svc.listRuns()) {
+      const duration = durationOf(candidate)
+      if (duration === undefined) continue
+      allDurations.push(duration)
+      if (candidate.origin === origin) originDurations.push(duration)
+      if (candidate.botId === run.botId && candidate.origin === origin
+        && taskClassOf(candidate.prompt ?? '', candidate.origin) === taskClass) {
+        keyDurations.push(duration)
+      }
+    }
+    const newest = (values: readonly number[]): number[] => values.slice(-window)
+    const derived = deriveDeadlineBudget({
+      durationsMs: newest(keyDurations),
+      originDurationsMs: newest(originDurations),
+      allDurationsMs: newest(allDurations),
+      policy: this.timeoutPolicy,
+    })
+    const override = run.timeoutOverrideMs
+    const hasOverride = override !== undefined && Number.isFinite(override) && override > 0
+    const budgetMs = hasOverride
+      ? Math.round(Math.min(this.timeoutPolicy.capMs, Math.max(this.timeoutPolicy.floorMs, override)))
+      : derived.budgetMs
+    return {
+      roomId: String(run.roomId),
+      botId: String(run.botId),
+      origin,
+      prompt,
+      taskClass,
+      startedAtMs: now,
+      deadlineAtMs: now + budgetMs,
+      baseBudgetMs: budgetMs,
+      derivedSource: hasOverride ? 'override' : derived.source,
+      extensions: 0,
+      lastProgressAtMs: now,
+      progressEvents: 0,
+      lastPersistMs: now,
+      lastProgressSeenMs: now,
+      progressGapsMs: [],
+    }
+  }
+
+  /**
+   * A real sign of work from the runner: update the in-memory progress clock (authoritative
+   * for the deadline check) and persist it at most every few seconds.
+   */
+  private noteProgress(runId: string, _kind: ProgressKind): void {
+    const budget = this.runBudgets.get(runId)
+    if (budget === undefined) return
+    const now = Date.now()
+    const gap = now - budget.lastProgressAtMs
+    if (gap > 0) {
+      budget.progressGapsMs.push(gap)
+      if (budget.progressGapsMs.length > 32) budget.progressGapsMs.shift()
+    }
+    budget.lastProgressAtMs = now
+    budget.lastProgressSeenMs = now
+    budget.progressEvents += 1
+    if (now - budget.lastPersistMs >= PROGRESS_PERSIST_INTERVAL_MS) {
+      budget.lastPersistMs = now
+      this.svc.updateRunBudget(runId, {
+        lastProgressAt: new Date(now).toISOString(),
+        progressEvents: budget.progressEvents,
+      })
+    }
+  }
+
+  /** Whether a failed attempt may be retried: transient kind AND inside the retry policy. */
+  private retryAllowed(attempt: number, kind: FailureKind): boolean {
+    return isRetryableFailureKind(kind) && attempt + 1 < this.retryPolicy.maxAttempts
+  }
+
+  /**
+   * Supervise every run this process is driving.
+   *
+   * Two independent failures are checked, because they mean different things:
+   *   · SILENCE — no progress event for longer than the no-progress window. The turn is hung
+   *     (a dead provider stream), so it is cancelled and settled as `no-progress`;
+   *   · DEADLINE — the derived budget elapsed. If the run is still progressing it is
+   *     EXTENDED (bounded by maxExtensions and the cap); otherwise it is cancelled and
+   *     settled as `timeout`.
+   *
+   * Neither is retried: the budget exists precisely to stop burning tokens on them.
+   */
+  private async enforceRunBudgets(): Promise<void> {
+    if (this.runBudgets.size === 0) return
+    const now = Date.now()
+    const runs = this.svc.listRuns()
+    for (const [runId, budget] of [...this.runBudgets]) {
+      // Two ticks can overlap (every `nudge` starts one), so a failure must be claimed
+      // once: otherwise both would write a notice and race the same settle CAS.
+      if (this.budgetFailures.has(runId)) continue
+      const run = runs.find(candidate => candidate.id === runId)
+      // A run settled/aborted elsewhere drops out of supervision silently.
+      if (run === undefined || run.status !== 'running') {
+        this.runBudgets.delete(runId)
+        continue
+      }
+      const observedGapP95 = budget.progressGapsMs.length >= 5
+        ? percentile(budget.progressGapsMs, 0.95)
+        : undefined
+      const silenceLimit = noProgressLimitMs(this.timeoutPolicy, observedGapP95)
+      // BEFORE THE FIRST PROGRESS EVENT the clock covers agent materialisation, seeding and
+      // the first model dispatch — none of which emit frames. Give that start-up twice the
+      // window; afterwards the measured silence rule applies unchanged.
+      const graceMs = budget.progressEvents === 0
+        ? Math.max(silenceLimit, this.timeoutPolicy.noProgressFloorMs * 2)
+        : silenceLimit
+      const silentFor = now - budget.lastProgressAtMs
+      if (silentFor > graceMs) {
+        await this.failRunForBudget(
+          run,
+          budget,
+          'no-progress',
+          `连续 ${Math.round(silentFor / 1000)}s 无进展（上限 ${Math.round(graceMs / 1000)}s）`,
+        )
+        continue
+      }
+      if (now < budget.deadlineAtMs) continue
+
+      const extendInput = {
+        nowMs: now,
+        deadlineAtMs: budget.deadlineAtMs,
+        lastProgressAtMs: budget.lastProgressAtMs,
+        policy: this.timeoutPolicy,
+        extensions: budget.extensions,
+        startedAtMs: budget.startedAtMs,
+        baseBudgetMs: budget.baseBudgetMs,
+      }
+      const verdict = shouldExtend(extendInput)
+      if (verdict === 'ok') continue
+      if (verdict === 'timed-out') {
+        await this.failRunForBudget(
+          run,
+          budget,
+          'timeout',
+          `已用 ${Math.round((now - budget.startedAtMs) / 1000)}s，预算 ${Math.round(budget.baseBudgetMs / 1000)}s，延长 ${budget.extensions}/${this.timeoutPolicy.maxExtensions} 次`,
+        )
+        continue
+      }
+      const next = nextExtensionDeadline(extendInput)
+      if (next === undefined) {
+        await this.failRunForBudget(run, budget, 'timeout', '预算与上限已用尽')
+        continue
+      }
+      const added = next - budget.deadlineAtMs
+      budget.extensions += 1
+      budget.deadlineAtMs = next
+      this.svc.updateRunBudget(runId, {
+        deadlineAt: new Date(next).toISOString(),
+        extensions: budget.extensions,
+      })
+      this.ctx.logger?.info?.(
+        `agent-community: run ${runId} extended (${budget.extensions}/${this.timeoutPolicy.maxExtensions}) `
+        + `by ${Math.round(added / 1000)}s — still progressing`,
+      )
+      this.ledger?.push({
+        type: 'dispatch',
+        roomId: run.roomId,
+        text: `运行时限延长（${budget.extensions}/${this.timeoutPolicy.maxExtensions}）：`
+          + `仍在进展，再给 ${Math.round(added / 1000)}s，累计上限 ${Math.round(this.timeoutPolicy.capMs / 1000)}s`,
+        at: new Date(now).toISOString(),
+      })
+    }
+  }
+
+  /**
+   * Stop a run whose budget was exceeded: tell the service (it pauses a goal continuation and
+   * writes the room notice), settle it as `failed` with the reason, THEN cancel the live turn.
+   *
+   * The order matters: settling first claims the run's revision, so the drive loop's own
+   * "aborted" settle can no longer overwrite the outcome with `interrupted` and lose the
+   * failure kind. Cancelling after the settle stops the provider stream immediately.
+   */
+  private async failRunForBudget(
+    run: RunSnapshot,
+    budget: RunBudgetState,
+    kind: 'timeout' | 'no-progress',
+    detail: string,
+  ): Promise<void> {
+    this.runBudgets.delete(run.id)
+    this.budgetFailures.add(run.id)
+    try {
+      await this.applyBudgetFailure(run, budget, kind, detail)
+    } finally {
+      this.budgetFailures.delete(run.id)
+    }
+  }
+
+  /** The body of {@link failRunForBudget}; split so the in-flight guard always releases. */
+  private async applyBudgetFailure(
+    run: RunSnapshot,
+    budget: RunBudgetState,
+    kind: 'timeout' | 'no-progress',
+    detail: string,
+  ): Promise<void> {
+    const label = kind === 'no-progress' ? '运行无进展，已停止' : '运行超时，已停止'
+    try {
+      this.svc.onRunTimedOut?.({
+        runId: run.id,
+        roomId: run.roomId,
+        botId: run.botId,
+        origin: run.origin,
+        prompt: run.prompt,
+        kind,
+        detail,
+      })
+    } catch (error: unknown) {
+      this.ctx.logger?.warn?.(`agent-community: onRunTimedOut failed: ${String(error)}`)
+    }
+    let settled = false
+    try {
+      await this.svc.settleRun({
+        id: run.id,
+        expectedRevision: run.controlRevision,
+        leaseOwner: LEASE_OWNER,
+        status: 'failed',
+        error: `${label}：${detail}`,
+        failureKind: kind,
+        retry: false,
+      })
+      settled = true
+    } catch (error: unknown) {
+      this.ctx.logger?.warn?.(
+        `agent-community: could not settle ${kind} run ${run.id}: ${String(error)}`,
+      )
+    }
+    try { this.runAborts.get(run.id)?.abort(new Error(kind)) } catch { /* best-effort */ }
+    this.sessionRunner?.cancel(budget.roomId, budget.botId, kind === 'no-progress' ? 'no progress' : 'timeout')
+    if (!settled) return
+    this.ledger?.push({
+      type: 'error',
+      roomId: run.roomId,
+      botId: run.botId,
+      botName: this.svc.getBot(run.botId)?.name ?? run.botId,
+      message: `${label}：${detail}`,
+      at: new Date().toISOString(),
+    })
+  }
 
   /**
    * Build the single prompt for one bot turn.
@@ -1228,6 +1644,7 @@ export class RunExecutor {
     run: RunSnapshot,
     bot: BotSnapshot | undefined,
     prompt: string,
+    onProgress?: ((kind: ProgressKind) => void) | undefined,
   ): Promise<{
     text: string
     sessionSeq: SessionSeq
@@ -1244,9 +1661,10 @@ export class RunExecutor {
     }
   }> {
     // Native-session path. The runner owns the loop; ledger rows arrive through
-    // LedgerProjection instead of being pushed from here.
+    // LedgerProjection instead of being pushed from here. `onProgress` is observation
+    // only: it feeds the adaptive deadline, and changes nothing the turn produces.
     if (this.sessionRunner !== undefined && bot !== undefined) {
-      return await this.callModelViaSession(run, bot, prompt)
+      return await this.callModelViaSession(run, bot, prompt, onProgress)
     }
 
     const llm = (this.ctx as unknown as {
@@ -1433,7 +1851,9 @@ export class RunExecutor {
           try { controller.abort() } catch { /* noop */ }
         }, { once: true })
       }
-      const timer = setTimeout(() => controller.abort(), this.runTimeoutMs)
+      // The legacy in-process loop has no per-run deadline of its own; it inherits the
+      // configured cold-start budget so the code path stops carrying a hardcoded timeout.
+      const timer = setTimeout(() => controller.abort(), this.timeoutPolicy.bootstrapMs)
 
       let roundText = ''
       const seenChunks = new Set<string>()
@@ -1461,6 +1881,7 @@ export class RunExecutor {
           signal: controller.signal,
         })
         for await (const chunk of stream) {
+          onProgress?.('frame')
           seenChunks.add(chunk.type)
           // A provider failure arrives as a TERMINAL `finish` chunk carrying the real
           // error — the adapter converts any throw with `adapterFailureChunk`:
@@ -1643,6 +2064,7 @@ export class RunExecutor {
           at: new Date().toISOString(),
         })
         const outcome = await runner.run(call)
+        onProgress?.('tool')
         this.ledger?.push({
           type: 'tool-result',
           roomId: run.roomId,

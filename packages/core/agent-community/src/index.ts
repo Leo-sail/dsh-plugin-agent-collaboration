@@ -59,6 +59,16 @@ import {
   DEFAULT_GOAL_MAX_ROUNDS, GOAL_STALL_LIMIT, type BotGoalAction, type GoalActor,
 } from './room-goal.ts'
 import { planDispatch, handoffReport, MAX_DISPATCH_TASKS, type DispatchTask } from './dispatch.ts'
+import {
+  classifyFailure,
+  isRetryableFailureKind,
+  resolveRetryPolicy,
+  retryBackoffMs,
+  DEFAULT_RUN_RETRY_POLICY,
+  DEFAULT_RUN_TIMEOUT_POLICY,
+  type RunRetryPolicy,
+  type RunTimeoutPolicy,
+} from './run-budget.ts'
 import { searchMemory, taskMemoryText } from './bot-memory.ts'
 import { MemoryStore, memoryPaths, type RoomMemoryMeta } from './memory-store.ts'
 import { scanPromotions } from './memory-promote.ts'
@@ -143,10 +153,26 @@ export interface Config {
   readonly homeDir?: string
   /** Max runs executing concurrently (default 2). */
   readonly maxConcurrentRuns?: number
-  /** Per-run timeout in milliseconds (default 600_000). */
+  /**
+   * DEPRECATED legacy knob. Kept only so an older deployment patch that sets it still
+   * parses; the runtime deadline is ADAPTIVE now (see `runTimeoutPolicy`). Its default is
+   * the policy bootstrap, not a hidden 600 s constant.
+   */
   readonly runTimeoutMs?: number
-  /** Lease duration in milliseconds (default 60_000). */
+  /**
+   * Lease duration in milliseconds (default 60_000). The heartbeat cadence is lease/4, so
+   * this one option controls both; it used to be a dead setting with 60 s hardcoded twice.
+   */
   readonly runLeaseMs?: number
+  /**
+   * Adaptive task-time allowance: the deadline comes from measured run durations, per
+   * (bot, origin, task class), never from one hardcoded number. Every field is configurable;
+   * defaults live in `run-budget.ts` (bootstrap 15 min, floor 3 min, cap 2 h, p95 × 1.5,
+   * no-progress 2 min–30 min, up to 2 × 50 % extensions).
+   */
+  readonly runTimeoutPolicy?: Partial<RunTimeoutPolicy>
+  /** Retry budget for transient failures: attempts + exponential backoff base. */
+  readonly runRetryPolicy?: Partial<RunRetryPolicy>
   /**
    * How many IDLE bot agents stay materialised (default 12). Past this the
    * least-recently-used one is disposed, which releases its session write lease —
@@ -211,8 +237,29 @@ export const Config: z<Config> = z.object({
    */
   homeDir: z.string().required(false),
   maxConcurrentRuns: z.number().step(1).min(1).default(8),
-  runTimeoutMs: z.number().step(1).min(1000).default(600_000),
+  // Legacy: defaulted to the ATA bootstrap so no runtime path carries a hardcoded 600 s.
+  runTimeoutMs: z.number().step(1).min(1000).default(DEFAULT_RUN_TIMEOUT_POLICY.bootstrapMs),
   runLeaseMs: z.number().step(1).min(5000).default(60_000),
+  /**
+   * Adaptive timeout policy. Optional as a whole (defaults are applied in code); when the
+   * deployment sets it, each furnished field overrides that one default.
+   */
+  runTimeoutPolicy: z.object({
+    bootstrapMs: z.number().step(1).min(1000).default(DEFAULT_RUN_TIMEOUT_POLICY.bootstrapMs),
+    floorMs: z.number().step(1).min(1000).default(DEFAULT_RUN_TIMEOUT_POLICY.floorMs),
+    capMs: z.number().step(1).min(1000).default(DEFAULT_RUN_TIMEOUT_POLICY.capMs),
+    sampleWindow: z.number().step(1).min(5).default(DEFAULT_RUN_TIMEOUT_POLICY.sampleWindow),
+    safetyFactor: z.number().min(1).default(DEFAULT_RUN_TIMEOUT_POLICY.safetyFactor),
+    noProgressFactor: z.number().min(1).default(DEFAULT_RUN_TIMEOUT_POLICY.noProgressFactor),
+    noProgressFloorMs: z.number().step(1).min(1000).default(DEFAULT_RUN_TIMEOUT_POLICY.noProgressFloorMs),
+    noProgressCapMs: z.number().step(1).min(1000).default(DEFAULT_RUN_TIMEOUT_POLICY.noProgressCapMs),
+    extendFactor: z.number().min(0).default(DEFAULT_RUN_TIMEOUT_POLICY.extendFactor),
+    maxExtensions: z.number().step(1).min(0).default(DEFAULT_RUN_TIMEOUT_POLICY.maxExtensions),
+  }).required(false),
+  runRetryPolicy: z.object({
+    maxAttempts: z.number().step(1).min(1).default(DEFAULT_RUN_RETRY_POLICY.maxAttempts),
+    backoffMs: z.number().step(1).min(0).default(DEFAULT_RUN_RETRY_POLICY.backoffMs),
+  }).required(false),
   /**
    * How many IDLE bot agents stay materialised. Past this the least-recently-used
    * one is disposed — which is also what releases its session's write lease.
@@ -593,8 +640,10 @@ export class AgentCommunityService extends TypertRemoteService {
       maxMessages: config.maxMessages ?? 10_000,
       maxRuns: config.maxRuns ?? 1_000,
       maxConcurrentRuns: config.maxConcurrentRuns ?? 8,
-      runTimeoutMs: config.runTimeoutMs ?? 600_000,
+      runTimeoutMs: config.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_POLICY.bootstrapMs,
       runLeaseMs: config.runLeaseMs ?? 60_000,
+      runTimeoutPolicy: config.runTimeoutPolicy ?? {},
+      runRetryPolicy: config.runRetryPolicy ?? {},
       idleLimit: config.idleLimit ?? 12,
       hardLimit: config.hardLimit ?? 24,
       historyMessagesInPrompt: config.historyMessagesInPrompt ?? 10,
@@ -889,7 +938,11 @@ export class AgentCommunityService extends TypertRemoteService {
         // provider call), not a claim about how many bots a group may hold; it is
         // configurable for deployments that need a different ceiling.
         maxConcurrent: config.maxConcurrentRuns ?? 8,
-        runTimeoutMs: config.runTimeoutMs ?? 600_000,
+        // Adaptive deadline + retry + lease: all wired from Config, so a deployment tunes
+        // task time through configuration instead of editing a constant.
+        timeoutPolicy: config.runTimeoutPolicy,
+        retryPolicy: config.runRetryPolicy,
+        runLeaseMs: config.runLeaseMs ?? 60_000,
         historyMessages: config.historyMessagesInPrompt ?? 10,
         memoryPromptEntries: config.memoryPromptEntries ?? 8,
         defaultReasoningEffort: config.botReasoningEffort ?? 'max',
@@ -2684,7 +2737,23 @@ export class AgentCommunityService extends TypertRemoteService {
     if (input.leaseOwner !== undefined && prev.leaseOwner !== input.leaseOwner) {
       throw new Error(`Run "${input.id}" lease owner mismatch`)
     }
-    const shouldRetry = input.retry === true && input.status === 'failed' && prev.attempt < prev.maxAttempts
+    // ── RETRY IS A POLICY, NOT A HABIT ──────────────────────────────────────────
+    //
+    // The kind decides whether another attempt makes sense at all: transport/provider/tool
+    // failures are transient, while a timeout, a no-progress stop and a user stop are
+    // terminal (retrying them burns the same tokens for the same outcome). The budget is the
+    // configured retry policy, and the wait is exponential via `nextRetryAt` — the queue
+    // already honours that field, it was simply never written before S8.
+    const retryPolicy = resolveRetryPolicy(this.cfg.runRetryPolicy)
+    const failureKind = input.status === 'failed'
+      ? input.failureKind ?? classifyFailure(input.status, input.error)
+      : undefined
+    const shouldRetry = input.retry === true && input.status === 'failed'
+      && failureKind !== undefined && isRetryableFailureKind(failureKind)
+      && prev.attempt + 1 < retryPolicy.maxAttempts
+    const nextRetryAt = shouldRetry
+      ? new Date(Date.now() + retryBackoffMs(retryPolicy, prev.attempt)).toISOString()
+      : undefined
     const updated: BotRun = {
       ...prev,
       status: shouldRetry ? 'queued' : input.status,
@@ -2693,6 +2762,13 @@ export class AgentCommunityService extends TypertRemoteService {
       finishedAt: shouldRetry ? prev.finishedAt : nowIso(),
       error: input.error ?? prev.error,
       lastError: input.error ?? prev.lastError,
+      failureKind,
+      nextRetryAt,
+      // The next attempt derives a fresh budget on claim; a terminal run keeps the one it had
+      // for diagnosis (the panel can show "deadline was X").
+      ...(shouldRetry
+        ? { deadlineAt: undefined, lastProgressAt: undefined, extensions: 0, progressEvents: 0 }
+        : {}),
       updatedAt: nowIso(),
     }
     let runs = [...this.state.runs]
@@ -3076,6 +3152,15 @@ export class AgentCommunityService extends TypertRemoteService {
       leaseExpiresAt: input.leaseExpiresAt,
       startedAt: nowIso(),
       lastHeartbeatAt: nowIso(),
+      // A fresh attempt gets a fresh budget: the executor derives a new deadline right after
+      // the claim, and the previous attempt's clock (or a retry's nextRetryAt) must not leak
+      // into it. `failureKind` is cleared for the same reason — it describes the last try.
+      deadlineAt: undefined,
+      lastProgressAt: undefined,
+      extensions: 0,
+      progressEvents: 0,
+      nextRetryAt: undefined,
+      failureKind: undefined,
       updatedAt: nowIso(),
     }
     const runs = [...this.state.runs]
@@ -3083,6 +3168,74 @@ export class AgentCommunityService extends TypertRemoteService {
     this.state = { ...this.state, runs }
     this.enqueueWrite()
     return updated
+  }
+
+  /**
+   * Persist the adaptive-timeout state of a running run (called by the executor).
+   *
+   * The executor's hot loop keeps its own copy; this is the durable half — a panel (or a
+   * restart) can show the deadline it is running against, and how much progress was seen.
+   * Writes are throttled by the caller (progress at most every few seconds; a deadline or an
+   * extension immediately).
+   */
+  updateRunBudget(id: string, patch: {
+    deadlineAt?: string
+    lastProgressAt?: string
+    extensions?: number
+    progressEvents?: number
+  }): void {
+    const idx = this.state.runs.findIndex(r => r.id === id)
+    if (idx < 0) return
+    const prev = this.state.runs[idx]!
+    if (prev.status !== 'running') return
+    const updated: BotRun = {
+      ...prev,
+      ...(patch.deadlineAt !== undefined ? { deadlineAt: patch.deadlineAt } : {}),
+      ...(patch.lastProgressAt !== undefined ? { lastProgressAt: patch.lastProgressAt } : {}),
+      ...(patch.extensions !== undefined ? { extensions: patch.extensions } : {}),
+      ...(patch.progressEvents !== undefined ? { progressEvents: patch.progressEvents } : {}),
+      updatedAt: nowIso(),
+    }
+    const runs = [...this.state.runs]
+    runs[idx] = updated
+    this.state = { ...this.state, runs }
+    this.enqueueWrite()
+  }
+
+  /**
+   * A run's adaptive budget was exceeded (timeout / no progress). Called by the executor
+   * BEFORE it settles the run, because this is the half only the service can do:
+   *
+   *   · the room gets a durable, human-readable notice (the error row is diagnostics);
+   *   · a GOAL CONTINUATION round that timed out pauses its goal. Without this the goal
+   *     would stay active and the next settle would queue another round into the same
+   *     timeout — the "automatic work that never finishes" pattern S3 was about.
+   */
+  onRunTimedOut(input: {
+    readonly runId: string
+    readonly roomId: string
+    readonly botId: string
+    readonly origin: string | undefined
+    readonly prompt: string
+    readonly kind: 'timeout' | 'no-progress'
+    readonly detail: string
+  }): void {
+    const label = input.kind === 'no-progress' ? '运行无进展，已停止' : '运行超时，已停止'
+    this.recordNotice(
+      input.roomId,
+      `${label}：${input.detail}（可重试，或稍后在面板调整该任务的时限）`,
+    )
+    if (input.origin !== 'routine' || !input.prompt.startsWith('[继续目标]')) return
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room?.goal === undefined || room.goal.status !== 'active') return
+    this.patchRoom(input.roomId, r => ({
+      ...r,
+      goal: pauseGoal(room.goal!, nowIso()),
+    }))
+    this.recordNotice(
+      input.roomId,
+      '目标已自动暂停：自动续跑这一轮超时/无进展，等用户确认后再继续（避免继续烧时间）。',
+    )
   }
 
   /**
