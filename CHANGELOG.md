@@ -1,3 +1,10 @@
+## Unreleased — group settings: current members + add-member picker
+
+- 群聊设置的「成员」只列出**当前本群成员**（名称），不再把所有 Bot 都列成可勾选列表。
+- 新增「添加成员」按钮：展开后只显示**不在本群的 Bot**，可单选/多选；「确认添加」立即调用
+  updateRoom 把所选成员加入群聊，并在面板内即时更新成员列表；无需再点主保存。
+- 主保存只负责群名/仅 @ 响应/暂停等设置；已加入成员不会因取消对话框回滚（添加是即时操作）。
+- UI tsc/tsdown/wrap、check-build OK；全量 540/540；无 core/后端/Bot 改动。
 ## Unreleased — one editable group-experience card
 
 - 将「群经验卡」从多张自动卡列表改为**一张可编辑卡**：设置里一个 textarea +「保存经验卡」。

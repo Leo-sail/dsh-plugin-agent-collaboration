@@ -83,10 +83,40 @@ export function RoomSettingsDialog({
   const [experienceSource, setExperienceSource] = useState<'auto' | 'user' | undefined>(room.experienceCard?.source)
   const [experienceError, setExperienceError] = useState<string>()
   const [experienceBusy, setExperienceBusy] = useState(false)
+  const [addOpen, setAddOpen] = useState(false)
+  const [addSelected, setAddSelected] = useState<BotId[]>([])
+  const [memberBusy, setMemberBusy] = useState(false)
+  const [memberError, setMemberError] = useState<string>()
   const adherence = room.taskState?.adherence
+  const currentMembers = bots.filter(bot => members.includes(bot.id as BotId))
+  const availableBots = bots.filter(bot => !members.includes(bot.id as BotId))
 
-  const toggleMember = (id: BotId) => {
-    setMembers(prev => prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id])
+  const toggleAddMember = (id: BotId): void => {
+    setAddSelected(prev => prev.includes(id) ? prev.filter(memberId => memberId !== id) : [...prev, id])
+  }
+
+  /** Add the selected non-members immediately; the main save only handles name/switches. */
+  async function addMembers(): Promise<void> {
+    if (memberBusy || addSelected.length === 0) return
+    setMemberBusy(true)
+    setMemberError(undefined)
+    try {
+      const next = [...members, ...addSelected]
+      await remote.updateRoom({
+        id: room.id,
+        name: name.trim() !== '' ? name.trim() : room.name,
+        memberIds: next,
+        mentionOnly,
+        paused,
+      })
+      setMembers(next)
+      setAddSelected([])
+      setAddOpen(false)
+    } catch (e) {
+      setMemberError(describe(e))
+    } finally {
+      setMemberBusy(false)
+    }
   }
 
   async function saveExperience(): Promise<void> {
@@ -144,15 +174,48 @@ export function RoomSettingsDialog({
       <form id="room-settings-form" className={css.formLegacy} onSubmit={(e) => void handleSave(e)}>
         <label>群聊名称 <input type="text" value={name} onChange={e => setName(e.target.value)} required /></label>
         <fieldset className={css.members}>
-          <legend>成员</legend>
-          {bots.length === 0
-            ? <p className={css.formHint} style={{ margin: '4px 0' }}>还没有 Bot。</p>
-            : bots.map(bot => (
-              <label key={bot.id} className={css.check}>
-                <input type="checkbox" checked={members.includes(bot.id as BotId)} onChange={() => toggleMember(bot.id as BotId)} />
-                <span>{bot.name}</span>
-              </label>
+          <legend style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
+            <span style={{ flex: 1 }}>成员</span>
+            <Button variant="outline" type="button" onClick={() => { setAddOpen(open => !open); setMemberError(undefined) }}>
+              {addOpen ? '收起添加' : '添加成员'}
+            </Button>
+          </legend>
+          {currentMembers.length === 0
+            ? <p className={css.formHint} style={{ margin: '4px 0' }}>本群还没有 Bot。</p>
+            : currentMembers.map(bot => (
+              <div key={bot.id} data-room-member={bot.id} style={{ padding: '2px 0' }}>
+                {bot.name}
+              </div>
             ))}
+          {addOpen && (
+            <div data-add-members="" style={{ marginTop: 8, paddingTop: 8, borderTop: '0.5px solid var(--dsw-alias-border-l3)' }}>
+              <p className={css.formHint} style={{ margin: '0 0 6px' }}>选择要加入本群的 Bot（可单选或多选）：</p>
+              {availableBots.length === 0
+                ? <p className={css.formHint} style={{ margin: '4px 0' }}>所有 Bot 都已经在本群。</p>
+                : availableBots.map(bot => (
+                  <label key={bot.id} className={css.check}>
+                    <input
+                      type="checkbox"
+                      checked={addSelected.includes(bot.id as BotId)}
+                      onChange={() => toggleAddMember(bot.id as BotId)}
+                    />
+                    <span>{bot.name}</span>
+                  </label>
+                ))}
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <Button
+                  variant="primary"
+                  type="button"
+                  disabled={memberBusy || addSelected.length === 0}
+                  onClick={() => { void addMembers() }}
+                >
+                  {memberBusy ? '添加中…' : `确认添加${addSelected.length > 0 ? `（${addSelected.length}）` : ''}`}
+                </Button>
+                <Button variant="outline" type="button" onClick={() => { setAddOpen(false); setAddSelected([]) }}>取消</Button>
+              </div>
+              {memberError !== undefined && <p className={css.error} style={{ marginTop: 6 }} role="alert">{memberError}</p>}
+            </div>
+          )}
         </fieldset>
         <label className={css.check}>
           <input type="checkbox" checked={mentionOnly} onChange={e => setMentionOnly(e.target.checked)} />
