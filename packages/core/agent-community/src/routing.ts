@@ -357,11 +357,26 @@ export function routeMessage(input: RouteInput): RouteDecision {
     return { targets: input.members.map(m => m.id), reason: 'all', matched: {} }
   }
 
-  // 8. Role match: the BEST match wins, ties keep everyone.
+  // 8. Role match: the BEST match wins; a TIE goes to one bot, never to all of them.
   //
   // Picking every member with ANY hit woke a second bot on one shared word (two bots whose
-  // roles both mention 设计). Ranking by hit count keeps "让画师画一张" → the artist while
-  // still waking both when the message genuinely fits both equally.
+  // roles both mention 设计). Ranking by hit count keeps "让画师画一张" → the artist.
+  //
+  // ── A ROLE TIE IS NOT AN INVITATION TO THE WHOLE ROOM ────────────────────────
+  //
+  // Measured on the real board: two bots' prompts both contained 「确认」, so the two-word
+  // message 「1、允许；2、确认。」 matched both equally and woke both — two answers to one
+  // instruction, which the user reported as the bot answering twice. Every EXPLICIT way
+  // of addressing several bots already returned above: `@all`, written-out names, the
+  // collective words (大家/各位/一起/都看一下) and a bare greeting. What reaches this
+  // branch is an INFERENCE, and an inference must not fan out. The tie therefore goes to
+  // ONE bot: the leader when it is itself one of the tied matches (it decides how many
+  // bots the job needs, and can dispatch), otherwise the first tied match in join order —
+  // waking the leader when the CONTENT named somebody else would be the same mistake in
+  // the other direction.
+  //
+  // User decision 2 is untouched: a member's output stays visible whenever that member
+  // runs. This only stops one message from waking several members by accident.
   const scored: Array<{ id: string; hits: string[] }> = []
   for (const member of input.members) {
     const terms = [
@@ -374,6 +389,17 @@ export function routeMessage(input: RouteInput): RouteDecision {
   if (scored.length > 0) {
     const best = Math.max(...scored.map(s => s.hits.length))
     const winners = scored.filter(s => s.hits.length === best)
+    if (winners.length > 1) {
+      const leader = input.leaderId !== undefined && byId.has(input.leaderId) ? input.leaderId : undefined
+      const ties = ordered(winners.map(w => w.id))
+      const chosen = leader !== undefined && ties.includes(leader) ? leader : ties[0]
+      const winner = winners.find(w => w.id === chosen)
+      return {
+        targets: chosen === undefined ? [] : [chosen],
+        reason: 'matched',
+        matched: winner === undefined ? {} : { [winner.id]: winner.hits },
+      }
+    }
     return {
       targets: ordered(winners.map(w => w.id)),
       reason: 'matched',

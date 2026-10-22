@@ -31,6 +31,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionRunner } from './session-runner.ts'
 import type { LedgerProjector } from './ledger.ts'
+import type { RunPublish } from './publish-policy.ts'
 
 /** What the projection needs from the community service. */
 export interface LedgerProjectionDeps {
@@ -40,13 +41,25 @@ export interface LedgerProjectionDeps {
   /** The run currently driving a pair, so rows land inside the right turn. */
   readonly runIdFor: (roomId: string, botId: string) => string | undefined
   /**
-   * Why the current run exists.
+   * Whether the current run's turn may appear in the room.
    *
-   * COORDINATION IS NOT CONVERSATION. A turn woken by another bot's report or acknowledgement is
-   * internal machinery: the user did not ask for it and cannot act on it, and rendering it fills
-   * the room with bulletins ("✅ 完成：…", "已按派工完成：…") that repeat what the transcript already
-   * shows. Its rows must therefore not be created — the existing `silent` gate does exactly that,
-   * and this lookup is what tells it which runs are internal.
+   * COORDINATION IS NOT CONVERSATION. A turn woken by another bot's report is internal
+   * machinery: the user did not ask for it and cannot act on it, and its prose restates
+   * what the members already said — the duplicate the user reported as "answered twice".
+   * Such a run gets NO rows here. What it does owe the user (a `finish_task` report) is
+   * published once by `settleRun`, the single delivery path.
+   *
+   * This is the run's own flag (`BotRun.publish`) read from the live run, so a visible
+   * run renders exactly as before. Undefined means "no live run": a title stream, which
+   * the `silent` gate below already drops.
+   */
+  readonly runPublishFor?: (roomId: string, botId: string) => RunPublish | undefined
+  /**
+   * Legacy fallback for hosts that only know the run's origin.
+   *
+   * Kept so an older service (or a test that constructs this projection directly) still
+   * gets the origin-based rule; `INTERNAL_RUN_ORIGINS` is consulted only when
+   * `runPublishFor` does not answer.
    */
   readonly runOriginFor?: (roomId: string, botId: string) => string | undefined
 }
@@ -103,6 +116,21 @@ export class LedgerProjection {
 
   constructor(deps: LedgerProjectionDeps) {
     this.deps = deps
+  }
+
+  /**
+   * Whether the pair's current run is internal (coordination, not an answer).
+   *
+   * `runPublishFor` is the authoritative answer: it is the run's own flag, so a visible
+   * run renders exactly as before. The origin fallback keeps an older host working and is
+   * what makes `INTERNAL_RUN_ORIGINS` a rule that is actually consulted rather than a
+   * constant that only described the intent.
+   */
+  private isInternalRun(roomId: string, botId: string): boolean {
+    const publish = this.deps.runPublishFor?.(roomId, botId)
+    if (publish !== undefined) return publish === 'internal'
+    const origin = this.deps.runOriginFor?.(roomId, botId)
+    return origin !== undefined && INTERNAL_RUN_ORIGINS.has(origin)
   }
 
   /**
@@ -188,13 +216,16 @@ export class LedgerProjection {
       // duplicate survived every earlier fix: none of them were looking at WHICH
       // requests produce frames.
       // `silent` marks an attempt whose rows must NOT be created — DSH's session-title
-      // call. It is deliberately NOT an early `return`: returning dropped the whole
+      // call, and any run whose `publish` is `internal` (its prose is coordination; the
+      // delivery it may owe the user is published once by `settleRun`).
+      // It is deliberately NOT an early `return`: returning dropped the whole
       // attempt, and since the gate is evaluated at the `start` frame that also took the
       // run's own LIVE stream with it. The answer and the reasoning still arrived, but
       // only after the turn settled, when `patchRunText`/`patchRunReasoning` wrote them
       // from the result — so the model appeared to produce nothing while it was working,
       // and 思考过程 only showed up once it had finished.
       const silent = this.deps.runIdFor(owner.roomId, owner.botId) === undefined
+        || this.isInternalRun(owner.roomId, owner.botId)
 
       const state: AttemptState = { ...owner, text: '', reasoning: '', silent }
 
@@ -360,6 +391,14 @@ export class LedgerProjection {
     const data = event.data ?? {}
     const runId = this.deps.runIdFor(roomId, botId)
     const name = this.deps.botName(botId)
+    // ── A SECOND WRITER, THE SAME RULE ─────────────────────────────────────────
+    //
+    // The `silent` gate above covers stream frames; committed session events (the final
+    // answer, tool cards) are a second, independent writer. An internal run must not
+    // leave a turn behind through either path — otherwise the integrate turn's prose and
+    // its `finish_task` tool card still render as a second answer, which is precisely the
+    // duplicate this change removes.
+    if (runId !== undefined && this.isInternalRun(roomId, botId)) return
 
     switch (event.type) {
       // The committed message is the authority on the final text, so it always wins

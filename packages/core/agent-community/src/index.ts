@@ -17,6 +17,7 @@ import type {
   SendRoomMessageRequest, SettleBotRunRequest, UpdateBotRequest, UpdateRoomRequest,
   SendRoomMessageAttachment, BotMessageAttachment,
   BotProfileBinding, BotPresence, BotTeam, BotTeamMembership,
+  BotMessageUsage,
   DismissTeamRequest, PostTeamMessageRequest, TeamMessageResult,
   CreateTeamRequest, BotTeamMessageKind, BotTeamRunOrigin,
   BotTask, BotTaskStatus,
@@ -48,9 +49,15 @@ import { CURRENT_VERSION, emptyState, parsePersistedState, type PersistedState, 
 import { decideReadMark, repairReadMarks, totalUnread, unreadByRoom } from './unread.ts'
 import { LedgerProjection } from './ledger-projection.ts'
 import { GroupTaskDriver, type GroupTaskState } from './group-task.ts'
+import { chooseFinalDelivery, publishOf, type RunPublish } from './publish-policy.ts'
 import { registerCollaborationTools } from './collaboration-tools.ts'
 import { crossRoomError, screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
-import { canEditGoal, canReadGoal, describeGoal, goalPromptBlock, shouldContinueGoal, GOAL_STALL_LIMIT, type GoalActor } from './room-goal.ts'
+import {
+  applyBotGoalChange, applyUserGoalChange, authorizeGoal, authorizedRoundBudget,
+  canEditGoal, canReadGoal, describeGoal, goalAuthorizationUsable,
+  goalContinuationDecision, goalPromptBlock, pauseGoal, resumeGoal,
+  DEFAULT_GOAL_MAX_ROUNDS, GOAL_STALL_LIMIT, type BotGoalAction, type GoalActor,
+} from './room-goal.ts'
 import { planDispatch, handoffReport, MAX_DISPATCH_TASKS, type DispatchTask } from './dispatch.ts'
 import { searchMemory, taskMemoryText } from './bot-memory.ts'
 import { MemoryStore, memoryPaths, type RoomMemoryMeta } from './memory-store.ts'
@@ -566,6 +573,17 @@ export class AgentCommunityService extends TypertRemoteService {
   private proposalSweeper: ReturnType<typeof setInterval> | undefined
   /** Fires bot reminders the host cannot deliver (subagent-owned sessions). */
   private botScheduleTimer: ReturnType<typeof setInterval> | undefined
+  /**
+   * `finish_task` reports waiting for the run that produced them to settle.
+   *
+   * The report is NOT a room row of its own: a ledger push carried no runId and no
+   * reasoning, while the turn's answer carried both — the user saw one delivery twice.
+   * `finish_task` runs INSIDE the leader's turn, before `settleRun` has written that
+   * turn's reply, so this is the hand-off point: stash by run id here, consume in
+   * `settleRun`, and publish exactly one message. Keyed by run id; the `room\0leader`
+   * key is the fallback for a finish that arrives outside a run (older callers).
+   */
+  private readonly pendingFinishReports = new Map<string, string>()
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'agentCommunity')
@@ -768,15 +786,20 @@ export class AgentCommunityService extends TypertRemoteService {
         ledger: this.ledger,
         // ── WHICH RUNS MAY SPEAK IN THE ROOM ───────────────────────────────────
         //
-        // A turn woken by a peer message or a member's report is coordination: the user did not
-        // ask for it and cannot act on it. Rendering it produced five bot messages for one
-        // instruction — three of them the same bot announcing completion. The expected outcome
-        // of a normal flow (create a group and greet) is exactly two replies: the bot that ran
-        // it, and the bot that was pulled in. This is what tells the projection which turns are
-        // internal so it creates no rows for them.
-        runOriginFor: (roomId, botId) => this.state.runs
-          .find(r => r.roomId === roomId && r.botId === botId
-            && (r.status === 'queued' || r.status === 'running'))?.origin,
+        // A turn woken by a member's report is coordination: the user did not ask for it
+        // and cannot act on it. Rendering it produced five bot messages for one
+        // instruction — three of them the same bot announcing completion. The project's
+        // rule (user decision 2) is that MEMBERS stay visible; what must not be rendered
+        // is the leader's integrate turn restating them.
+        //
+        // The answer is the run's own `publish` flag, so it follows the run from the
+        // place that created it (`enqueueGroupRun` marks the integrate turn internal) and
+        // there is exactly one source of truth. `undefined` (no live run) leaves the
+        // projection's title-stream gate in charge.
+        runPublishFor: (roomId, botId) => {
+          const run = this.liveRunFor(roomId, botId)
+          return run === undefined ? undefined : publishOf(run)
+        },
         botName: (botId) => this.state.bots.find(b => b.id === botId)?.name ?? botId,
         // ── ANY UNFINISHED RUN, NOT JUST `running` ─────────────────────────────
         //
@@ -804,7 +827,8 @@ export class AgentCommunityService extends TypertRemoteService {
       })
       this.ledgerProjection.install(ctx)
       this.groupTask = new GroupTaskDriver({
-        enqueueRun: (roomId, botId, prompt) => this.enqueueGroupRun(roomId, botId, prompt),
+        // The integrate turn passes `internal: true`; assign/assignEach pass visible.
+        enqueueRun: (roomId, botId, prompt, options) => this.enqueueGroupRun(roomId, botId, prompt, options),
         roomById: (roomId) => {
           const room = this.state.rooms.find(r => r.id === roomId)
           return room === undefined
@@ -819,31 +843,18 @@ export class AgentCommunityService extends TypertRemoteService {
         hasLiveRun: (roomId) => this.state.runs.some(r => r.roomId === roomId && (r.status === 'running' || r.status === 'queued')),
         isCompacting: () => false,
         postReport: (roomId, leaderId, report) => {
-          const leader = this.state.bots.find(b => b.id === leaderId)
-          // ── THE DELIVERY IS THE LEADER'S OWN MESSAGE; DO NOT PUSH A SECOND COPY ──────
+          // ── THE REPORT IS THE RUN'S DELIVERY, NOT A SECOND ROW ─────────────────
           //
-          // This row is what the user saw as "one reply with 思考过程 and one without": a ledger
-          // push carries no runId and no reasoning, while the leader's own answer carries both.
-          // Measured on a task where the leader delivered in its turn AND called finish_task —
-          // the room showed its answer plus this report, two replies for one delivery.
+          // `finish_task` runs INSIDE the leader's turn, before `settleRun` has been
+          // reached — the turn's own reply is not in `state.messages` yet, so the old
+          // `alreadyDelivered` comparison was always false at this moment and pushed a
+          // ledger row that carried no runId and no reasoning beside the real answer.
+          // That was the user's "two replies, one with 思考过程 and one without".
           //
-          // The report is still the delivery when the turn produced nothing: then no message exists
-          // after the instruction, and the push below is the only thing the user would see.
-          const instructionAt = [...this.state.messages]
-            .filter(m => m.roomId === roomId && m.sender.kind === 'user')
-            .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '')
-          const alreadyDelivered = instructionAt !== '' && this.state.messages.some(m =>
-            m.roomId === roomId && m.sender.kind === 'bot' && m.sender.botId === leaderId
-            && m.createdAt > instructionAt)
-          if (alreadyDelivered) return
-          this.ledger.push({
-            type: 'bot-text',
-            roomId: roomId as never,
-            botId: leaderId as never,
-            botName: leader?.name ?? leaderId,
-            text: report,
-            streaming: false,
-          } as never)
+          // The report is therefore handed to the run (stashed by run id) and decided in
+          // `settleRun`, which is the single delivery path: one message, with the run's
+          // metadata, persisted with the run so a restart shows the same transcript.
+          this.recordFinishReport(roomId, leaderId, report)
         },
         lastUserMessageAt: (roomId) => [...this.state.messages]
           .filter(m => m.roomId === roomId && m.sender.kind === 'user')
@@ -882,7 +893,10 @@ export class AgentCommunityService extends TypertRemoteService {
         historyMessages: config.historyMessagesInPrompt ?? 10,
         memoryPromptEntries: config.memoryPromptEntries ?? 8,
         defaultReasoningEffort: config.botReasoningEffort ?? 'max',
-        ledger: this.ledger,
+        // The executor reserves a live row and writes the final answer for every run;
+        // this view drops both for an internal run so its turn never reaches the panel.
+        // The one row it may owe the user (a finish report) is pushed by `settleRun`.
+        ledger: this.executorLedgerView(),
         sessionRunner: runner,
       })
       // Sweep AFTER the executor exists and BEFORE it starts: the sweep needs the
@@ -1117,18 +1131,49 @@ export class AgentCommunityService extends TypertRemoteService {
    * `bot-message` rather than `user`: the prompt was written by the leader, not typed
    * by the user, and the distinction is what lets a later reader tell a hand-off from
    * something the user actually said.
+   *
+   * `options.internal` marks the leader's INTEGRATE turn: it runs (and may finish the
+   * task), but its prose is coordination, not an answer — the members' own replies are
+   * already in the room. Published turns (a member's assigned work) omit it.
    */
-  private enqueueGroupRun(roomId: string, botId: string, prompt: string): boolean {
+  private enqueueGroupRun(
+    roomId: string,
+    botId: string,
+    prompt: string,
+    options?: { readonly internal?: boolean | undefined },
+  ): boolean {
     const room = this.state.rooms.find(r => r.id === roomId)
     if (room === undefined || !room.memberIds.some(id => id === botId)) return false
     const bot = this.state.bots.find(b => b.id === botId)
     if (bot === undefined) return false
     try {
-      this.queueRoomRun(roomId, botId, prompt, 'bot-message')
+      // A paused room creates no runs from ANY source (see `queueRoomRun`).
+      const run = this.queueRoomRun(roomId, botId, prompt, 'bot-message')
+      if (run === undefined) return false
+      // Tag the run here, where its purpose is known: the integrate turn is internal,
+      // every other group hand-off (assign_task / dispatch / message_member) is a
+      // member's own visible contribution.
+      this.markRunPublish(run.id, options?.internal === true ? 'internal' : 'visible')
       return true
     } catch {
       return false
     }
+  }
+
+  /**
+   * Tag a run with how it may speak, after creation.
+   *
+   * Written here rather than inside `queueRoomRun` because that is the single creation
+   * point shared by every wake-up path and it carries no policy; the run is still
+   * `queued`, so no consumer (executor, projection) has read it yet. The flag is what
+   * `publish-policy` and every row writer consult.
+   */
+  private markRunPublish(runId: string, publish: RunPublish): void {
+    this.state = {
+      ...this.state,
+      runs: this.state.runs.map(r => (r.id === runId ? { ...r, publish } : r)),
+    }
+    this.enqueueWrite()
   }
 
   private installCollaborationTools(
@@ -1278,19 +1323,57 @@ export class AgentCommunityService extends TypertRemoteService {
         const goal = this.roomGoal(input.roomId)
         return goal === undefined
           ? undefined
-          : { text: goal.text, status: goal.status, updatedAt: goal.updatedAt }
+          : {
+            text: goal.text,
+            status: goal.status,
+            updatedAt: goal.updatedAt,
+            ...(goal.authorization !== undefined
+              ? {
+                authorization: {
+                  maxRounds: goal.authorization.maxRounds,
+                  roundsUsed: goal.authorization.roundsUsed,
+                },
+              }
+              : {}),
+          }
       },
       setRoomGoal: async (input) => {
         // The room comes from the SESSION, never from the model: `ownerOf` resolved it, and
         // the actor is that session — so a bot cannot name another room's goal, and the
-        // authority check runs against the room it is actually in.
+        // authority check runs against the room it is actually in. A Bot's call lands as a
+        // PROPOSAL unless the goal is already active under the user's grant (see `setRoomGoal`).
         const result = await this.setRoomGoal({
           roomId: input.roomId,
           ...(input.text !== undefined ? { text: input.text } : {}),
           ...(input.status !== undefined ? { status: input.status } : {}),
+          ...(input.action !== undefined ? { action: input.action } : {}),
           actorSessionId: this.sessionIdFor(input.roomId, input.botId),
         })
-        return result.ok ? { ok: true } : { ok: false, ...(result.reason !== undefined ? { reason: result.reason } : {}) }
+        if (!result.ok) {
+          return { ok: false, ...(result.reason !== undefined ? { reason: result.reason } : {}) }
+        }
+        // The model needs the RESULTING status, not just "ok": 'proposed' must be reported as a
+        // suggestion awaiting the user, or the bot will believe it granted itself auto-run.
+        return {
+          ok: true,
+          ...(result.goal !== undefined
+            ? {
+              goal: {
+                text: result.goal.text,
+                status: result.goal.status,
+                updatedAt: result.goal.updatedAt,
+                ...(result.goal.authorization !== undefined
+                  ? {
+                    authorization: {
+                      maxRounds: result.goal.authorization.maxRounds,
+                      roundsUsed: result.goal.authorization.roundsUsed,
+                    },
+                  }
+                  : {}),
+              },
+            }
+            : {}),
+        }
       },
       recall: (input) => this.recallMemory({
         roomId: input.roomId,
@@ -1313,7 +1396,23 @@ export class AgentCommunityService extends TypertRemoteService {
     })
   }
 
-  private queueRoomRun(roomId: string, botId: string, prompt: string, origin: BotRun['origin']): BotRun {
+  /**
+   * Queue exactly one run, unless the room is paused.
+   *
+   * THE PAUSED GUARD LIVES HERE, not only in `sendMessage`: the panel's 「暂停（不创建新运行）」
+   * promised that no run is created, but schedules, goal continuations, a2a wakes and group
+   * hand-offs each called this method directly and only the user-message path checked the flag.
+   * Refusing at the single creation point makes the promise true for every source, and returns
+   * undefined so a caller that needs the run (the goal continuation) can skip its bookkeeping.
+   */
+  private queueRoomRun(roomId: string, botId: string, prompt: string, origin: BotRun['origin']): BotRun | undefined {
+    const room = this.state.rooms.find(r => r.id === roomId)
+    if (room !== undefined && room.paused === true) {
+      this.ctx.logger?.info?.(
+        `agent-community: skipped ${origin} run for paused room ${roomId}`,
+      )
+      return undefined
+    }
     // A user instruction begins a task; the previous task's completion must not outlive it.
     if (origin === 'user') this.groupTask?.beginTask(roomId)
 
@@ -2138,6 +2237,9 @@ export class AgentCommunityService extends TypertRemoteService {
         // id: an unregistered session is one the startup sweep cannot hide.
         sessionId: this.ensureStableSession(room.id, botId),
         origin: 'user' as const,
+        // A user message is always the room's conversation: visible. Explicit so the
+        // publish rule has one place to look, even though absent means the same thing.
+        publish: 'visible' as const,
         prompt: input.text,
         status: 'queued' as const,
         controlRevision: 0,
@@ -2583,54 +2685,101 @@ export class AgentCommunityService extends TypertRemoteService {
     let runs = [...this.state.runs]
     runs[idx] = updated
     let messages = this.state.messages
-    // A run that produced no visible answer (all tool rounds exhausted, or the
-    // model emitted only reasoning) must not persist an empty bot message: the
-    // panel renders it as a bot with no content, which reads as a hung reply.
+    // ── ONE RUN, ONE DELIVERY ──────────────────────────────────────────────────
+    //
+    // Everything the room should see from this run is decided HERE, once:
+    //   · a visible run publishes its own reply — a member's answer stays visible (the
+    //     user's decision), and so does a normal answer;
+    //   · an internal run (the leader's integrate turn) publishes nothing, because the
+    //     members it summarises already spoke in the room; only the report it finished
+    //     the task with is delivered (see `chooseFinalDelivery`);
+    //   · a run that produced no text but did finish the task delivers its report — a
+    //     tool-only `finish_task` used to leave the room silent;
+    //   · a retry is not a finished turn: it delivers nothing.
+    //
+    // `postReport` no longer writes a row of its own (it stashes the report on the run),
+    // which is what stops one delivery from rendering twice: once with the run's
+    // reasoning, once as a bare ledger row.
     const replyText = input.reply?.text ?? ''
-    if (input.reply !== undefined && replyText.trim() !== '') {
-      // B-2: use the real session id from roomAgentSessions rather than
-      // prev.sessionId, which is often a stale UUID that has no session directory.
-      const realSessionId = this.state.roomAgentSessions.find(
-        s => s.roomId === prev.roomId && s.botId === prev.botId,
-      )?.sessionId ?? prev.sessionId
-      const reply: BotMessage = {
-        id: brandId<BotMessageId>(randomUUID()),
-        roomId: prev.roomId,
-        sender: {
-          kind: 'bot',
-          botId: prev.botId,
-          name: this.state.bots.find(b => b.id === prev.botId)?.name ?? 'bot',
-        },
-        text: input.reply.text,
-        mentions: [],
-        createdAt: nowIso(),
-        runId: prev.id,
-        sessionId: realSessionId,
-        sessionSeq: input.reply.sessionSeq,
-        reasoning: input.reply.reasoning,
-        toolActivity: input.reply.toolActivity,
-        deliverables: input.reply.deliverables,
-        usage: input.reply.usage,
-        // Wall-clock time for this run, so the panel can show the same
-        // "已完成，用时 1分23秒" line the native transcript does.
-        durationMs: runDurationMs(prev),
-        sequence: this.state.messages.filter(m => m.roomId === prev.roomId).length,
+    const retrying = updated.status === 'queued'
+    const publish = publishOf(prev)
+    const finishReport = retrying ? undefined : this.takeFinishReport(prev)
+    const delivery = retrying
+      ? { text: '', publishFinal: false }
+      : chooseFinalDelivery({
+          replyText,
+          ...(finishReport !== undefined ? { finishReport } : {}),
+          publish,
+        })
+    const durationMs = runDurationMs(updated)
+    if (delivery.publishFinal) {
+      // Idempotent: a settle observed twice (or a retry that already delivered once) must
+      // not append the same body again.
+      const alreadyDelivered = this.state.messages.some(
+        m => m.roomId === prev.roomId && m.runId === prev.id,
+      )
+      if (!alreadyDelivered) {
+        // B-2: use the real session id from roomAgentSessions rather than
+        // prev.sessionId, which is often a stale UUID that has no session directory.
+        const realSessionId = this.state.roomAgentSessions.find(
+          s => s.roomId === prev.roomId && s.botId === prev.botId,
+        )?.sessionId ?? prev.sessionId
+        const reply: BotMessage = {
+          id: brandId<BotMessageId>(randomUUID()),
+          roomId: prev.roomId,
+          sender: {
+            kind: 'bot',
+            botId: prev.botId,
+            name: this.state.bots.find(b => b.id === prev.botId)?.name ?? 'bot',
+          },
+          text: delivery.text,
+          mentions: [],
+          createdAt: nowIso(),
+          runId: prev.id,
+          sessionId: realSessionId,
+          ...(input.reply !== undefined ? { sessionSeq: input.reply.sessionSeq } : {}),
+          // For an internal turn only the DELIVERED body survives. Its reasoning and tool
+          // cards were suppressed live (the turn is coordination), so persisting them would
+          // make the same turn look different after a restart — the inconsistency this
+          // publication change exists to remove. Files are different: they are the turn's
+          // own output and the panel's cards must survive a reload.
+          ...(publish === 'visible' && input.reply?.reasoning !== undefined ? { reasoning: input.reply.reasoning } : {}),
+          ...(publish === 'visible' && input.reply?.toolActivity !== undefined ? { toolActivity: input.reply.toolActivity } : {}),
+          ...(input.reply?.deliverables !== undefined ? { deliverables: input.reply.deliverables } : {}),
+          ...(input.reply?.usage !== undefined ? { usage: input.reply.usage } : {}),
+          // Wall-clock time for this run, so the panel can show the same
+          // "已完成，用时 1分23秒" line the native transcript does.
+          durationMs,
+          sequence: this.state.messages.filter(m => m.roomId === prev.roomId).length,
+        }
+        messages = [...messages, reply]
       }
-      messages = [...messages, reply]
     }
     this.state = { ...this.state, runs, messages }
     this.enqueueWrite()
+    // ── THE LEDGER MUST SHOW THE SAME THING ────────────────────────────────────
+    //
+    // The panel renders the ledger, not `state.messages`. A visible run already wrote its
+    // answer row through the projection/executor; an internal run's writers were all
+    // suppressed, so its delivered report is pushed here — one row, with the run id and
+    // duration, so a reload shows the same transcript. A run with nothing to deliver must
+    // not leave a row flagged live.
+    if (delivery.publishFinal) {
+      this.writeDeliveredRow(updated, delivery.text, input.reply?.usage)
+    } else {
+      this.ledger.settleRunText(prev.roomId, prev.id)
+    }
     // ── WHAT THIS BOT DID, IN THIS ROOM ─────────────────────────────────────────
     //
     // One line per finished turn, keyed by (room, bot) — the pair the user's isolation rule is
-    // about. A turn that produced nothing visible records nothing (the silent path arrives here
-    // as `text: ''`), and `completed` excludes a retry, a stop and a failure: none of those is
-    // something the bot accomplished.
+    // about. Only a turn that DELIVERED something is recorded: an internal run that published
+    // nothing (a pure integration pass) was coordination, not something the bot accomplished,
+    // and `completed` excludes a retry, a stop and a failure.
     //
     // File-backed, and it says so: `rememberTask` reports a write failure rather than swallowing
     // it, because a memory that silently did not get written is worse than no memory at all.
-    if (updated.status === 'completed' && input.reply !== undefined && replyText.trim() !== '') {
-      void this.rememberTask(prev, replyText)
+    if (updated.status === 'completed' && delivery.publishFinal) {
+      void this.rememberTask(prev, delivery.text)
     }
     // ── THE ROOM REACTS TO A SETTLED RUN ────────────────────────────────────────
     //
@@ -3214,13 +3363,17 @@ export class AgentCommunityService extends TypertRemoteService {
       // a2a run was queued as well — two wakes for one member delivery, two leader replies.
       const targetIsLeader = targetBot !== undefined && this.leaderOfRoom(String(input.roomId)) === targetBot.id
       if (targetBot !== undefined && answeringPeer !== true && targetIsLeader !== true) {
-        // Create a queued run for the target bot to process the message
+        // Create a queued run for the target bot to process the message.
+        // `publish: 'visible'` is EXPLICIT here even though it is the default: this is the
+        // turn of a member that was handed work, and the user's decision is that its
+        // output stays visible in the room. Only the leader's integrate turn is internal.
         const run: BotRun = {
           id: brandId<BotRunId>(randomUUID()),
           botId: targetBot.id,
           roomId: brandId<BotRoomId>(input.roomId),
           sessionId: this.ensureStableSession(input.roomId, targetBot.id),
           origin: 'a2a',
+          publish: 'visible',
           prompt: `[来自 ${senderName}] ${input.text}`,
           status: 'queued',
           controlRevision: 0,
@@ -3780,6 +3933,155 @@ export class AgentCommunityService extends TypertRemoteService {
     return undefined
   }
 
+  /** The newest live run for a (room, bot) pair, or undefined when that bot is idle. */
+  private liveRunFor(roomId: string, botId: string): BotRun | undefined {
+    for (const run of [...this.state.runs].reverse()) {
+      if (run.roomId === roomId && run.botId === botId && (run.status === 'running' || run.status === 'queued')) {
+        return run
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * Publish mode of a run, by id.
+   *
+   * Read from state rather than captured at creation: the executor asks this from inside
+   * the run (skipping the row reservation / final-answer write for an internal run), and
+   * the flag lives on the run record. An unknown id stays visible — silencing a bot
+   * because a record could not be found would be the worse failure.
+   */
+  private publishOfRunId(runId: string): RunPublish {
+    return publishOf(this.state.runs.find(r => r.id === runId))
+  }
+
+  /**
+   * The ledger as the run executor sees it — with one gate.
+   *
+   * The projection is not the only writer of a turn's rows: `runs.ts` reserves a live
+   * row before the model runs and writes the final answer afterwards, for EVERY run. An
+   * internal run must leave no turn behind (that is the duplicate the user saw), and
+   * suppressing only the projection would still leave an empty reserved row — which the
+   * panel renders as a bot bubble with no answer. Those two writes are therefore dropped
+   * for an internal run; everything else delegates untouched, and the one row the run
+   * does owe the user (its finish report) is pushed by `settleRun`.
+   */
+  private executorLedgerView(): LedgerProjector {
+    const ledger = this.ledger
+    const service = this
+    const internal = (runId: string): boolean => service.publishOfRunId(runId) === 'internal'
+    return new Proxy(ledger, {
+      get(target, property) {
+        if (property === 'reserveLiveRow') {
+          return (roomId: string, botId: string, botName: string, runId: string): string =>
+            internal(runId) ? '' : target.reserveLiveRow(roomId, botId, botName, runId)
+        }
+        if (property === 'patchRunText') {
+          return (
+            roomId: string,
+            runId: string,
+            text: string,
+            identity?: { botId: string; botName: string },
+          ): void => {
+            if (internal(runId)) return
+            target.patchRunText(roomId, runId, text, identity)
+          }
+        }
+        if (property === 'patchRunReasoning') {
+          return (
+            roomId: string,
+            runId: string,
+            text: string,
+            identity: { botId: string; botName: string },
+          ): void => {
+            if (internal(runId)) return
+            target.patchRunReasoning(roomId, runId, text, identity)
+          }
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function'
+          ? (value as (...args: unknown[]) => unknown).bind(target)
+          : value
+      },
+    }) as unknown as LedgerProjector
+  }
+
+  /** Remember a `finish_task` report until its run settles (see `pendingFinishReports`). */
+  private recordFinishReport(roomId: string, leaderId: string, report: string): void {
+    if (report.trim() === '') return
+    // One entry per run at most; the cap only bounds a leak from a room deleted while a
+    // finish was in flight, and dropping the whole map is the honest failure there.
+    if (this.pendingFinishReports.size > 200) this.pendingFinishReports.clear()
+    const runId = this.currentRunIdFor(roomId, leaderId)
+    if (runId !== undefined) {
+      this.pendingFinishReports.set(runId, report)
+      return
+    }
+    // No live run: `finish_task` reached the service outside its own turn (an older
+    // caller, or a tool run the executor already let go). The leader will settle a run
+    // for this room eventually; keep the report addressable by room+leader.
+    this.pendingFinishReports.set(`${roomId}\u0000${leaderId}`, report)
+  }
+
+  /** Take (and forget) the finish report belonging to one run, if it called finish_task. */
+  private takeFinishReport(run: BotRun): string | undefined {
+    const direct = this.pendingFinishReports.get(run.id)
+    if (direct !== undefined) {
+      this.pendingFinishReports.delete(run.id)
+      return direct
+    }
+    const key = `${run.roomId}\u0000${run.botId}`
+    const fallback = this.pendingFinishReports.get(key)
+    if (fallback !== undefined) this.pendingFinishReports.delete(key)
+    return fallback
+  }
+
+  /**
+   * Make the ledger show exactly one finished delivery row for a run.
+   *
+   * The row id is derived from the run id (`run:<id>:bot-text`), so a visible run's row
+   * already exists — the executor reserves it before the turn — and is finalised here with
+   * the delivered body and its duration. An internal run has no row at all (every writer
+   * skipped it), so the report it delivered is pushed here. Either way the panel shows one
+   * row per run, with the same metadata a reload would rebuild from the message.
+   */
+  private writeDeliveredRow(run: BotRun, text: string, usage: BotMessageUsage | undefined): void {
+    const rowId = this.ledger.botTextRowForRun(run.roomId, run.id)
+    const durationMs = runDurationMs(run)
+    // The ledger's usage shape is a subset of the message's: `reasoningTokens` and the
+    // routes belong to the turn record, not to the answer row.
+    const ledgerUsage = usage === undefined
+      ? undefined
+      : {
+          ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+          uncachedInputTokens: usage.uncachedInputTokens,
+          outputTokens: usage.outputTokens,
+          totalTokens: usage.totalTokens,
+          ...(usage.cacheReadTokens !== undefined ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+          ...(usage.cacheWriteTokens !== undefined ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+        }
+    if (rowId !== undefined) {
+      this.ledger.patch(rowId, run.roomId, {
+        text,
+        streaming: false,
+        durationMs,
+        ...(ledgerUsage !== undefined ? { usage: ledgerUsage } : {}),
+      } as never)
+      return
+    }
+    this.ledger.push({
+      type: 'bot-text',
+      roomId: run.roomId as never,
+      botId: run.botId as never,
+      botName: this.state.bots.find(b => b.id === run.botId)?.name ?? run.botId,
+      runId: run.id as never,
+      text,
+      streaming: false,
+      durationMs,
+      ...(ledgerUsage !== undefined ? { usage: ledgerUsage } : {}),
+    } as never)
+  }
+
   /**
    * Test seam: ask a question exactly as the tool does, without a model turn.
    *
@@ -4048,15 +4350,25 @@ export class AgentCommunityService extends TypertRemoteService {
   /**
    * Create, edit, pause, resume or finish THIS room's goal.
    *
-   * Authority is decided here, not by the caller: in a group only the leader (or the user) may
-   * change the objective; in a 1:1 the room's bot may. The room itself comes from the calling
-   * session when a Bot asks, so a model cannot name another room's goal at all.
+   * Authority has TWO layers, and the second one is the fix for "the bot started working
+   * without me":
+   *
+   *   · WHO MAY TOUCH THE OBJECTIVE — decided here, as before: in a group only the leader (or
+   *     the user); in a 1:1 the room's bot may. The room comes from the calling session, so a
+   *     model cannot name another room's goal.
+   *   · WHO MAY MAKE IT RUN BY ITSELF — the USER only. A bot's `set`/`resume` becomes
+   *     `status:'proposed'` (a suggestion, inert until authorized); it can only refresh the
+   *     text of a goal that is already active under a live user grant, preserving that grant
+   *     and its spent rounds. `pause`/`done` stay allowed.
    */
   async setRoomGoal(input: {
     readonly roomId: string
     readonly text?: string | undefined
     readonly status?: 'active' | 'paused' | 'done' | undefined
+    /** Which tool action this is, for a Bot caller; the legacy status-only call defaults to 'set'. */
+    readonly action?: BotGoalAction | undefined
     readonly actorSessionId?: string | undefined
+    readonly maxRounds?: number | undefined
   }): Promise<{ readonly ok: boolean; readonly goal?: RoomGoal | undefined; readonly reason?: string | undefined }> {
     const room = this.state.rooms.find(r => r.id === input.roomId)
     if (room === undefined) return { ok: false, reason: '房间不存在。' }
@@ -4066,22 +4378,210 @@ export class AgentCommunityService extends TypertRemoteService {
       return { ok: false, reason: '只有 leader（或用户本人）可以修改本房间的目标。' }
     }
     const previous = room.goal
-    const text = (input.text ?? previous?.text ?? '').replace(/\s+/gu, ' ').trim()
-    if (text === '') return { ok: false, reason: '目标内容不能为空。' }
     const now = nowIso()
-    const status = input.status ?? (previous?.status === 'done' ? 'active' : previous?.status ?? 'active')
-    const goal: RoomGoal = {
-      text,
-      status,
-      createdAt: previous?.createdAt ?? now,
-      updatedAt: now,
-      ...(actor.kind === 'bot' ? { ownerBotId: brandId<BotId>(actor.botId) } : (previous?.ownerBotId !== undefined ? { ownerBotId: previous.ownerBotId } : {})),
-      // A new or re-armed goal starts its continuation budget fresh.
-      continuations: 0,
-      stalledRounds: 0,
+
+    if (actor.kind === 'user') {
+      const status = input.status ?? 'active'
+      const change = applyUserGoalChange(previous, {
+        status,
+        now,
+        ...(input.text !== undefined ? { text: input.text } : {}),
+        ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
+      })
+      if (change === undefined) {
+        return {
+          ok: false,
+          reason: status === 'active' ? '目标内容不能为空。' : '本房间还没有目标。',
+        }
+      }
+      this.patchRoom(input.roomId, r => ({ ...r, goal: change.goal }))
+      this.recordNotice(
+        input.roomId,
+        change.outcome === 'active'
+          ? `目标已设定，并授权自动续跑：最多 ${change.goal.authorization?.maxRounds ?? DEFAULT_GOAL_MAX_ROUNDS} 轮。`
+          : change.outcome === 'paused' ? '目标已暂停。' : '目标已完成。',
+      )
+      return { ok: true, goal: change.goal }
     }
+
+    // ── A BOT: propose, refresh progress, pause or finish — never grant continuation ──
+    const action: BotGoalAction = input.action
+      ?? (input.status === 'paused' ? 'pause' : input.status === 'done' ? 'done' : 'set')
+    const change = applyBotGoalChange(previous, {
+      action,
+      now,
+      botId: brandId<BotId>(actor.botId),
+      ...(input.text !== undefined ? { text: input.text } : {}),
+    })
+    if (change === undefined) {
+      return {
+        ok: false,
+        reason: previous === undefined
+          ? '本房间还没有目标：action=set 时请给出 text。'
+          : '目标内容不能为空。',
+      }
+    }
+    this.patchRoom(input.roomId, r => ({ ...r, goal: change.goal }))
+    if (change.outcome === 'proposed') {
+      this.recordNotice(
+        input.roomId,
+        `目标已提交，等待用户在面板确认（确认前不会自动续跑）：${change.goal.text.slice(0, 120)}`,
+      )
+    } else if (change.outcome === 'paused') {
+      this.recordNotice(input.roomId, '目标已暂停。')
+    } else if (change.outcome === 'done') {
+      this.recordNotice(input.roomId, '目标已完成。')
+    }
+    // outcome 'active' = a progress-text refresh of an ALREADY authorized goal: no notice, or
+    // every automatic round would add a grey row saying nothing new.
+    return { ok: true, goal: change.goal }
+  }
+
+  /**
+   * Start the FIRST authorized round, or explain why it is not starting yet.
+   *
+   * A grant would otherwise be useless until something else settled: a bot proposes a goal
+   * near the end of its turn, the turn settles (nothing to continue), and the goal the user
+   * just authorized would sit active-but-idle until the user typed again. Authorizing is the
+   * user's explicit "go", so the grant itself kicks off round 1.
+   *
+   * THREE CASES, and only one of them queues:
+   *   · a live run in the room → authorize only. That run's settle continues the goal through
+   *     `afterRunSettled`; queueing now would race its bookkeeping and could duplicate work.
+   *   · the room is paused → queueRoomRun refuses every source (returns undefined): authorize,
+   *     spend nothing, and say so.
+   *   · otherwise → queue round 1 now and count it HERE. `afterRunSettled` counts only the
+   *     rounds it queues itself, so the first round is spent exactly once.
+   */
+  private startFirstAuthorizedRound(input: {
+    readonly roomId: string
+    readonly goal: RoomGoal
+    /** Notice wording only: 授权 (grant) vs 继续 (resume). */
+    readonly verb: '授权' | '继续'
+  }): { readonly goal: RoomGoal; readonly notice: string; readonly started: boolean } {
+    const total = input.goal.authorization?.maxRounds ?? DEFAULT_GOAL_MAX_ROUNDS
+    const short = `${input.goal.text.slice(0, 80)}${input.goal.text.length > 80 ? '…' : ''}`
+    const head = `目标已${input.verb}`
+
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    const leader = room === undefined
+      ? undefined
+      : (room.directBotId !== undefined ? room.directBotId : this.leaderOfRoom(input.roomId))
+    // PAUSED FIRST: a paused room may still hold a live run (paused mid-turn), and promising
+    // "it will continue when that run ends" would be false — `afterRunSettled` refuses auto
+    // work in a paused room. The grant stands; nothing starts until the room is unpaused.
+    if (room?.paused === true) {
+      return {
+        goal: input.goal,
+        notice: `${head}，但房间当前处于暂停：不会起跑；取消暂停后在房间里发一条消息，就能开始自动续跑。`,
+        started: false,
+      }
+    }
+    if (this.liveRunIn(input.roomId)) {
+      return {
+        goal: input.goal,
+        notice: `${head}：当前有任务在运行，它结束后会自动续跑（最多 ${total} 轮）。`,
+        started: false,
+      }
+    }
+    if (leader === undefined) {
+      return { goal: input.goal, notice: `${head}：本房间没有可执行的 Bot，自动续跑不会起跑。`, started: false }
+    }
+    const queued = this.queueRoomRun(
+      input.roomId,
+      leader,
+      `[继续目标] ${input.goal.text}\n`
+      + '用户已授权你推进这个目标（在授权轮次内）；已经完成就直接说明完成并收尾，不要为了继续而继续。',
+      'routine',
+    )
+    if (queued === undefined) {
+      // Defensive: `queueRoomRun` refused (its paused guard is the only refusal here).
+      return {
+        goal: input.goal,
+        notice: `${head}，但房间当前处于暂停：不会起跑；取消暂停后在房间里发一条消息，就能开始自动续跑。`,
+        started: false,
+      }
+    }
+    const used = (input.goal.authorization?.roundsUsed ?? 0) + 1
+    const goal: RoomGoal = {
+      ...input.goal,
+      authorization: input.goal.authorization === undefined
+        ? undefined
+        : { ...input.goal.authorization, roundsUsed: used },
+      // Legacy mirror: the loop counter older readers watched.
+      continuations: used,
+      stalledRounds: 0,
+      updatedAt: nowIso(),
+    }
+    return { goal, notice: `${head}，自动续跑 ${used}/${total}：${short}（可在面板暂停）`, started: true }
+  }
+
+  /**
+   * USER-ONLY: grant automatic continuation for this room's goal.
+   *
+   * Carries no `actorSessionId` at all, which is what keeps a Bot out: the panel is the only
+   * caller. This is the one act that turns a Bot's proposed goal (or a paused one) into work
+   * the plugin may continue without a new user message — and it starts round 1 immediately
+   * (see `startFirstAuthorizedRound`).
+   */
+  async authorizeRoomGoal(input: {
+    readonly roomId: string
+    readonly maxRounds?: number | undefined
+  }): Promise<{ readonly ok: boolean; readonly goal?: RoomGoal | undefined; readonly reason?: string | undefined }> {
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room === undefined) return { ok: false, reason: '房间不存在。' }
+    if (room.goal === undefined) return { ok: false, reason: '本房间还没有目标，先设定目标再授权。' }
+    const authorized = authorizeGoal(room.goal, {
+      now: nowIso(),
+      ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
+    })
+    this.patchRoom(input.roomId, r => ({ ...r, goal: authorized }))
+    const started = this.startFirstAuthorizedRound({ roomId: input.roomId, goal: authorized, verb: '授权' })
+    if (started.goal !== authorized) this.patchRoom(input.roomId, r => ({ ...r, goal: started.goal }))
+    this.recordNotice(input.roomId, started.notice)
+    // Nudge only after the counted round is persisted, so the settle side cannot race the write.
+    if (started.started) this.executor?.nudge()
+    return { ok: true, goal: started.goal }
+  }
+
+  /** USER-ONLY: pause this room's goal; no automatic continuation until an explicit resume. */
+  async pauseRoomGoal(input: {
+    readonly roomId: string
+  }): Promise<{ readonly ok: boolean; readonly goal?: RoomGoal | undefined; readonly reason?: string | undefined }> {
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room === undefined) return { ok: false, reason: '房间不存在。' }
+    if (room.goal === undefined) return { ok: false, reason: '本房间还没有目标。' }
+    const goal = pauseGoal(room.goal, nowIso())
     this.patchRoom(input.roomId, r => ({ ...r, goal }))
+    this.recordNotice(input.roomId, '目标已暂停：不会自动续跑，等你确认后再继续。')
     return { ok: true, goal }
+  }
+
+  /**
+   * USER-ONLY: resume a paused goal, starting its next authorized round immediately.
+   *
+   * A grant with rounds left is kept as-is (resume is not a top-up); a spent/expired grant is
+   * replaced with a fresh one, because resuming IS an explicit user authorization. Either way
+   * the resumed round is queued now unless the room has live work / is paused (the shared
+   * helper owns those cases and the single count of that round).
+   */
+  async resumeRoomGoal(input: {
+    readonly roomId: string
+    readonly maxRounds?: number | undefined
+  }): Promise<{ readonly ok: boolean; readonly goal?: RoomGoal | undefined; readonly reason?: string | undefined }> {
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room === undefined) return { ok: false, reason: '房间不存在。' }
+    if (room.goal === undefined) return { ok: false, reason: '本房间还没有目标。' }
+    const resumed = resumeGoal(room.goal, {
+      now: nowIso(),
+      ...(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : {}),
+    })
+    this.patchRoom(input.roomId, r => ({ ...r, goal: resumed }))
+    const started = this.startFirstAuthorizedRound({ roomId: input.roomId, goal: resumed, verb: '继续' })
+    if (started.goal !== resumed) this.patchRoom(input.roomId, r => ({ ...r, goal: started.goal }))
+    this.recordNotice(input.roomId, started.notice)
+    if (started.started) this.executor?.nudge()
+    return { ok: true, goal: started.goal }
   }
 
   /**
@@ -4401,27 +4901,73 @@ export class AgentCommunityService extends TypertRemoteService {
       }
     }
 
-    // 2. The room's goal: continue while there is progress, stall out when there is not.
+    // 2. The room's goal: continue ONLY inside a live user grant; otherwise stall or pause.
+    //
+    // THE GATE IS THE POINT. `active` alone is not permission to start a run: a Bot can only
+    // PROPOSE a goal, and a goal continues itself only while the user's grant
+    // (`authorization`, user-only) still has rounds. Without this the plugin queued a
+    // `[继续目标]` run for any tool-using turn, which is how a DM bot kept working for half an
+    // hour with no user message.
     const goal = room.goal
     if (goal === undefined || goal.status !== 'active') return
     const leader = room.directBotId !== undefined ? room.directBotId : this.leaderOfRoom(run.roomId)
     if (leader !== run.botId) return
+    // The user's pause covers automatic runs too: a paused room never continues itself.
+    if (room.paused === true) return
 
-    if (toolCalls > 0 && shouldContinueGoal({
-      goal,
-      goalDriven: true,
-      hadToolActivity: true,
-      continuations: goal.continuations ?? 0,
-    })) {
+    const nowMs = Date.now()
+    const budget = authorizedRoundBudget(goal)
+    if (budget === undefined || !goalAuthorizationUsable(goal, nowMs)) {
+      // An "active" goal with no user grant cannot be actionable: older persisted goals
+      // predate the grant, and a Bot's own set lands as 'proposed'. Pause instead of burning
+      // a model call on work the user never allowed.
       this.patchRoom(run.roomId, r => ({
         ...r,
-        goal: { ...goal, continuations: (goal.continuations ?? 0) + 1, stalledRounds: 0, updatedAt: nowIso() },
+        goal: { ...goal, status: 'paused', updatedAt: nowIso() },
       }))
-      this.queueRoomRun(
+      this.recordNotice(run.roomId, '目标已暂停：没有你的授权，自动续跑不会发生。请到面板确认或授权。')
+      return
+    }
+    if (budget.remaining <= 0) {
+      // THE BUDGET IS THE GUARANTEE: N authorized rounds, then the goal asks again. Pausing
+      // here (not after the stall counter) is what makes the number the user granted final.
+      this.patchRoom(run.roomId, r => ({
+        ...r,
+        goal: { ...goal, status: 'paused', updatedAt: nowIso() },
+      }))
+      this.recordNotice(
+        run.roomId,
+        `目标已暂停：自动续跑已达授权上限 ${budget.maxRounds} 轮，需要继续请到面板再授权。`,
+      )
+      return
+    }
+
+    if (toolCalls > 0 && goalContinuationDecision({ goal, hadToolActivity: true, nowMs })) {
+      const roundsUsed = budget.roundsUsed + 1
+      const nextGoal: RoomGoal = {
+        ...goal,
+        authorization: goal.authorization === undefined
+          ? undefined
+          : { ...goal.authorization, roundsUsed },
+        // Legacy mirror: older readers/UI watched `continuations`; the grant is the authority.
+        continuations: roundsUsed,
+        stalledRounds: 0,
+        updatedAt: nowIso(),
+      }
+      // Queue FIRST: if the room was paused/deleted between the check and here, the guard in
+      // `queueRoomRun` returns undefined and no budget is spent on a run that does not exist.
+      const queued = this.queueRoomRun(
         run.roomId,
         run.botId,
         `[继续目标] ${goal.text}\n上一轮有实际进展，请继续推进；已经完成就调用 finish_task 收尾，不要为了继续而继续。`,
         'routine',
+      )
+      if (queued === undefined) return
+      this.patchRoom(run.roomId, r => ({ ...r, goal: nextGoal }))
+      this.recordNotice(
+        run.roomId,
+        `自动续跑 ${roundsUsed}/${budget.maxRounds}：${goal.text.slice(0, 80)}`
+        + `${goal.text.length > 80 ? '…' : ''}（可在面板暂停）`,
       )
       this.executor?.nudge()
       return
@@ -4996,6 +5542,9 @@ const REMOTE_METHODS = [
   // Compaction: replace a room's older messages with one summary so every later turn carries
   // the summary + the recent tail instead of the whole transcript.
   'compactRoom',
+  // Room goal authorization (S3): the panel is the user's only way to grant, pause or resume
+  // automatic continuation. A Bot's own tool can only PROPOSE a goal, never authorize it.
+  'authorizeRoomGoal', 'pauseRoomGoal', 'resumeRoomGoal',
 ] as const
 
 for (const method of REMOTE_METHODS) {

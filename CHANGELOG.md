@@ -1,3 +1,42 @@
+## Unreleased — stability batch 2 (S3 auto-run authorization, S4 publish policy)
+
+修复用户反馈的问题 3（Bot 单聊没收到消息却自己启动）与问题 5（群聊仍重复回答）；
+只改插件源码，不改任何 Bot；自动运行默认关、成员回答继续可见（用户决策）。
+
+### S3 · 自动运行授权闸门
+- `RoomGoal` 新增 `proposed` 状态与 `authorization`（仅用户可写）。Bot 的
+  `agent_community_goal set/resume` 只产生「目标建议」，用户确认并授权后才可能自动续跑；
+  Bot 更新目标文本不得重置预算。
+- 新增用户 RPC `authorizeRoomGoal` / `pauseRoomGoal` / `resumeRoomGoal` + 面板
+  `GoalStrip`（目标建议 / 允许自动续跑 3 轮 / 暂停 / 继续）。授权时若房间空闲，立即
+  起跑第 1 轮并计入预算；有运行中的回合则等其结算后续跑；暂停房间只授权不起跑。
+- `afterRunSettled` 的续跑改为「用户授权 + 未达轮次上限 + 有工具进展」三重判定；
+  达上限/无授权/授权过期 → 目标暂停并写可见 notice；没有授权的 goal 绝不 queue run。
+- 房间 `paused` 现在挡住所有 run 创建来源（用户消息之外也挡定时/续跑/a2a/群派工）。
+- 插件注入的 `bots:goal` 提示词同步新语义（Bot 不得声称"系统会自动排下一轮"）。
+- 新增 `tests/room-goal.test.ts`（27 个纯函数用例，含"每轮更新文本仍只跑 3 轮"的事故回放）。
+
+### S4 · 发布口径与去重（成员产出继续可见）
+- 新增 `publish-policy.ts`：`visible` run 发布自身回答；`internal` run（leader 的集成/
+  汇总回合）不发布正文；`finish_task` 的 report 作为该 run 的唯一交付，不再额外推一条
+  无 runId 的 ledger 行。
+- `settleRun` 统一交付：一次 run 最多一条消息；可见正文优先、无正文时用 report；
+  按 runId 幂等；internal 交付补一条带 runId/用时的 bot-text，重启前后一致。
+- `ledger-projection` 真正接上发布口径：internal run 的流式行、assistant/tool committed
+  行都不渲染；`INTERNAL_RUN_ORIGINS` 从死常量变为实际使用的 fallback。
+- `group-task`：leader 集成回合 `internal:true`，被 leader 指派的成员回合 `visible`
+  （用户要求成员产出继续可见）；a2a / 用户 run 保持 visible。
+- `routing`：角色关键词平票不再唤醒多个 bot；leader 在平票中则只唤醒 leader，否则取首个
+  命中。显式 @all/集合词/写出多个名字/问候仍按原规则。
+- 新增 `tests/publish-policy.test.ts`（13 个纯函数用例）。
+
+### 验证
+- `node --test tests/*.test.ts`：**58/58 通过**（selection 9 + ledger-window 9 +
+  room-goal 27 + publish-policy 13）。
+- UI/core typecheck（过滤宿主缺失 d.ts 噪声）：0 真实错误。
+- 四包 `tsdown --no-dts` 构建通过；`node scripts/check-build.mjs --allow-dirty` = OK。
+- 本轮只同步 GitHub 源码；未发布 npm、未更新插件市场（等用户通知）。
+
 ## Unreleased — stability batch 1 (S1 selection arbitration, S2 reply visibility)
 
 修复用户反馈的两个稳定性问题；只改插件源码，不改任何 Bot。

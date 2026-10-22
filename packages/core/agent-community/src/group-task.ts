@@ -59,8 +59,21 @@ export interface GroupTaskState {
 
 /** What the driver needs from the community service. */
 export interface GroupTaskAccessor {
-  /** Enqueue a run for a bot in a room. Returns false when the bot cannot run. */
-  enqueueRun(roomId: string, botId: string, prompt: string): boolean
+  /**
+   * Enqueue a run for a bot in a room. Returns false when the bot cannot run.
+   *
+   * `internal` marks a turn that exists to move work between bots rather than to speak
+   * to the user (the leader's integrate turn). Such a run is allowed to run and to call
+   * `finish_task`, but its own prose must not be published as an answer — the user's
+   * decision is that members stay visible and the integration restatement does not.
+   * Omitted keeps the normal visible behaviour.
+   */
+  enqueueRun(
+    roomId: string,
+    botId: string,
+    prompt: string,
+    options?: { readonly internal?: boolean | undefined },
+  ): boolean
   /** Room membership, or undefined when the room is gone. */
   roomById(roomId: string): { readonly memberIds: readonly string[]; readonly directBotId?: string | undefined } | undefined
   /** The room's leader, falling back to the first member. */
@@ -154,7 +167,19 @@ export class GroupTaskDriver {
 
     const leader = this.accessor.leaderOf(input.roomId)
     if (leader === undefined) return { leaderRuns: false }
-    const ok = this.accessor.enqueueRun(input.roomId, leader, this.integratePrompt(input.roomId, state))
+    // ── THE INTEGRATION TURN IS COORDINATION, NOT AN ANSWER ─────────────────────
+    //
+    // The members' own replies are already in the room (that is the user's decision:
+    // their output stays visible). This turn reads those replies and decides whether the
+    // task is done; if it has something to deliver, that is `finish_task`'s report, which
+    // the settle path publishes once. Rendering the turn's prose as well is what the user
+    // saw as "the bot answered twice" — so it runs internal.
+    const ok = this.accessor.enqueueRun(
+      input.roomId,
+      leader,
+      this.integratePrompt(input.roomId, state),
+      { internal: true },
+    )
     if (ok) state.runningBotIds.add(leader)
     this.save(input.roomId, state)
     return { leaderRuns: ok }
@@ -242,7 +267,9 @@ export class GroupTaskDriver {
       // allowed to perceive.
       if (!members.has(botId)) { refused.push(botId); continue }
       const prompt = this.memberPrompt(input.task, 'leader 分派')
-      if (!this.accessor.enqueueRun(input.roomId, botId, prompt)) { refused.push(botId); continue }
+      // A member's answer is visible on purpose (user decision 2): the user wants to see
+      // who did what, so an assigned turn publishes like any other answer.
+      if (!this.accessor.enqueueRun(input.roomId, botId, prompt, { internal: false })) { refused.push(botId); continue }
       state.runningBotIds.add(botId)
       state.assignments.push({ botId, task: input.task, at: new Date().toISOString(), status: 'running' })
       assigned.push(botId)
@@ -301,7 +328,8 @@ export class GroupTaskDriver {
         continue
       }
       const prompt = this.memberPrompt(item.task, 'leader 派工')
-      if (!this.accessor.enqueueRun(input.roomId, item.botId, prompt)) {
+      // Same rule as `assign`: dispatched work is the member's own visible contribution.
+      if (!this.accessor.enqueueRun(input.roomId, item.botId, prompt, { internal: false })) {
         refused.push(item.botId)
         continue
       }

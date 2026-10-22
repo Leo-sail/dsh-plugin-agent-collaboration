@@ -175,6 +175,13 @@ const contribution = {
     descriptor('loadSkill', [param('roomId', str()), param('name', str())]),
     // Fork: copy a bot into a new bot + its own direct room
     descriptor('copyBot', [param('botId', str()), param('sourceRoomId', str()), param('upToMessageId', str())]),
+    // S3: the user's authorization gate for a room's goal. The goal itself is read from
+    // `snapshot.rooms[].goal`; these three are the only ways its status changes. A goal that
+    // is not authorized must never queue automatic rounds, so the client must be able to
+    // grant / pause / resume it explicitly.
+    descriptor('authorizeRoomGoal', [param('input', obj('AuthorizeRoomGoalRequest'))]),
+    descriptor('pauseRoomGoal', [param('input', obj('PauseRoomGoalRequest'))]),
+    descriptor('resumeRoomGoal', [param('input', obj('ResumeRoomGoalRequest'))]),
   ],
 }
 
@@ -609,6 +616,11 @@ export function apply(ctx: ClientContext): void {
     listSkills: (roomId) => call('listSkills', roomId),
     loadSkill: (roomId, name) => call('loadSkill', roomId, name),
     copyBot: (botId, sourceRoomId, upToMessageId) => call('copyBot', botId, sourceRoomId, upToMessageId),
+    // S3: goal authorization. The host validates the transition and answers `ok:false` with
+    // a reason the strip paints; nothing is decided client-side.
+    authorizeRoomGoal: (input) => call('authorizeRoomGoal', input),
+    pauseRoomGoal: (input) => call('pauseRoomGoal', input),
+    resumeRoomGoal: (input) => call('resumeRoomGoal', input),
   }
 
   // Self-contained panel: the entry declares no child slot, so it consumes no

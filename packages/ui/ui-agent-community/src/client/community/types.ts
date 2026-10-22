@@ -21,6 +21,7 @@ import type {
   DeleteRoomRequest,
   GroupProposal,
   RetryBotRunRequest,
+  RoomGoal,
   SendRoomMessageRequest,
   UpdateRoomRequest,
 } from '@dsh-plugin-agent-community/agent-community'
@@ -144,6 +145,29 @@ export interface CommunityRemote {
   reconcileSessionVisibility(): Promise<void>
   /** Clear a room's transcript, cancel stale runs, and clear its ledger. */
   clearMessages(roomId: string): Promise<void>
+  /**
+   * S3: grant THIS room's goal a bounded number of automatic continuation rounds.
+   *
+   * The host owns the decision (it refuses when the room or its goal is gone, and it clamps
+   * `maxRounds`) and answers with the updated goal when it accepts. The goal itself is read
+   * from `snapshot.rooms[].goal`; this is the ONLY way to make a proposed goal runnable, so a
+   * grant is always an explicit user act.
+   */
+  authorizeRoomGoal(input: { roomId: string; maxRounds?: number }): Promise<{
+    ok: boolean
+    goal?: RoomGoal
+    reason?: string
+  }>
+  /**
+   * S3: stop a goal from queuing further automatic rounds.
+   *
+   * Pausing is not finishing: the goal text and its progress stay, and `resumeRoomGoal`
+   * re-arms it (bounds are enforced by the host). A proposed goal is paused by declining
+   * the proposal, which is what the strip's 「先不启用」 does.
+   */
+  pauseRoomGoal(input: { roomId: string }): Promise<{ ok: boolean; reason?: string }>
+  /** S3: re-arm a paused goal after the user asked it to continue. */
+  resumeRoomGoal(input: { roomId: string }): Promise<{ ok: boolean; reason?: string }>
   /**
    * Record one system notice as a durable grey divider row inside that room's transcript.
    *

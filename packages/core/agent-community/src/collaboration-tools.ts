@@ -70,16 +70,40 @@ export interface CollaborationToolDeps {
   /** Read THIS room's goal (never another room's). */
   roomGoal(input: { roomId: string }): {
     readonly text: string
-    readonly status: 'active' | 'paused' | 'done'
+    /** 'proposed' = a Bot's suggestion awaiting the user; it never auto-continues. */
+    readonly status: 'active' | 'paused' | 'done' | 'proposed'
     readonly updatedAt: string
+    readonly authorization?: {
+      readonly maxRounds: number
+      readonly roundsUsed: number
+    } | undefined
   } | undefined
-  /** Create / edit / pause / resume / finish THIS room's goal. */
+  /**
+   * Create / edit / pause / resume / finish THIS room's goal.
+   *
+   * A Bot's `set`/`resume` lands as a PROPOSAL ('proposed') unless the goal is already active
+   * under the user's grant; the caller must report that outcome honestly instead of claiming
+   * the goal is running.
+   */
   setRoomGoal(input: {
     roomId: string
     botId: string
     text?: string | undefined
     status?: 'active' | 'paused' | 'done' | undefined
-  }): Promise<{ readonly ok: boolean; readonly reason?: string | undefined }>
+    action?: 'set' | 'resume' | 'pause' | 'done' | undefined
+  }): Promise<{
+    readonly ok: boolean
+    readonly reason?: string | undefined
+    readonly goal?: {
+      readonly text: string
+      readonly status: 'active' | 'paused' | 'done' | 'proposed'
+      readonly updatedAt: string
+      readonly authorization?: {
+        readonly maxRounds: number
+        readonly roundsUsed: number
+      } | undefined
+    } | undefined
+  }>
   /** Queue work for several members and return immediately (§4.1). */
   dispatch(input: {
     roomId: string
@@ -437,14 +461,19 @@ export function registerCollaborationTools(
   add({
     name: 'agent_community_goal',
     description:
-      'Set, change, pause, resume or finish the goal of the room you are in. Only the room\'s '
-      + 'leader (or the user) may change it in a group; in a 1:1 the bot may. One room only: '
-      + 'the room is taken from your own session, and another room\'s goal is unreachable.',
+      'Read, propose, pause or finish the goal of the room you are in. Only the room\'s leader '
+      + '(or the user) may change it in a group; in a 1:1 the bot may. AUTO-RUN IS THE USER\'S '
+      + 'DECISION: your `set`/`resume` is recorded as a PROPOSAL (status "proposed") — it becomes '
+      + 'the room\'s active goal only after the user confirms it in the panel. The plugin then '
+      + 'continues the goal automatically for at most the number of rounds the user granted '
+      + '(default 3); update the goal text with progress as you work — that never resets the '
+      + 'budget. One room only: the room is taken from your own session.',
     properties: {
       action: {
         type: 'string',
         enum: ['get', 'set', 'pause', 'resume', 'done'],
-        description: 'get = 读当前房间目标；set = 设定/改写；pause/resume/done = 暂停/继续/完成。',
+        description: 'get = 读当前房间目标；set = 设定/改写（单聊中会落为待用户确认的提议）；'
+          + 'pause/resume/done = 暂停/继续/完成。',
       },
       text: { type: 'string', description: 'action=set 时的目标内容（一句话）。' },
     },
@@ -461,28 +490,61 @@ export function registerCollaborationTools(
         if (goal === undefined) {
           return { value: { ok: true, goal: null }, text: '本房间目前没有设定目标。' }
         }
-        const label = goal.status === 'active' ? '进行中' : goal.status === 'paused' ? '已暂停' : '已完成'
+        const label = goal.status === 'active' ? '进行中'
+          : goal.status === 'paused' ? '已暂停'
+            : goal.status === 'proposed' ? '待用户确认' : '已完成'
+        const budget = goal.authorization === undefined
+          ? ''
+          : `；用户已授权自动续跑：已用 ${goal.authorization.roundsUsed}/${goal.authorization.maxRounds} 轮`
         return {
           value: { ok: true, goal },
-          text: `本房间目标（${label}）：${goal.text}（最后更新 ${goal.updatedAt}）`,
+          text: `本房间目标（${label}）：${goal.text}（最后更新 ${goal.updatedAt}）${budget}`,
         }
       }
       if (action === 'set' && text === '') {
         return { value: { ok: false }, text: 'action=set 需要给出 text（一句话的目标）。' }
       }
-      const status = action === 'set' ? 'active' : action === 'resume' ? 'active' : action === 'pause' ? 'paused' : 'done'
+      const status = action === 'pause' ? 'paused' : action === 'done' ? 'done' : 'active'
       const result = await deps.setRoomGoal({
         roomId: who.roomId,
         botId: who.botId,
         ...(action === 'set' ? { text } : {}),
         status,
+        action: action === 'pause' || action === 'done' || action === 'resume' ? action : 'set',
       })
       if (!result.ok) {
         return { value: { ok: false }, text: result.reason ?? '目标没有改动。' }
       }
-      const verb = action === 'set' ? '已设定本房间目标' : action === 'pause' ? '已暂停本房间目标'
-        : action === 'resume' ? '已继续本房间目标' : '已把本房间目标标记为完成'
-      return { value: { ok: true, status }, text: `${verb}。它只对这个房间生效。` }
+      const resulting = result.goal?.status ?? status
+      const budget = result.goal?.authorization
+      // ── REPORT THE OUTCOME HONESTLY ──────────────────────────────────────────
+      //
+      // A "proposed" result is NOT an active goal: saying "已设定" made the model believe it
+      // had granted itself automatic continuation, which is exactly the loop the user
+      // reported ("it starts working without me"). The wording below is what the model reads.
+      if (resulting === 'proposed') {
+        const last = result.goal?.text ?? text
+        return {
+          value: { ok: true, status: 'proposed', goal: result.goal },
+          text: '已提交目标建议，等待用户在面板确认；在确认前不会自动续跑。'
+            + `目标建议：${last}。本轮请按用户当前的要求正常收尾，不要假设它会自动继续。`,
+        }
+      }
+      if (resulting === 'active') {
+        const line = budget === undefined
+          ? '用户尚未授权轮次，不会自动续跑。'
+          : `用户已授权自动续跑：已用 ${budget.roundsUsed}/${budget.maxRounds} 轮。`
+        return {
+          value: { ok: true, status: 'active', goal: result.goal },
+          text: action === 'set'
+            ? `已更新目标文本（${line}）。它只对这个房间生效。`
+            : `本房间目标已是进行中（${line}）。`,
+        }
+      }
+      if (resulting === 'paused') {
+        return { value: { ok: true, status: 'paused', goal: result.goal }, text: '已暂停本房间目标：不会自动续跑。' }
+      }
+      return { value: { ok: true, status: 'done', goal: result.goal }, text: '已把本房间目标标记为完成。' }
     },
   })
 

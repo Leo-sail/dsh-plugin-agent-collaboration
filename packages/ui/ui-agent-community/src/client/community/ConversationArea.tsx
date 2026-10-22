@@ -13,6 +13,7 @@ import { useState } from 'react'
 import type { CommunityRemote, ModelGroup } from './types.ts'
 import { describe } from './types.ts'
 import { css } from '../styles.ts'
+import { GoalStrip } from './GoalStrip.tsx'
 import { BotConversationPanel } from '../conversation/BotConversationPanel.tsx'
 import type { BotConversationPanelProps } from '../conversation/BotConversationPanel.tsx'
 import type { AttachmentItem } from '../conversation/types.ts'
@@ -112,7 +113,26 @@ export function ConversationArea({
           Use gridRow:'2/-1' so the panel always fills all remaining rows
           regardless of whether the error div is present; height:100% is
           correct for a grid child (flex:1 does nothing here). */}
-      <div style={{ gridRow: '2 / -1', height: '100%', minHeight: 0, overflow: 'hidden' }}>
+      <div style={{
+        gridRow: '2 / -1',
+        height: '100%',
+        minHeight: 0,
+        overflow: 'hidden',
+        // Two rows: the goal strip (auto) and the transcript (all the rest). A GRID, not a flex
+        // column, so the panel below stays a direct child and its own `height: 100%` resolves to
+        // the remaining track instead of the whole wrapper. The strip is a sibling of the
+        // scroller, never a row inside it: authorizing/pausing must not require scrolling.
+        display: 'grid',
+        gridTemplateRows: 'auto minmax(0, 1fr)',
+      }}>
+        {/* S3: the room goal's authorization state and the user's controls. Renders nothing
+            when the room has no goal, or when the goal is done. The wrapping div is load-bearing:
+            it keeps row 1 of this grid occupied even when the strip renders nothing, so the
+            transcript below always lands in the `minmax(0, 1fr)` row instead of drifting into the
+            auto row (where its own `height: 100%` would collapse). */}
+        <div style={{ minWidth: 0 }}>
+          <GoalStrip room={room} remote={remote} onReload={onReload} onNotice={onNotice} />
+        </div>
         <BotConversationPanel
           key={`${roomId}#${transcriptEpoch}`}
           remote={remote}

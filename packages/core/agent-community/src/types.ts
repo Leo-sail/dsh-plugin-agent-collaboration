@@ -305,6 +305,16 @@ export interface BotRun {
   readonly submission?: 'pending' | 'submitting' | 'submitted'
   readonly rootMessageId?: BotMessageId | undefined
   readonly round?: number | undefined
+  /**
+   * Whether this run's turn may speak in the room.
+   *
+   * Automatic machinery (a peer hand-off, a member report, a goal continuation) must be able
+   * to run without the panel presenting it as the bot answering the user. `visible` keeps the
+   * normal transcript; `internal` means the run exists but its rows are coordination only.
+   * Defined here so the producer (this service) and the consumer (the ledger projection) share
+   * one type; absent keeps the historical origin-based behaviour.
+   */
+  readonly publish?: 'visible' | 'internal' | undefined
 }
 
 export interface BotCommunitySnapshot {
@@ -727,6 +737,29 @@ export interface RoomTaskState {
 }
 
 /**
+ * The user's grant that lets a room goal continue itself.
+ *
+ * AUTO-RUN IS OPT-IN, NEVER INFERRED. A goal is data a bot can write, but a continuation
+ * spends the user's tokens without a new message, so the authority for it must be a separate,
+ * user-only record. A bot may PROPOSE a goal (status 'proposed'); only this object — written by
+ * the user's own act (panel confirm / resume) — lets `afterRunSettled` queue the next round.
+ *
+ * `roundsUsed` is spent by the plugin, never by a goal edit: a bot that updates its progress
+ * text every round must not reset the budget (that reset was the unbounded loop this field
+ * exists to stop).
+ */
+export interface RoomGoalAuthorization {
+  readonly grantedBy: 'user'
+  /** How many automatic continuation rounds the user allowed for this goal. */
+  readonly maxRounds: number
+  /** Automatic rounds already queued against this grant. */
+  readonly roundsUsed: number
+  readonly grantedAt: string
+  /** Optional expiry; past it the grant is dead and the goal must be re-authorized. */
+  readonly expiresAt?: string | undefined
+}
+
+/**
  * One room's objective — the thing the bots in THAT room are working toward.
  *
  * Keyed by the room and nothing else, which is what keeps the user's four isolation rules
@@ -735,12 +768,18 @@ export interface RoomTaskState {
  */
 export interface RoomGoal {
   readonly text: string
-  readonly status: 'active' | 'paused' | 'done'
+  /**
+   * `proposed` is a Bot's suggestion and is NOT actionable: it neither continues itself nor
+   * counts as the room's active objective until the user authorizes it.
+   */
+  readonly status: 'active' | 'paused' | 'done' | 'proposed'
   readonly createdAt: string
   readonly updatedAt: string
   /** The bot that set it; absent means the user did. */
   readonly ownerBotId?: BotId | undefined
-  /** Goal-driven runs queued since the last user message (bounds the auto-continuation). */
+  /** User grant for automatic continuation; absent = no auto-run, ever. */
+  readonly authorization?: RoomGoalAuthorization | undefined
+  /** LEGACY counter kept for older persisted goals; new decisions use `authorization.roundsUsed`. */
   readonly continuations?: number | undefined
   /** Consecutive goal-driven rounds that produced nothing — the stall guard. */
   readonly stalledRounds?: number | undefined
