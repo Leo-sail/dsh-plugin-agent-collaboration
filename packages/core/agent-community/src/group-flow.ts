@@ -24,6 +24,12 @@ import type {
   PendingGroupProposal, ProposeGroupRequest, RoomTaskState,
 } from './types.ts'
 import type { LlmStream } from './skills-profile.ts'
+import {
+  applyTaskBoardOperation,
+  TASK_BOARD_SCHEMA_VERSION,
+  type TaskBoardContext,
+  type TaskBoardOperation,
+} from './task-board.ts'
 import { resolveRoomLeader } from './room-leader.ts'
 import {
   buildCapabilityCard,
@@ -665,36 +671,29 @@ export class GroupFlowService {
       maxRounds: DEFAULT_MAX_ROUNDS,
       assignments: [],
       ...(objective !== undefined ? { objective } : {}),
+      // OP-07: every board is versioned from birth; group-flow (the writer below) bumps it.
+      schemaVersion: TASK_BOARD_SCHEMA_VERSION,
+      version: 0,
+      updatedAt: this.port.now(),
     }
     this.port.saveRoom({ ...room, taskState: state, updatedAt: this.port.now() })
     return state
   }
 
-  /** Leader-only: put one member on the board. */
+  /** Leader-only: put one member on the board (one atomic, version-checked assignment). */
   assignTask(input: AssignRoomTaskInput): RoomTaskState {
     const { room, state } = this.leaderBoard(input.roomId, input.actorBotId)
     const bot = this.port.getBot(input.botId)
     if (bot === undefined) throw new Error(`Bot "${input.botId}" not found`)
-    const next: RoomTaskState = {
-      ...state,
-      assignments: [...state.assignments, {
-        id: this.port.nextId(),
-        botId: bot.id,
-        task: input.task,
-        at: this.port.now(),
-        status: 'assigned',
-      }],
-    }
-    this.port.saveRoom({ ...room, taskState: next, updatedAt: this.port.now() })
-    return next
+    return this.applyBoard(room, state, { kind: 'assign', botId: bot.id, task: input.task }, 'leader', input.actorBotId)
   }
 
   /**
    * Report progress on one row.
    *
-   * A member may only write its OWN row; the leader may write any row. Anyone else
-   * is refused — the board is the shared record of who promised what, and letting a
-   * member edit another's row makes it worthless as evidence.
+   * A member may only write its OWN row; the leader may write any row. The authority rule is
+   * enforced again inside `task-board.ts` (the single write contract); the checks here keep the
+   * historical error texts and the "not found" semantics unchanged.
    */
   reportTask(input: ReportRoomTaskInput): RoomTaskState {
     const room = this.port.getRoom(input.roomId)
@@ -710,34 +709,58 @@ export class GroupFlowService {
         `Bot "${input.actorBotId}" may not edit the entry assigned to "${entry.botId}"`,
       )
     }
-    const assignments = [...state.assignments]
-    assignments[index] = {
-      ...entry,
-      status: input.status ?? 'working',
-      report: { text: input.text, at: this.port.now() },
-    }
-    const next: RoomTaskState = { ...state, assignments }
-    this.port.saveRoom({ ...room, taskState: next, updatedAt: this.port.now() })
-    return next
+    // `blocked` (the legacy input status) maps onto the same persisted vocabulary.
+    const status = input.status === undefined
+      ? 'working'
+      : input.status === 'blocked' ? 'failed' : input.status
+    return this.applyBoard(
+      room,
+      state,
+      { kind: 'report', taskId: input.taskId, botId: entry.botId, text: input.text, status },
+      isLeader ? 'leader' : 'member',
+      input.actorBotId,
+    )
   }
 
   /** Leader-only: close the round. Exhausting `maxRounds` finalises the board (§5.5). */
   advanceRound(input: TaskBoardActor): RoomTaskState {
     const { room, state } = this.leaderBoard(input.roomId, input.actorBotId)
-    const round = state.round + 1
-    const next: RoomTaskState = round > state.maxRounds
-      ? { ...state, round, finished: { report: `已达轮次上限 ${state.maxRounds}，收尾`, at: this.port.now() } }
-      : { ...state, round }
-    this.port.saveRoom({ ...room, taskState: next, updatedAt: this.port.now() })
-    return next
+    return this.applyBoard(room, state, { kind: 'advance' }, 'leader', input.actorBotId)
   }
 
   /** Leader-only: the board's final report (§24.8 — this is what the user reads). */
   finishTask(input: TaskBoardActor & { report: string }): RoomTaskState {
     const { room, state } = this.leaderBoard(input.roomId, input.actorBotId)
-    const next: RoomTaskState = { ...state, finished: { report: input.report, at: this.port.now() } }
-    this.port.saveRoom({ ...room, taskState: next, updatedAt: this.port.now() })
-    return next
+    return this.applyBoard(room, state, { kind: 'finish', report: input.report }, 'leader', input.actorBotId)
+  }
+
+  /**
+   * Run ONE board operation through the transaction machinery and save the resulting board once.
+   *
+   * The saved room carries the final `taskState` (with the bumped `version`/`updatedAt`) in a
+   * single replacement, so a concurrent reader never observes a half-applied transition. A
+   * refusal becomes the same kind of `Error` the old inline writers threw.
+   */
+  private applyBoard(
+    room: BotRoom,
+    state: RoomTaskState,
+    operation: TaskBoardOperation,
+    actor: 'leader' | 'member' | 'system',
+    actorBotId: string,
+  ): RoomTaskState {
+    const context: TaskBoardContext = {
+      actor,
+      actorBotId,
+      memberIds: room.memberIds,
+      // Optimistic concurrency: the board was read above; a write from a newer version wins the
+      // race and this one is refused instead of clobbering it.
+      expectedVersion: state.version ?? 0,
+      now: this.port.now(),
+    }
+    const result = applyTaskBoardOperation(state, operation, context)
+    if (!result.ok) throw new Error(result.reason)
+    this.port.saveRoom({ ...room, taskState: result.state, updatedAt: this.port.now() })
+    return result.state
   }
 
   private leaderBoard(roomId: string, actorBotId: string): { room: BotRoom; state: RoomTaskState } {

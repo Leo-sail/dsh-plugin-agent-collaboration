@@ -85,12 +85,93 @@ export function renderRoomMemory(meta: RoomMemoryMeta, entries: readonly BotMemo
   return lines.join('\n')
 }
 
+/**
+ * Serialise one entry.
+ *
+ * OP-08 extends the bracket with optional `key=value` fields: `source`, `status`, `outcome`,
+ * `confidence` (and the existing `run`). They are written in a FIXED order and only when the
+ * entry carries them, so:
+ *
+ *   · a pre-OP-08 file (no metadata) still parses — `parseRoomMemory` derives the legacy defaults;
+ *   · `stableEntryId` stays `kind + at + text`, so a lifecycle change (probation → decayed) never
+ *     changes an id and the prompt delta boundary survives it.
+ *
+ * `updatedAt` is intentionally NOT serialised: it is a runtime timestamp that only matters until
+ * the next lifecycle write, and keeping the human-readable line short matters more.
+ */
 function renderEntry(entry: BotMemoryEntry): string {
-  const run = entry.runId === undefined ? '' : ` run=${entry.runId}`
-  return `- [${entry.kind} ${entry.at}${run}] ${clip(entry.text, MAX_ENTRY_CHARS)}`
+  const fields: string[] = []
+  if (entry.runId !== undefined) fields.push(`run=${entry.runId}`)
+  if (entry.source !== undefined) fields.push(`source=${entry.source}`)
+  if (entry.status !== undefined) fields.push(`status=${entry.status}`)
+  if (entry.outcome !== undefined) fields.push(`outcome=${entry.outcome}`)
+  if (entry.confidence !== undefined && Number.isFinite(entry.confidence)) {
+    fields.push(`confidence=${Math.round(Math.min(1, Math.max(0, entry.confidence)) * 1000) / 1000}`)
+  }
+  const meta = fields.length === 0 ? '' : ` ${fields.join(' ')}`
+  return `- [${entry.kind} ${entry.at}${meta}] ${clip(entry.text, MAX_ENTRY_CHARS)}`
 }
 
-const ENTRY_RE = /^- \[(task|note) ([^\s\]]+)(?: run=([^\]]+))?\] (.*)$/u
+/** The bracket prefix: kind, timestamp, then an optional tail of `key=value` fields. */
+const ENTRY_RE = /^- \[(task|note) ([^\s\]]+)([^\]]*)\] (.*)$/u
+
+/** One metadata field inside the bracket. */
+const FIELD_RE = /(\w+)=([^\s\]]+)/gu
+
+/** Values the parser accepts for each enum field; anything else is ignored (hand-edited file). */
+const SOURCE_VALUES = new Set(['run', 'note', 'a2a', 'routine', 'unknown'])
+const STATUS_VALUES = new Set(['active', 'probation', 'decayed'])
+const OUTCOME_VALUES = new Set(['positive', 'negative', 'unknown'])
+
+/**
+ * Parse the `key=value` tail of one entry line.
+ *
+ * Unknown keys and out-of-range values are ignored rather than fatal: a human edits these files.
+ */
+function parseEntryFields(tail: string): Pick<BotMemoryEntry, 'runId' | 'source' | 'status' | 'outcome' | 'confidence'> {
+  const out: {
+    runId?: string
+    source?: NonNullable<BotMemoryEntry['source']>
+    status?: NonNullable<BotMemoryEntry['status']>
+    outcome?: NonNullable<BotMemoryEntry['outcome']>
+    confidence?: number
+  } = {}
+  FIELD_RE.lastIndex = 0
+  for (let match = FIELD_RE.exec(tail); match !== null; match = FIELD_RE.exec(tail)) {
+    const key = match[1]
+    const value = match[2]!
+    if (key === 'run') out.runId = value
+    else if (key === 'source' && SOURCE_VALUES.has(value)) out.source = value as BotMemoryEntry['source'] & string
+    else if (key === 'status' && STATUS_VALUES.has(value)) out.status = value as BotMemoryEntry['status'] & string
+    else if (key === 'outcome' && OUTCOME_VALUES.has(value)) out.outcome = value as BotMemoryEntry['outcome'] & string
+    else if (key === 'confidence') {
+      const parsed = Number(value)
+      if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) out.confidence = parsed
+    }
+  }
+  return out
+}
+
+/**
+ * Fill the lifecycle defaults for a legacy (or partially hand-edited) line.
+ *
+ * LEGACY COMPATIBILITY, stated once and tested: before OP-08 every run-backed task line was a
+ * promotion candidate, so an old task line WITH a run id parses as `run/active/positive` and
+ * keeps its old learning behaviour. A task line without a run id is `unknown/active/unknown`,
+ * a note is `note/active/unknown`. Nothing becomes `probation` merely because it is old.
+ */
+function withLegacyDefaults(
+  entry: BotMemoryEntry,
+): BotMemoryEntry {
+  const status = entry.status ?? 'active'
+  const source = entry.source ?? (
+    entry.runId !== undefined ? 'run' : entry.kind === 'note' ? 'note' : 'unknown'
+  )
+  const outcome = entry.outcome ?? (
+    entry.kind === 'task' && entry.runId !== undefined ? 'positive' : 'unknown'
+  )
+  return { ...entry, source, status, outcome }
+}
 
 /**
  * FNV-1a (32-bit) over UTF-16 code units — a small, dependency-free stable hash.
@@ -125,6 +206,11 @@ export function stableEntryId(input: {
  * A line that parses twice (the same entry rendered twice, e.g. a retried append) yields
  * ONE entry: the id is content-derived, so duplicates would otherwise collide. Dropping
  * the repeat is the only stable answer — the two lines are indistinguishable.
+ *
+ * OP-08: the bracket may carry lifecycle metadata (`run`, `source`, `status`, `outcome`,
+ * `confidence`). A pre-OP-08 line has none and gets the documented legacy defaults
+ * ({@link withLegacyDefaults}); either way the id — and therefore the prompt delta boundary —
+ * depends only on kind + at + text.
  */
 export function parseRoomMemory(text: string): BotMemoryEntry[] {
   const out: BotMemoryEntry[] = []
@@ -138,13 +224,13 @@ export function parseRoomMemory(text: string): BotMemoryEntry[] {
     const id = stableEntryId({ kind, at, text: text_ })
     if (seen.has(id)) continue
     seen.add(id)
-    out.push({
+    out.push(withLegacyDefaults({
       id,
       kind,
       at,
-      ...(match[3] !== undefined ? { runId: match[3] } : {}),
+      ...parseEntryFields(match[3] ?? ''),
       text: text_,
-    })
+    }))
   }
   return out
 }

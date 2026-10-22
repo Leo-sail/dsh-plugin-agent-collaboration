@@ -23,6 +23,7 @@
  * @module
  */
 import type { BotId, BotMemoryEntry, BotMemoryRecord, BotRoomId } from './types.ts'
+import { isInjectable } from './memory-lifecycle.ts'
 
 /** Entries kept per (room, bot). */
 export const DEFAULT_MAX_ENTRIES = 12
@@ -77,6 +78,10 @@ export function entriesFor(
  *
  * Returns a NEW array (the board is immutable state); the record for every other pair is passed
  * through untouched, which is what keeps a write in one room invisible to another.
+ *
+ * OP-08: the entry's lifecycle metadata (`source`/`status`/`outcome`/`confidence`/`updatedAt`)
+ * rides along untouched — the spread below preserves it, and serialising it to the partition is
+ * `memory-store.ts`'s job. Only `text` is clipped here.
  */
 export function appendEntry(input: {
   readonly records: readonly BotMemoryRecord[] | undefined
@@ -112,15 +117,21 @@ export function appendEntry(input: {
  * half is that the caller cannot obtain another pair's entries in the first place.
  *
  * Trimming is newest-first: the block keeps the most recent entries that fit the character budget.
+ *
+ * OP-08: only `active` entries are injected. A `probation` entry (a peer bot or a timer started
+ * that turn — the user never asked) and a `decayed` entry (the user corrected it) are still in
+ * the partition and still searchable, but they must not read like established facts in the main
+ * prompt. Records without a status (pre-OP-08 data) stay injectable.
  */
 export function renderMemoryBlock(
-  entries: ReadonlyArray<{ readonly text: string; readonly at: string }>,
+  entries: ReadonlyArray<{ readonly text: string; readonly at: string; readonly status?: BotMemoryEntry['status'] }>,
   options: { readonly limit?: number | undefined; readonly budget?: number | undefined } = {},
 ): string | undefined {
-  if (entries.length === 0) return undefined
+  const injectable = entries.filter(entry => isInjectable(entry))
+  if (injectable.length === 0) return undefined
   const limit = options.limit ?? DEFAULT_PROMPT_ENTRIES
   const budget = options.budget ?? DEFAULT_PROMPT_BUDGET
-  const recent = entries.slice(-limit)
+  const recent = injectable.slice(-limit)
   const kept: string[] = []
   let used = 0
   for (let i = recent.length - 1; i >= 0; i -= 1) {
@@ -171,22 +182,34 @@ export function dropBotFromRoom(
  * carry only the entries added since — the same paragraph repeated every turn is pure prompt
  * cost, and it also breaks the request prefix cache, which the host explicitly protects.
  *
+ * OP-08: the boundary is computed over the INJECTABLE subset only. A `probation` entry written
+ * after the last active one must not become the "newest id" (it is not injected), and it must not
+ * sit between the boundary and a later active entry (that active entry would be skipped for ever).
+ * The returned `newestId` is therefore the newest INJECTED entry; when nothing is injectable the
+ * previous boundary is handed back unchanged.
+ *
  * @param entries - the pair's entries, oldest first.
  * @param alreadyInjectedId - the newest entry id already shown to this session (undefined = none).
  * @returns the block to add, or undefined when there is nothing new.
  */
 export function renderMemoryDelta(
-  entries: ReadonlyArray<{ readonly id: string; readonly text: string; readonly at: string }>,
+  entries: ReadonlyArray<{
+    readonly id: string
+    readonly text: string
+    readonly at: string
+    readonly status?: BotMemoryEntry['status']
+  }>,
   alreadyInjectedId: string | undefined,
   options: { readonly limit?: number | undefined; readonly budget?: number | undefined } = {},
 ): { readonly block: string | undefined; readonly newestId: string | undefined; readonly baseline: boolean } {
-  if (entries.length === 0) return { block: undefined, newestId: alreadyInjectedId, baseline: false }
-  const newestId = entries[entries.length - 1]!.id
+  const injectable = entries.filter(entry => isInjectable(entry))
+  if (injectable.length === 0) return { block: undefined, newestId: alreadyInjectedId, baseline: false }
+  const newestId = injectable[injectable.length - 1]!.id
   if (alreadyInjectedId === newestId) return { block: undefined, newestId, baseline: false }
-  const at = alreadyInjectedId === undefined ? -1 : entries.findIndex(e => e.id === alreadyInjectedId)
+  const at = alreadyInjectedId === undefined ? -1 : injectable.findIndex(e => e.id === alreadyInjectedId)
   // A baseline (nothing shown yet, or the boundary entry is gone after an overflow/clear) is
   // the recent window; a delta is everything after the boundary.
-  const fresh = at < 0 ? entries.slice(-(options.limit ?? DEFAULT_PROMPT_ENTRIES)) : entries.slice(at + 1)
+  const fresh = at < 0 ? injectable.slice(-(options.limit ?? DEFAULT_PROMPT_ENTRIES)) : injectable.slice(at + 1)
   if (fresh.length === 0) return { block: undefined, newestId, baseline: at < 0 }
   const block = renderMemoryBlock(fresh, options)
   return { block, newestId, baseline: at < 0 }
@@ -199,22 +222,37 @@ export function renderMemoryDelta(
  * (unicode61 tokenising), and memory is Markdown, not a session log. Character bigrams plus a
  * substring bonus are enough to find "把超时改成 30s" from "超时", and the result carries its
  * provenance so the model can go back to the file rather than trusting a summary.
+ *
+ * OP-08: recall intentionally searches EVERY entry, including probation/decayed ones — the bot
+ * may need what it was told before — but labels them (`[待确认]` / `[已衰减]`) so a peer bot's
+ * unconfirmed claim and a user-corrected mistake cannot come back as settled fact.
  */
 export function searchMemory(
   entries: readonly BotMemoryEntry[],
   query: string,
   limit = 5,
-): ReadonlyArray<{ readonly entry: BotMemoryEntry; readonly score: number }> {
+): ReadonlyArray<{
+  readonly entry: BotMemoryEntry
+  readonly score: number
+  /** `[待确认]` for probation, `[已衰减]` for decayed; absent for active entries. */
+  readonly label?: string | undefined
+}> {
   const needle = query.replace(/\s+/gu, '').toLowerCase()
   if (needle === '') return []
   const grams = new Set<string>()
   for (let i = 0; i + 1 < needle.length; i += 1) grams.add(needle.slice(i, i + 2))
+  const labelOf = (entry: BotMemoryEntry): string | undefined => {
+    if (entry.status === 'probation') return '[待确认]'
+    if (entry.status === 'decayed') return '[已衰减]'
+    return undefined
+  }
   const scored = entries.map((entry) => {
     const hay = entry.text.toLowerCase()
     let score = 0
     if (hay.includes(needle)) score += 2
     for (const gram of grams) if (hay.includes(gram)) score += 1
-    return { entry, score }
+    const label = labelOf(entry)
+    return label === undefined ? { entry, score } : { entry, score, label }
   })
   return scored
     .filter(row => row.score > 0)

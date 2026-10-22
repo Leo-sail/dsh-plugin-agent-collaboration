@@ -20,6 +20,7 @@
  * @module
  */
 import type { BotMemoryEntry, BotMessage } from './types.ts'
+import { promotable } from './memory-lifecycle.ts'
 
 /**
  * How similar two normalised task texts must be to count as "the same request".
@@ -127,6 +128,14 @@ export function isIntervention(text: string): boolean {
 /**
  * Scan one (room, bot) history for promotion candidates.
  *
+ * OP-08 GATE: only `promotable` entries are evidence — a task line with a real run id, `active`
+ * lifecycle state, `positive` outcome and `run` provenance. `note` (the bot's own remember),
+ * `probation` (a peer bot's or a timer's turn), `negative`/`decayed` (the user corrected it) and
+ * unknown-outcome lines never enter either channel. The legacy defaults in `memory-lifecycle.ts`
+ * keep pre-OP-08 run-backed lines promotable, so this gate tightens new data without breaking an
+ * old installation. The evidence rules BELOW (two attempts, no refusal, correction arc) are
+ * unchanged — this is a gate in front of them, not a replacement.
+ *
  * @param input.entries - the pair's memory entries, oldest first (task entries carry run ids).
  * @param input.messages - the room's messages, oldest first, for the correction channel.
  * @param input.alreadyLearned - lines already in the global block (de-duplication).
@@ -137,7 +146,7 @@ export function scanPromotions(input: {
   readonly messages: readonly BotMessage[]
   readonly alreadyLearned: readonly string[]
 }): readonly PromotionCandidate[] {
-  const tasks = input.entries.filter(e => e.kind === 'task' && e.runId !== undefined)
+  const tasks = input.entries.filter(e => promotable(e))
   const out: PromotionCandidate[] = []
 
   // ── A. Repetition: same request handled successfully twice ──────────────────

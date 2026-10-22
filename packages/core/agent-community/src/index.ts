@@ -87,6 +87,7 @@ import {
 import { searchMemory, taskMemoryText } from './bot-memory.ts'
 import { MemoryStore, memoryPaths, type RoomMemoryMeta } from './memory-store.ts'
 import { scanPromotions } from './memory-promote.ts'
+import { decayForCorrections, entryMetaForNote, entryMetaForRun } from './memory-lifecycle.ts'
 import { Maintenance, type MaintenanceHost } from './maintenance.ts'
 import { findBotByName, requireBot, requireRoom, NotFoundError } from './lookup.ts'
 import { resolveRoomLeader } from './room-leader.ts'
@@ -133,6 +134,11 @@ function toRoomTaskState(state: GroupTaskState, previous?: RoomTaskState | undef
     // The user's original task text survives a conversion; a member hand-off restates it verbatim.
     ...(previous?.objective !== undefined ? { objective: previous.objective } : {}),
     ...(state.finished !== undefined ? { finished: state.finished } : {}),
+    // OP-07: the version metadata is carried, never bumped here — `task-board.ts`/group-flow own
+    // the bump. Copying it keeps optimistic concurrency working across the driver conversion.
+    ...(previous?.schemaVersion !== undefined ? { schemaVersion: previous.schemaVersion } : {}),
+    ...(previous?.version !== undefined ? { version: previous.version } : {}),
+    ...(previous?.updatedAt !== undefined ? { updatedAt: previous.updatedAt } : {}),
   }
 }
 
@@ -151,6 +157,10 @@ function fromRoomTaskState(state: RoomTaskState | undefined): GroupTaskState | u
     runningBotIds: new Set<string>(),
     pendingReports: [],
     ...(state.finished !== undefined ? { finished: state.finished } : {}),
+    // NOTE (OP-07): `schemaVersion`/`version`/`updatedAt` are PERSISTED board metadata. The
+    // in-memory driver has no writer for them (group-flow/task-board own the bumps), so the
+    // conversion leaves them on `room.taskState`; `toRoomTaskState` copies them back on the next
+    // save. Dropping them here would reset optimistic concurrency to 0 on every load.
   }
 }
 
@@ -4806,7 +4816,9 @@ export class AgentCommunityService extends TypertRemoteService {
       meta,
       // An explicit note is not subject to the automatic-task cap being 0: the bot asked for it.
       maxEntries: Math.max(1, this.cfg.memoryEntriesPerRoom),
-      entry: { id: randomUUID(), kind: 'note', text, at: now },
+      // OP-08: a note is the bot's own account — active (injectable, the user can delete it) but
+      // never promotable, because self-report is not run-backed evidence.
+      entry: { id: randomUUID(), kind: 'note', text, at: now, ...entryMetaForNote() },
     })
     // `ok: true` must mean the file is really there — writing and reporting success regardless
     // is how a bot ends up confidently "remembering" something that was never stored.
@@ -5200,6 +5212,16 @@ export class AgentCommunityService extends TypertRemoteService {
   /**
    * Record what a finished turn did, then look for something worth learning (§3.3).
    *
+   * OP-08 lifecycle, in order:
+   *   1. DECAY what the user has since corrected (same task family, last 3-task window). That is
+   *      an IN-PLACE edit of existing entries, so the partition must be REWRITTEN
+   *      (`writePartition`), not appended to; the mirror is refreshed from the file afterwards.
+   *      A failed rewrite is logged and does not block the new line: the decay is best-effort
+   *      maintenance, losing a new memory is worse.
+   *   2. APPEND this turn's line, carrying provenance from the run's origin (user-driven runs are
+   *      active/positive; peer-woken and timer turns are probation/unknown).
+   *   3. PROMOTE, now gated by `promotable` inside the scanner.
+   *
    * Promotion runs here — after the task line exists — because both of its channels need the
    * run-backed history this line completes.
    */
@@ -5208,6 +5230,29 @@ export class AgentCommunityService extends TypertRemoteService {
     if (meta === undefined) return
     if (this.cfg.memoryEntriesPerRoom === 0) return
     const now = nowIso()
+    // 1. Decay corrected task entries, in place. Only for a pair that already has entries, and
+    // only when something actually changed (the pure helper returns `changed`).
+    const key = memoryKey(run.roomId, run.botId)
+    const current = this.memoryMirror.get(key) ?? []
+    if (current.length > 0 && this.memoryStore !== undefined) {
+      const decayed = decayForCorrections(
+        current,
+        this.state.messages.filter(m => m.roomId === run.roomId),
+        now,
+      )
+      if (decayed.changed > 0) {
+        try {
+          await this.memoryStore.writePartition(meta, decayed.entries)
+          const reread = await this.memoryStore.read(run.roomId, run.botId)
+          this.memoryMirror.set(key, [...reread])
+        } catch (error: unknown) {
+          this.ctx.logger?.warn?.(
+            `agent-community: could not persist decayed memory for room=${run.roomId} bot=${run.botId}: ${String(error)}`,
+          )
+        }
+      }
+    }
+    // 2. Append this turn's line with its provenance metadata.
     const written = await this.memoryWrite({
       meta,
       maxEntries: this.cfg.memoryEntriesPerRoom,
@@ -5217,6 +5262,7 @@ export class AgentCommunityService extends TypertRemoteService {
         text: taskMemoryText(run.prompt, replyText),
         at: now,
         runId: String(run.id),
+        ...entryMetaForRun(String(run.origin ?? '')),
       },
     })
     if (!written.stored) {

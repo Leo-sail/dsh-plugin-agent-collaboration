@@ -1,3 +1,40 @@
+## Unreleased — paper batch 4 (OP-07 task-board contract, OP-08 memory lifecycle)
+
+论文第四批机制改进；只改插件源码/测试，不改 Bot。
+
+### OP-07 · 任务板 schema + 角色写契约 + 事务
+- 新增 `task-board.ts`：`TASK_BOARD_SCHEMA_VERSION=1`；`TaskBoardActor`（leader/member/system/user）；
+  操作 assign/report/advance/finish/fail；`TaskBoardContext`（actor、actorBotId、memberIds、
+  expectedVersion、now）。
+- `validateTaskBoard` 校验结构、唯一 id、合法状态、finished 形状、版本兼容；`applyTaskBoardOperation`
+  统一执行「schema → expectedVersion → finished → 角色/成员权限 → 状态机 → version+1/updatedAt →
+  events」；`applyTaskBoardTransaction` 多操作全有或全无。
+- 角色契约：assign/advance/finish/fail 仅 leader/system；report 仅本人或 leader/system；member
+  不能改别人的行/改 owner；user 不能直写内部板；done/cancelled 终态，reported 不能回 working。
+- `group-flow.ts` 四个写方法改为构造操作 → 事务 → 一次 `saveRoom`；`RoomTaskState` 增加
+  `schemaVersion/version/updatedAt`（additive）；旧板按 v1 兼容，未来版本拒绝。
+- 新增 `tests/task-board.test.ts`（25）。
+
+### OP-08 · 记忆质量标签 + 三态更新 + 投毒治理
+- `BotMemoryEntry` 增加 `source/status/outcome/confidence/updatedAt`（additive）。
+- 新增 `memory-lifecycle.ts`：来源映射（user→run/active/positive；a2a/routine→probation；
+  note→active 但永不晋升）、`isInjectable`（只有 active 进主 prompt）、`promotable`
+  （task + runId + active + positive + source=run）、`decayForCorrections`（用户纠正后只衰减
+  最近窗口内同任务家族的 active 条目）、`bumpMaintain`（预留，不接线）。
+- 记忆文件格式扩展 `source/status/outcome/confidence`，旧行兼容（旧 run-backed task 仍按
+  active/positive 读取，不破坏老装机晋升）；stable id 不变；probation/decayed 不注入主 prompt，
+  但 `recall` 仍可检索并标注。
+- `rememberTask` 写入前先做纠正衰减（有变化则 `writePartition` 重写并刷新 mirror），再追加带
+  provenance 的新任务行，再走晋升 gate；`rememberForSession` 的 note 带 note metadata。
+- 新增 `tests/memory-lifecycle.test.ts`（17）。
+
+### 版本与验证
+- `HARNESS_REVISION` 升为 `paper-batch4-2026-10-22`（`PROMPT_CONTRACT_VERSION` 仍为 2）。
+- `node --test tests/*.test.ts`：**316/316**；core/UI typecheck（过滤宿主噪声）0 真实错误；
+  四包构建 + check-build OK。
+- 隔离实例实跑：run 证据/批次正常；记忆文件新行带
+  `source=run status=active outcome=positive confidence=0.7`，旧行仍可解析。
+- 未发布 npm / 未更新市场；只同步 GitHub 源码。
 ## Unreleased — paper batch 3 (OP-04 run evidence, OP-06 approval binding)
 
 论文第三批机制改进；只改插件源码/测试，不改 Bot。

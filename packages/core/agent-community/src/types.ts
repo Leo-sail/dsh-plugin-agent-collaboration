@@ -901,6 +901,15 @@ export interface RoomTaskState {
   } | undefined
   /** The user's original task, kept verbatim so a member hand-off can restate it (§24.6). */
   readonly objective?: string | undefined
+  // ── OP-07: VERSIONED BOARD ──────────────────────────────────────────────────
+  // Additive fields: boards written before them are valid (absent = v1 / version 0). The
+  // transaction layer (`task-board.ts`) owns the bumps; converters only carry them across.
+  /** Schema version of the persisted board; absent means the pre-versioning shape (v1). */
+  readonly schemaVersion?: number | undefined
+  /** Monotonic write version for optimistic concurrency; bumped once per applied operation. */
+  readonly version?: number | undefined
+  /** When the board last changed (ISO); stamped by the writer that bumped `version`. */
+  readonly updatedAt?: string | undefined
 }
 
 /**
@@ -1004,6 +1013,26 @@ export interface BotMemoryEntry {
   readonly at: string
   /** The run that produced it, for `task` entries. */
   readonly runId?: string | undefined
+  /**
+   * Where the entry came from (OP-08).
+   *
+   * `run` — a user-driven run; `note` — the bot asked to remember it; `a2a` — a peer bot or a
+   * leader's hand-off started the turn; `routine` — a timer/reminder/continuation started it;
+   * `unknown` — legacy or hand-edited line. Absent means legacy (see `memory-lifecycle.ts`).
+   */
+  readonly source?: 'run' | 'note' | 'a2a' | 'routine' | 'unknown' | undefined
+  /**
+   * Lifecycle state (OP-08): `active` is injected into the main prompt, `probation` (peer/timer
+   * work, unconfirmed) is searchable but not injected, `decayed` (the user corrected it) stops
+   * influencing the prompt. Absent means `active` (pre-OP-08 data).
+   */
+  readonly status?: 'active' | 'probation' | 'decayed' | undefined
+  /** How the recorded attempt ended, from the user's point of view. Absent = legacy/unknown. */
+  readonly outcome?: 'positive' | 'negative' | 'unknown' | undefined
+  /** 0..1 confidence; see `confidenceOf` for the default/clamp rules. */
+  readonly confidence?: number | undefined
+  /** When the lifecycle last touched this entry (decay/maintain). Absent on legacy lines. */
+  readonly updatedAt?: string | undefined
 }
 
 /**
