@@ -57,6 +57,14 @@ export interface BotIdentity {
   readonly workspace?: string | undefined
   readonly systemPrompt?: string | undefined
   readonly mentionOnly?: boolean | undefined
+  /**
+   * Intent subscriptions (OP-18): keywords this bot wants to be woken for in a GROUP room.
+   *
+   * Additive and bounded. The router checks them after explicit `@`/`@all` and before its
+   * lexical guesswork, so a bot can say "wake me for 数据/图表" without changing its role text.
+   * Empty/absent means "no subscriptions" — the old routing applies unchanged.
+   */
+  readonly subscriptions?: readonly string[] | undefined
   /** Access preset applied to this bot's agent session. Defaults to 'workspace-write'. */
   readonly permission?: 'read-only' | 'workspace-write' | 'full-access' | undefined
   readonly presence?: BotPresence | undefined
@@ -562,6 +570,8 @@ export interface CreateBotRequest {
   readonly workspace?: string | undefined
   readonly systemPrompt?: string | undefined
   readonly mentionOnly?: boolean | undefined
+  /** OP-18: keyword/intent labels; normalized by the service (≤20 entries, ≤40 chars each). */
+  readonly subscriptions?: readonly string[] | undefined
   readonly permission?: 'read-only' | 'workspace-write' | 'full-access' | undefined
   readonly profile?: Partial<BotProfileBinding>
 }
@@ -579,6 +589,8 @@ export interface UpdateBotRequest {
   readonly systemPrompt?: string | undefined
   readonly profile?: Partial<BotProfileBinding>
   readonly mentionOnly?: boolean | undefined
+  /** OP-18: keyword/intent labels; omitted keeps the stored list, [] clears it. */
+  readonly subscriptions?: readonly string[] | undefined
   readonly permission?: 'read-only' | 'workspace-write' | 'full-access' | undefined
 }
 

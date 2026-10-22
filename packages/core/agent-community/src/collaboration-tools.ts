@@ -192,6 +192,26 @@ export interface CollaborationToolDeps {
     text: string
   }): Promise<{ ok: boolean; reason?: string | undefined }>
   /**
+   * OP-22: hand a file the sender produced to another member of the same group.
+   *
+   * FILE-FIRST, because a path in an a2a message is meaningless across workspaces: the receiver
+   * gets a COPY inside its own workspace (the source stays with the sender), and the handoff is
+   * announced to the recipient through the normal member-message path. The service owns both
+   * workspace paths, the containment/size checks and the copy; this is only the tool adapter.
+   */
+  handoffFile(input: {
+    roomId: string
+    botId: string
+    toName: string
+    path: string
+    note?: string | undefined
+  }): Promise<{
+    readonly ok: boolean
+    readonly reason?: string | undefined
+    readonly targetPath?: string | undefined
+    readonly size?: number | undefined
+  }>
+  /**
    * Ask the user a question and wait for the answer.
    *
    * The plugin's own surface replaces the host's `ask_user_question`, which waits on a UI a
@@ -1041,6 +1061,65 @@ export function registerCollaborationTools(
         }
       }
       return { value: { ok: true, to }, text: `已直接发给「${to}」。` }
+    },
+  })
+
+  // ── agent_community_handoff_file (any member, group only) ───────────────────
+  add({
+    name: 'agent_community_handoff_file',
+    description:
+      'Hand a file you actually produced to another member of this group — FILE-FIRST, because '
+      + 'a path in a chat message points at a file the other bot cannot open. The recipient gets '
+      + 'a COPY in its own workspace and is woken with the new path; your own file stays where '
+      + 'it is (nothing is moved or deleted). Use this instead of re-describing the artifact in '
+      + 'prose whenever the next step needs the real file: draft, dataset, deck, image, report. '
+      + 'The file must be inside your workspace and at most 32MB.',
+    properties: {
+      toName: {
+        type: 'string',
+        required: true,
+        description: 'The member name from the room roster — not a bot id and not yourself.',
+      },
+      path: {
+        type: 'string',
+        required: true,
+        description: 'The file you produced: relative to your workspace, or an absolute path inside it.',
+      },
+      note: {
+        type: 'string',
+        description: 'One line telling the recipient what to do with the file (optional).',
+      },
+    },
+    required: ['toName', 'path'],
+    run: async (args, exec) => {
+      const who = caller(exec)
+      if (typeof who === 'string') return { value: { ok: false }, text: who }
+      if (who.kind !== 'group') {
+        return { value: { ok: false }, text: 'agent_community_handoff_file is only available in a group chat' }
+      }
+      const toName = str(args, 'toName').trim()
+      const path = str(args, 'path').trim()
+      const note = str(args, 'note').trim()
+      if (toName === '') return { value: { ok: false }, text: 'toName is required' }
+      if (path === '') return { value: { ok: false }, text: 'path is required' }
+      const result = await deps.handoffFile({
+        roomId: who.roomId,
+        botId: who.botId,
+        toName,
+        path,
+        ...(note !== '' ? { note } : {}),
+      })
+      if (!result.ok) {
+        return {
+          value: { ok: false, ...(result.reason !== undefined ? { reason: result.reason } : {}) },
+          text: `文件没有交接成功：${result.reason ?? '检查文件名与成员名字，然后重试。'}`,
+        }
+      }
+      return {
+        value: { ok: true, targetPath: result.targetPath, size: result.size },
+        text: `已把文件交接给「${toName}」，副本在它的工作区：${result.targetPath ?? ''}。`
+          + '源文件仍在你这里，没有被移动或删除；对方已被通知。',
+      }
     },
   })
 

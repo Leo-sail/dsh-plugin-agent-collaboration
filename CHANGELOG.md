@@ -1,3 +1,46 @@
+## Unreleased — P2 batch (all remaining P2 mechanisms)
+
+只改插件源码/测试；不改 Bot。
+
+### OP-18 意图订阅 + 声誉看门狗（active）
+- `BotIdentity` / Create/Update 请求增加 `subscriptions?`（归一化 ≤20 条、每条 ≤40）。
+- 路由新增 `subscription` 分支：direct/@all/@mention/管理指令优先，其次按订阅词命中（最多 2 个），
+  再回落原 lexical/leader；无订阅时行为不变。
+- `reputation.ts` 从房间任务板统计 bot 完成率；`ReputationWatchdog` 在 finish 成功/bypassed 后每房
+  10 分钟最多一条「声誉观察…建议换人或补上下文」notice；不自动换人。
+
+### OP-19 目标感知注意力（active）
+- `goal-attention.ts` 按目标关键词/bigram 排序成员汇报；`group-task.integratePrompt` 只调整
+  汇总 prompt 中 reports 顺序（失败报告仍在前、不丢），无 goal 时逐字不变。
+
+### OP-22 文件优先 handoff（active）
+- 新增安全 `planFileHandoff`/`copyHandoffFile`：源文件必须在发送方 workspace（realpath 前缀检查，
+  防 `../`/symlink 逃逸）、普通文件非空 ≤32MB；目标 `<target>/handoffs/<UTC时间戳>-<安全名>`；
+  只复制不移动。
+- 新工具 `agent_community_handoff_file`（群聊）：按本房成员名字交接，成功后给目标发内部消息 +
+  房间 notice；非事务（copy 成功、通知失败会保留副本）。
+
+### OP-17 并行竞标策略（opt-in，未接线）
+- `bidding.ts` 纯策略：仅 complex + ambiguity≥0.6 + ≥2 成员 + 显式预算才 eligible；
+  bid score/tie/预算函数；默认不执行任何 run，需调用方显式开启。
+
+### OP-20 身份/记忆 bundle（模块，未接线）
+- `identity-bundle.ts` 白名单导出 bot 身份/记忆/skill/pattern，脱敏密钥与绝对路径；validate/
+  import draft/mergeMemory；不含 bot/room/session id，不写文件/RPC。
+
+### OP-21 配置准入（模块，未接线）
+- `config-admission.ts` 9 条边界规则，一次收集 issues；未知 key warning；`admitConfigOrThrow`；
+  未接入现有构造，避免历史配置变 outage。
+
+### OP-23 过程评测
+- `tests/process-eval.test.ts`：6 个多轮剧本（改需求/成员失败/权限试探/记忆冲突/交付返工/
+  压缩），15 个断言含 S4 谎报成功、S14 重复交付/摘要回归；纯事件、无模型。
+
+### 验证
+- `node --test tests/*.test.ts`：**524/524**；core/UI typecheck 过滤宿主噪声 0 真实错误；
+  四包构建 + check-build OK；隔离实例 run 记录
+  `harnessRevision=paper-batch6-2026-10-22 / promptContract=3`，插件正常加载。
+- 未发布 npm / 未更新市场；只同步 GitHub 源码。
 ## Unreleased — P2 adherence scorecard
 
 - 新增 `adherence.ts`：从持久化任务板派生 `TaskAdherence`（assigned/done/failed/pending、

@@ -32,6 +32,7 @@
  * Only when none holds for several consecutive rounds is the task considered stuck.
  */
 import type { BotId, BotRoomId, FinishEvidence } from './types.ts'
+import { rankByGoal } from './goal-attention.ts'
 
 /** One member assignment, tracked so the leader can be told what is outstanding. */
 export interface Assignment {
@@ -101,6 +102,13 @@ export interface GroupTaskAccessor {
   /** Read persisted coordination state. */
   /** When the room's newest user instruction arrived. */
   lastUserMessageAt(roomId: string): string | undefined
+  /**
+   * OP-19: the room's current goal text, when it has one.
+   *
+   * Optional on the interface so a test/older accessor without goals still constructs; the
+   * driver then keeps the pre-goal report order. The service returns `room.goal?.text`.
+   */
+  roomGoalText?(roomId: string): string | undefined
   loadTaskState(roomId: string): GroupTaskState | undefined
 }
 
@@ -541,7 +549,21 @@ export class GroupTaskDriver {
    * and the next idle turn looked like a stall because the reports were gone.
    */
   private integratePrompt(roomId: string, state: GroupTaskState): string {
-    const reports = state.pendingReports
+    // ── OP-19: THE GOAL DECIDES WHICH REPORTS THE LEADER READS FIRST ─────────────
+    //
+    // No report is dropped and the failure/success split is kept: the ranking only decides the
+    // order INSIDE each half. With no goal — or a goal none of the reports mention — `rankByGoal`
+    // returns the arrival order untouched, so a goal-less room's prompt is byte-identical to the
+    // pre-goal version.
+    const ranked = rankByGoal(state.pendingReports.map(report => report.text), this.accessor.roomGoalText?.(roomId))
+    const orderedReports = ranked
+      .map(entry => state.pendingReports[entry.index])
+      .filter((report): report is NonNullable<typeof report> => report !== undefined)
+    const reportsForPrompt = [
+      ...orderedReports.filter(report => !report.ok),
+      ...orderedReports.filter(report => report.ok),
+    ]
+    const reports = reportsForPrompt
       .map((r) => `· ${this.accessor.botName(r.botId)}${r.ok ? '' : '（失败）'}：${r.text}`)
       .join('\n')
     const outstanding = state.assignments

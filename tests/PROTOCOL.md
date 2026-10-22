@@ -50,7 +50,7 @@
 - **失败判据**：① 每个成员只回复一次；② leader 只发一条最终汇总（不得与 `finish_task` 报告重复）；
   ③ 群聊面板每条消息只有一个 runId；④ 全程无超时/无进展终止。任一违反即 fail。
 - **重复次数**：10 次取通过率；<8/10 为 fail，并记录每次的耗时与 token 用量分布。
-- **归因**：每次 run 读取 `runs[].harness`，确认 `harnessRevision='paper-batch5-2026-10-22'`、
+- **归因**：每次 run 读取 `runs[].harness`，确认 `harnessRevision='paper-batch6-2026-10-22'`、
   `promptContract=2`、`preset` 与窗口预算与本卡一致；不一致的运行不计入通过率。
 - **运行命令**：在隔离实例中手动执行本卡流程，然后
   `node --test tests/group-task.test.ts`（确定性部分）+ 记录 10 次人工/脚本运行结果。

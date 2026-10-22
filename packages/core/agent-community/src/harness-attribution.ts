@@ -26,7 +26,7 @@ import type { HarnessAttribution } from './types.ts'
  * BUMP THIS by hand together with `PROMPT_CONTRACT_VERSION` whenever a change can alter
  * model-visible behaviour or resource budgets; the string names the batch, not the commit.
  */
-export const HARNESS_REVISION = 'paper-batch5-2026-10-22'
+export const HARNESS_REVISION = 'paper-batch6-2026-10-22'
 
 /** What the attribution says when the package metadata cannot be read. */
 export const UNKNOWN_PLUGIN_VERSION = 'unknown'

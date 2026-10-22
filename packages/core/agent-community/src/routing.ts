@@ -21,6 +21,7 @@
  * separate them; the fallback covers the case where it is not.
  */
 import type { BotId } from './types.ts'
+import { matchSubscriptionTerms } from './intent-subscription.ts'
 
 /** What the router needs to know about one candidate. */
 export interface RoutableBot {
@@ -66,6 +67,14 @@ export interface RouteInput {
    * sentences ("大家看一下这个设计" addresses the designer, not the room).
    */
   readonly allMentioned?: boolean | undefined
+  /**
+   * OP-18: each member's declared intent keywords, keyed by bot id.
+   *
+   * Only MEMBER ids are consulted (a subscription cannot route into a room its bot left). The
+   * map may omit bots without subscriptions; an unknown/empty list behaves exactly like the
+   * pre-subscription router.
+   */
+  readonly subscriptions?: Readonly<Record<string, readonly string[]>> | undefined
 }
 
 /**
@@ -151,10 +160,13 @@ export interface RouteDecision {
   /** Bots that should run, in member order. */
   readonly targets: readonly string[]
   /** Why, for the transcript and for debugging a surprising result. */
-  readonly reason: 'direct' | 'all' | 'mention' | 'matched' | 'coordinator' | 'leader'
+  readonly reason: 'direct' | 'all' | 'mention' | 'subscription' | 'matched' | 'coordinator' | 'leader'
   /** Terms that caused each bot to be picked, for the log. */
   readonly matched: Readonly<Record<string, readonly string[]>>
 }
+
+/** How many subscribed members one message may wake (an inference must not fan out). */
+const MAX_SUBSCRIPTION_TARGETS = 2
 
 /**
  * Terms too generic to indicate a role.
@@ -254,6 +266,8 @@ function haystackOf(text: string): string {
  *   4. A management instruction ("把 A 踢出去") belongs to whoever can execute it — the
  *      leader — never to the bot it names. Checked BEFORE name matching, because the name
  *      there is the object of the action, not the addressee.
+ *   4.5. A member's declared INTENT SUBSCRIPTIONS match the text (OP-18) — after every explicit
+ *      addressee above, before any lexical inference; at most two subscribed bots wake.
  *   5. A member's NAME written out in the text ("让 A 看一下") addresses that member.
  *   6. The message ADDRESSES THE ROOM IN WORDS (`大家`/`各位`/`一起`/`都看一下`…) → everyone.
  *   7. The message is nothing but a GREETING → everyone. A greeting is addressed to the room;
@@ -329,6 +343,35 @@ export function routeMessage(input: RouteInput): RouteDecision {
           matched: { [leader]: [`${act} request: the coordinator acts`] },
         }
       }
+    }
+  }
+
+  // 4.5 INTENT SUBSCRIPTIONS (OP-18): bots that declared these words are woken next.
+  //
+  // Checked after every EXPLICIT addressee (direct / @all / @mention / management instruction)
+  // and BEFORE the lexical guesswork, because a subscription is the user's own statement of
+  // intent while role matching is an inference. A message that names how many bots should work
+  // still decides that; a subscription only decides WHO when nothing explicit was said.
+  const subscriptionHits: Array<{ id: string; terms: string[]; order: number }> = []
+  if (input.subscriptions !== undefined) {
+    for (const [order, member] of input.members.entries()) {
+      const terms = matchSubscriptionTerms(input.subscriptions[member.id], input.message.text)
+      if (terms.length > 0) subscriptionHits.push({ id: member.id, terms, order })
+    }
+  }
+  if (subscriptionHits.length > 0) {
+    // More matched terms = a more specific subscription, so it ranks first; a tie keeps the
+    // room's member order. At most two bots answer: a subscription is still an inference about
+    // WHO (nobody said "all of you"), so it must not fan out to the whole room.
+    subscriptionHits.sort((a, b) => (b.terms.length - a.terms.length) || (a.order - b.order))
+    const chosen = subscriptionHits.slice(0, MAX_SUBSCRIPTION_TARGETS)
+    const chosenIds = new Set(chosen.map(hit => hit.id))
+    return {
+      targets: ordered(chosen.map(hit => hit.id)),
+      reason: 'subscription',
+      matched: Object.fromEntries(subscriptionHits
+        .filter(hit => chosenIds.has(hit.id))
+        .map(hit => [hit.id, hit.terms])),
     }
   }
 

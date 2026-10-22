@@ -57,9 +57,12 @@ import { GroupTaskDriver, type GroupTaskState } from './group-task.ts'
 import { chooseFinalDelivery, publishOf, type RunPublish } from './publish-policy.ts'
 import { checkFinishEvidence } from './finish-gate.ts'
 import { taskAdherence } from './adherence.ts'
+import { ReputationWatchdog } from './reputation.ts'
 import { buildGroupPatternCard, mergeGroupPatterns, renderGroupPatternsBlock } from './group-patterns.ts'
+import { normalizeSubscriptions } from './intent-subscription.ts'
 import { assessGoalDrift } from './goal-drift.ts'
 import { auditNotice, selectAuditSamples } from './handoff-audit.ts'
+import { copyHandoffFile, planFileHandoff } from './file-handoff.ts'
 import { buildRunEvidence, classifyFaultSide, finishPathOf } from './run-evidence.ts'
 import { registerCollaborationTools } from './collaboration-tools.ts'
 import { crossRoomError, screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
@@ -722,6 +725,11 @@ export class AgentCommunityService extends TypertRemoteService {
    */
   private readonly finishGateRejections = new Map<string, { count: number; board: string }>()
   /**
+   * OP-18: one quiet reputation reminder per room per ten minutes after a group task closes.
+   * It reads only the persisted board and only WRITES a notice; no dispatch or roster change.
+   */
+  private readonly reputationWatchdog = new ReputationWatchdog()
+  /**
    * Last goal-drift warning per room (OP-13). The watchdog only WARNS, and one notice per room
    * per 10 minutes is enough: repeated notices would bury the transcript without adding facts.
    */
@@ -1008,6 +1016,8 @@ export class AgentCommunityService extends TypertRemoteService {
         lastUserMessageAt: (roomId) => [...this.state.messages]
           .filter(m => m.roomId === roomId && m.sender.kind === 'user')
           .reduce((latest, m) => (m.createdAt > latest ? m.createdAt : latest), '') || undefined,
+        // OP-19: the room's goal text drives the member-report order in the integrate prompt.
+        roomGoalText: (roomId) => this.roomGoal(roomId)?.text,
         saveTaskState: (roomId, taskState) => {
           this.state = {
             ...this.state,
@@ -1236,6 +1246,75 @@ export class AgentCommunityService extends TypertRemoteService {
       return { ok: false, reason: '这个房间已不存在，说明没有记录成功。' }
     }
     return { ok: true }
+  }
+
+  /**
+   * OP-22: copy one member's produced file into another member's workspace (file-first handoff).
+   *
+   * WHY THE SERVICE AND NOT THE TOOL. Both workspaces are service knowledge (`runWorkspaceDir`),
+   * and the source path is untrusted input. Everything is checked before a byte is copied:
+   *   · the room must be a live group and both bots must be members of it;
+   *   · the target must be named exactly as the room roster names it (no ids, no "someone");
+   *   · the source must canonicalize INSIDE the sender's workspace (realpath, so `..` and
+   *     symlink escapes are refused), be a regular non-empty file, ≤32MB;
+   *   · the copy lands in `<target workspace>/handoffs/<UTC stamp>-<safe name>`.
+   *
+   * A handoff is a COPY: the sender keeps its file (nothing is moved or deleted). The receiver is
+   * woken through the normal member-message path with the new absolute path, and the room gets a
+   * visible notice so the user can see the artifact changed hands.
+   */
+  private async handoffFileToMember(input: {
+    readonly roomId: string
+    readonly botId: string
+    readonly toName: string
+    readonly path: string
+    readonly note?: string | undefined
+  }): Promise<{
+    ok: boolean
+    reason?: string | undefined
+    targetPath?: string | undefined
+    size?: number | undefined
+  }> {
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room === undefined) return { ok: false, reason: '这个房间已不存在' }
+    if (room.directBotId !== undefined) return { ok: false, reason: '文件交接只在群聊里可用' }
+    if (!room.memberIds.some(id => id === input.botId)) return { ok: false, reason: '发送方不在这个群里' }
+    const toName = input.toName.trim()
+    if (toName === '') return { ok: false, reason: 'toName 不能为空' }
+    const target = room.memberIds
+      .map(id => this.state.bots.find(bot => bot.id === id))
+      .find(bot => bot !== undefined && bot.name.trim() === toName)
+    if (target === undefined) return { ok: false, reason: `本群没有名为「${toName}」的成员` }
+    if (target.id === input.botId) return { ok: false, reason: '不能把文件交接给自己' }
+
+    const plan = await planFileHandoff({
+      senderWorkspace: this.runWorkspaceDir(input.botId),
+      targetWorkspace: this.runWorkspaceDir(target.id),
+      sourcePath: input.path,
+    })
+    if (!plan.ok) return { ok: false, reason: plan.reason }
+    const copied = await copyHandoffFile(plan)
+    if (!copied.ok) return { ok: false, reason: copied.reason }
+
+    const note = (input.note ?? '').trim().slice(0, 500)
+    const filename = basename(plan.sourcePath)
+    try {
+      await this.postBotMessage({
+        roomId: brandId<BotRoomId>(input.roomId),
+        senderSessionId: this.sessionIdFor(input.roomId, input.botId),
+        text: `[文件交接] 已把「${filename}」复制到你的工作区：${plan.targetPath}`
+          + (note !== '' ? `；说明：${note}` : ''),
+        toBotName: target.name,
+        // Coordination is not conversation: the file arrives, the recipient wakes, and the room
+        // instead sees the one-line notice below.
+        internal: true,
+      })
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return { ok: false, reason: `文件已复制，但通知「${target.name}」失败：${detail}` }
+    }
+    this.recordNotice(input.roomId, `已交接文件「${filename}」给「${target.name}」`)
+    return { ok: true, targetPath: plan.targetPath, size: plan.size }
   }
 
   /**
@@ -1527,6 +1606,9 @@ export class AgentCommunityService extends TypertRemoteService {
           return { ok: false, reason: error instanceof Error ? error.message : String(error) }
         }
       },
+      // OP-22: file-first handoff. The service owns both workspace paths, the containment/size
+      // checks and the copy; the tool only names the member and the workspace-relative file.
+      handoffFile: async (input) => this.handoffFileToMember(input),
       roomGoal: (input) => {
         const goal = this.roomGoal(input.roomId)
         return goal === undefined
@@ -1999,6 +2081,11 @@ export class AgentCommunityService extends TypertRemoteService {
       workspace: input.workspace ?? await this.ensureBotWorkspace(id),
       systemPrompt: input.systemPrompt,
       mentionOnly: input.mentionOnly,
+      // OP-18: bounded and normalized at the one write point, so persisted bots cannot carry a
+      // pasted keyword dump or an unbounded list.
+      ...(input.subscriptions !== undefined
+        ? { subscriptions: normalizeSubscriptions(input.subscriptions) }
+        : {}),
       permission: input.permission ?? 'full-access',
       profile: { ...defaultProfile(input.name), ...input.profile },
       createdAt: nowIso(),
@@ -2028,6 +2115,10 @@ export class AgentCommunityService extends TypertRemoteService {
       workspace: input.workspace ?? prev.workspace,
       systemPrompt: input.systemPrompt ?? prev.systemPrompt,
       mentionOnly: input.mentionOnly ?? prev.mentionOnly,
+      // OP-18: an explicit list (even empty) replaces the stored one; omitting keeps it.
+      subscriptions: input.subscriptions !== undefined
+        ? normalizeSubscriptions(input.subscriptions)
+        : prev.subscriptions,
       permission: input.permission ?? prev.permission,
       avatar: {
         seed: input.avatarSeed ?? prev.avatar.seed,
@@ -2468,6 +2559,14 @@ export class AgentCommunityService extends TypertRemoteService {
       // A coordination request may name a bot that is NOT in the room ("把 X 拉进群"), so
       // the router is told about every live bot the text names, not just the members.
       namedBotIds: namedBotIdsIn(message.text, this.state.bots.map(b => ({ id: b.id, name: b.name }))),
+      // OP-18: the members' declared intent keywords. Built from the same member list the
+      // router is given, so a subscription can only ever route INSIDE this room.
+      subscriptions: Object.fromEntries(
+        room.memberIds
+          .map(id => this.state.bots.find(b => b.id === id))
+          .filter((b): b is NonNullable<typeof b> => b !== undefined)
+          .map(b => [b.id, b.subscriptions ?? []] as [string, readonly string[]]),
+      ),
       ...(room.directBotId !== undefined ? { directBotId: room.directBotId } : {}),
       ...(this.leaderOfRoom(room.id) !== undefined
         ? { leaderId: this.leaderOfRoom(room.id)! }
@@ -4557,6 +4656,7 @@ export class AgentCommunityService extends TypertRemoteService {
       // OP-09: a VERIFIED finish is exactly the signal worth learning from. The card is
       // deterministic (no model call) and stored on the room in one state update.
       this.recordGroupPatternCard(input.roomId, input.report, input.evidence)
+      this.maybeWarnReputation(input.roomId)
       return { ok: true }
     }
 
@@ -4591,7 +4691,28 @@ export class AgentCommunityService extends TypertRemoteService {
     // A bypassed finish still carries a report: keep the pattern, the card's `source:'finish'`
     // plus the room's notice above make its unverified status discoverable.
     this.recordGroupPatternCard(input.roomId, input.report, input.evidence)
+    this.maybeWarnReputation(input.roomId)
     return { ok: true, bypassed: true }
+  }
+
+  /**
+   * OP-18 reputation watchdog: derive per-bot completion rates from THIS room's board and,
+   * when a bot is genuinely below the threshold with enough samples, write one notice.
+   * Advisory only — no roster/assignment/run is changed, and the cooldown lives in memory.
+   */
+  private maybeWarnReputation(roomId: string): void {
+    const room = this.state.rooms.find(candidate => candidate.id === roomId)
+    if (room === undefined || room.taskState === undefined) return
+    try {
+      const notice = this.reputationWatchdog.check({
+        roomId,
+        rooms: [{ taskState: room.taskState }],
+        botName: botId => this.state.bots.find(bot => bot.id === botId)?.name ?? botId,
+      })
+      if (notice !== undefined) this.recordNotice(roomId, notice)
+    } catch (error: unknown) {
+      this.ctx.logger?.warn?.(`agent-community: reputation watchdog failed for room=${roomId}: ${String(error)}`)
+    }
   }
 
   /**
