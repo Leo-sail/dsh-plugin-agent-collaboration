@@ -292,6 +292,59 @@ export interface BotMessage {
 }
 
 /**
+ * WHICH SIDE a run's failure belongs to (OP-04).
+ *
+ * A failure is only actionable if it names the responsible layer: a model/provider error is
+ * retried differently from a harness timeout, a tool/permission problem, a memory/context
+ * failure, or a room/goal orchestration stall. Recorded on the run (and inside its evidence)
+ * so an evaluation can group failures without re-reading free-text errors.
+ */
+export type RunFaultSide = 'model' | 'harness' | 'tool' | 'memory' | 'room-goal' | 'user' | 'unknown'
+
+/**
+ * HOW a run ended, in one closed vocabulary (OP-04).
+ *
+ * `reply`/`finish_task` are successful deliveries; `empty` means the turn completed but said
+ * nothing; `stopped` is a user stop; `timeout`/`no-progress` are the adaptive-timeout budget;
+ * `failed` is an error; `unknown` covers runs that predate this record.
+ */
+export type RunFinishPath =
+  | 'finish_task'
+  | 'reply'
+  | 'empty'
+  | 'stopped'
+  | 'timeout'
+  | 'no-progress'
+  | 'failed'
+  | 'unknown'
+
+/**
+ * The measurable evidence of one run (OP-04): what it cost and how it ended.
+ *
+ * Deliberately counters and enums only — NO prompt text, reasoning or tool output — so the
+ * record is small, persistent, and safe to show in the panel snapshot. Attribution (faultSide)
+ * is duplicated on `BotRun.faultSide` for cheap filtering.
+ */
+export interface RunEvidence {
+  readonly durationMs?: number | undefined
+  /** Characters of the assembled prompt (not the text itself). */
+  readonly promptChars?: number | undefined
+  readonly toolCalls?: number | undefined
+  readonly toolFailures?: number | undefined
+  readonly deliverableCount?: number | undefined
+  readonly contextWindowMessages?: number | undefined
+  readonly approvalRequests?: number | undefined
+  /** Token accounting from the provider (numbers only). */
+  readonly usage?: {
+    readonly uncachedInputTokens: number
+    readonly outputTokens: number
+    readonly totalTokens: number
+  } | undefined
+  readonly finishPath?: RunFinishPath | undefined
+  readonly faultSide?: RunFaultSide | undefined
+}
+
+/**
  * WHICH harness produced a run's results (OP-01).
  *
  * Recorded once when a run is claimed (i.e. when it really starts), and never rewritten: a
@@ -371,6 +424,10 @@ export interface BotRun {
    * context-window budgets. Written once, at claim; absent on runs that never started.
    */
   readonly harness?: HarnessAttribution | undefined
+  /** Measurable run evidence (OP-04): counters, finish path and failure side — no prose. */
+  readonly evidence?: RunEvidence | undefined
+  /** Which layer a failure belongs to (OP-04); absent on successful runs. */
+  readonly faultSide?: RunFaultSide | undefined
 }
 
 export interface BotCommunitySnapshot {
@@ -625,6 +682,8 @@ export interface SettleBotRunRequest {
   readonly leaseOwner?: string | undefined
   /** The failure category: decides whether a retry is allowed and is persisted on the run. */
   readonly failureKind?: FailureKind | undefined
+  /** Measurable evidence of this run (OP-04); the service folds in duration/finish path. */
+  readonly evidence?: RunEvidence | undefined
   readonly reply?: {
     readonly text: string
     readonly sessionSeq: SessionSeq

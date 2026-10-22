@@ -18,6 +18,7 @@ import type {
   BotRunId,
   BotMessageId,
   DeliveredFile,
+  RunEvidence,
 } from './types.ts'
 import { VisibilityController } from './visibility.ts'
 import { toolSchemas, ToolRunner, type ToolInvocation } from './tools.ts'
@@ -31,6 +32,7 @@ import {
   inputBlock,
   type PromptSections,
 } from './prompt-contract.ts'
+import { buildRunEvidence, classifyFaultSide, finishPathOf } from './run-evidence.ts'
 import type { ProgressKind, SessionRunner } from './session-runner.ts'
 import type { LedgerProjector } from './ledger.ts'
 import {
@@ -324,6 +326,8 @@ export interface CommunityStateAccessor {
     retry?: boolean
     /** Failure category; timeout / no-progress / user-cancel must never be retried. */
     failureKind?: FailureKind
+    /** Measurable run evidence (OP-04): counters only, no prose. */
+    evidence?: RunEvidence
     reply?: {
       text: string
       sessionSeq: SessionSeq
@@ -1165,9 +1169,13 @@ export class RunExecutor {
       this.heartbeats.set(run.id, hbInterval)
 
       let settled = false
+      // OP-04: run evidence is built from these two facts plus the reply.
+      const startedAtMs = Date.now()
+      let promptChars = 0
       try {
         const bot = this.svc.getBot(run.botId)
         const prompt = this.buildPrompt(run, bot, run.botId)
+        promptChars = prompt.length
         // Progress = a stream frame or a tool event, fed back into the budget state. It is
         // what lets a long-but-working turn be extended instead of killed at the deadline.
         const onProgress = (kind: ProgressKind): void => { this.noteProgress(run.id, kind) }
@@ -1187,6 +1195,20 @@ export class RunExecutor {
           expectedRevision: claimed.controlRevision,
           leaseOwner: LEASE_OWNER,
           status: reply.stopped === true ? 'interrupted' : 'completed',
+          // OP-04: counters + finish path; the SERVICE folds in duration and turns
+          // `finish_task` reports into finishPath='finish_task'.
+          evidence: buildRunEvidence({
+            durationMs: Date.now() - startedAtMs,
+            promptChars,
+            toolActivity: reply.toolActivity,
+            deliverableCount: reply.deliverables?.length ?? 0,
+            usage: reply.usage,
+            finishPath: finishPathOf({
+              status: reply.stopped === true ? 'interrupted' : 'completed',
+              replyText: reply.text,
+              stopped: reply.stopped,
+            }),
+          }),
           reply,
         })
         settled = true
@@ -1209,6 +1231,12 @@ export class RunExecutor {
                 expectedRevision: claimed.controlRevision,
                 leaseOwner: LEASE_OWNER,
                 status: 'interrupted',
+                evidence: buildRunEvidence({
+                  durationMs: Date.now() - startedAtMs,
+                  promptChars,
+                  finishPath: 'stopped',
+                  faultSide: 'user',
+                }),
               })
             } catch {
               // Already settled by controlRun (revision moved on), or gone: both fine.
@@ -1229,6 +1257,13 @@ export class RunExecutor {
                 error: msg,
                 failureKind,
                 retry: shouldRetry,
+                // OP-04: record WHERE the failure came from. Retry policy is unchanged.
+                evidence: buildRunEvidence({
+                  durationMs: Date.now() - startedAtMs,
+                  promptChars,
+                  finishPath: 'failed',
+                  faultSide: classifyFaultSide({ failureKind, error: msg }),
+                }),
               })
             } catch {
               // settle failed (revision mismatch from concurrent controlRun); ignore
@@ -1507,6 +1542,12 @@ export class RunExecutor {
         error: `${label}：${detail}`,
         failureKind: kind,
         retry: false,
+        // OP-04: a budget verdict is the harness's own policy, not a model fault.
+        evidence: buildRunEvidence({
+          durationMs: Date.now() - Date.parse(run.startedAt ?? run.createdAt ?? new Date().toISOString()),
+          finishPath: kind === 'timeout' ? 'timeout' : 'no-progress',
+          faultSide: 'harness',
+        }),
       })
       settled = true
     } catch (error: unknown) {

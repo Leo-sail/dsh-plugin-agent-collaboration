@@ -1,3 +1,41 @@
+## Unreleased — paper batch 3 (OP-04 run evidence, OP-06 approval binding)
+
+论文第三批机制改进；只改插件源码/测试，不改 Bot。
+
+### OP-04 · 每个 run 的可度量证据与失败归因
+- 新增 `RunEvidence`（可选字段，全部是计数/枚举，不存任何 prompt/reasoning/tool 正文）：
+  `durationMs / promptChars / toolCalls / toolFailures / deliverableCount /
+  contextWindowMessages / approvalRequests / usage / finishPath / faultSide`。
+- `finishPath` 封闭词表：`finish_task / reply / empty / stopped / timeout / no-progress /
+  failed / unknown`；`faultSide`：`model / harness / tool / memory / room-goal / user / unknown`。
+- `run-evidence.ts` 提供确定性归因：timeout/no-progress/lease-lost→harness；用户停止→user；
+  tool/sandbox/permission/approval→tool；memory/context/compact→memory；
+  room/goal/leader/stall→room-goal；transport/network/5xx/rate-limit/provider→model；否则 unknown。
+- executor 在成功/停止/异常/预算失败 settle 时传 evidence；service `finalizeRunEvidence` 合并
+  duration、真正 finishPath（`pendingFinishReports` 命中 = `finish_task`）与 faultSide，落
+  `BotRun.evidence`/`faultSide`；retry 策略未改。
+- `snapshot-lite` 只保留白名单字段（无正文/无未知 key）；新增 21 个测试。
+
+### OP-06 · 审批–执行绑定（pre-execute 捕获 + 审批后 guard）
+- 宿主 `approval/request` 只有 toolName/callId、没有 args；参数在 `tools/pre-execute` 的
+  `exec.arguments` 上。bridge 现在：
+  1. `tools/pre-execute`（prepend/global）按 callId 捕获 member 工具调用的冻结 args（sha256，
+     200 条上限 + TTL），无条件 `next()`；
+  2. `approval/request` 用捕获构造 `ApprovalBinding`（toolName/argsHash/expiry=10min/once），
+     ledger approval 行记录 `argsHash / binding / expiresAt`；
+  3. `allowed-once` 先存 one-shot token 再 resolve；`ctx.tools.guard()`（审批后、执行前）校验
+     callId/toolName/argsHash/过期，通过即消费，不匹配也消费并拒绝；**无 token 的正常调用不拦截**。
+- `args-unavailable` 降级：捕获缺失时只校验 toolName/expiry，不误杀正常审批。
+- 新增 23 个测试（hash 稳定性、TTL、四类拒绝、一次性消费、fake-host 端到端、无 guard 降级）。
+
+### 版本与验证
+- `HARNESS_REVISION` 升为 `paper-batch3-2026-10-22`（`PROMPT_CONTRACT_VERSION` 仍为 2）。
+- `node --test tests/*.test.ts`：**274/274**；core/UI typecheck（过滤宿主噪声）0 真实错误；
+  四包构建 + check-build OK。
+- 隔离实例实跑：run.evidence 落 `durationMs/promptChars/toolCalls/toolFailures/
+  deliverableCount/finishPath='reply'`，harness 批次为 `paper-batch3-2026-10-22`；普通 run 未被
+  approval guard 误拦。
+- 未发布 npm / 未更新市场；只同步 GitHub 源码。
 ## Unreleased — paper batch 2 (OP-02 finish gate, OP-03 context isolation/pin)
 
 论文第二批机制改进；只改插件源码/测试，不改 Bot。

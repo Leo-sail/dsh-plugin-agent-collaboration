@@ -28,6 +28,9 @@ import type {
   BotRoomId,
   BotRun,
   HarnessAttribution,
+  RunEvidence,
+  RunFaultSide,
+  RunFinishPath,
 } from './types.ts'
 import type { FailureKind } from './run-budget.ts'
 
@@ -91,6 +94,35 @@ export interface SnapshotRun {
    * kept while `prompt`, reasoning and tool output stay out.
    */
   readonly harness?: HarnessAttribution | undefined
+  /**
+   * OP-04 run evidence: counters, token usage, finish path and failure side only. Copied
+   * field by field below, so no free text (prompt, reasoning, tool output) can ever ride
+   * along through this object.
+   */
+  readonly evidence?: SnapshotRunEvidence | undefined
+  /** OP-04 failure attribution, for cheap filtering in the panel/audit. */
+  readonly faultSide?: RunFaultSide | undefined
+}
+
+/**
+ * The evidence fields the snapshot exposes: fixed counter keys, three token numbers and two
+ * closed enums. There is deliberately no pass-through of unknown keys.
+ */
+export interface SnapshotRunEvidence {
+  readonly durationMs?: number | undefined
+  readonly promptChars?: number | undefined
+  readonly toolCalls?: number | undefined
+  readonly toolFailures?: number | undefined
+  readonly deliverableCount?: number | undefined
+  readonly contextWindowMessages?: number | undefined
+  readonly approvalRequests?: number | undefined
+  readonly usage?: {
+    readonly uncachedInputTokens: number
+    readonly outputTokens: number
+    readonly totalTokens: number
+  } | undefined
+  readonly finishPath?: RunFinishPath | undefined
+  readonly faultSide?: RunFaultSide | undefined
 }
 
 /** Clip message text to the snapshot budget, code-point safe and with an explicit marker. */
@@ -150,6 +182,30 @@ export function summarizeSnapshotRun(run: BotRun): SnapshotRun {
     // A frozen attribution object copied by reference: its six scalar fields are bounded and
     // `Object.freeze` means the snapshot cannot be mutated through this path.
     ...(run.harness !== undefined ? { harness: run.harness } : {}),
+    ...(run.evidence !== undefined ? { evidence: snapshotEvidence(run.evidence) } : {}),
+    ...(run.faultSide !== undefined ? { faultSide: run.faultSide } : {}),
+  }
+}
+
+/** Whitelisted copy of one evidence record: counters/enums only, never free text. */
+function snapshotEvidence(evidence: RunEvidence): SnapshotRunEvidence {
+  return {
+    ...(evidence.durationMs !== undefined ? { durationMs: evidence.durationMs } : {}),
+    ...(evidence.promptChars !== undefined ? { promptChars: evidence.promptChars } : {}),
+    ...(evidence.toolCalls !== undefined ? { toolCalls: evidence.toolCalls } : {}),
+    ...(evidence.toolFailures !== undefined ? { toolFailures: evidence.toolFailures } : {}),
+    ...(evidence.deliverableCount !== undefined ? { deliverableCount: evidence.deliverableCount } : {}),
+    ...(evidence.contextWindowMessages !== undefined ? { contextWindowMessages: evidence.contextWindowMessages } : {}),
+    ...(evidence.approvalRequests !== undefined ? { approvalRequests: evidence.approvalRequests } : {}),
+    ...(evidence.usage !== undefined ? {
+      usage: {
+        uncachedInputTokens: evidence.usage.uncachedInputTokens,
+        outputTokens: evidence.usage.outputTokens,
+        totalTokens: evidence.usage.totalTokens,
+      },
+    } : {}),
+    ...(evidence.finishPath !== undefined ? { finishPath: evidence.finishPath } : {}),
+    ...(evidence.faultSide !== undefined ? { faultSide: evidence.faultSide } : {}),
   }
 }
 

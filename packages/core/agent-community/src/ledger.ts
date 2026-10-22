@@ -152,6 +152,19 @@ export interface LedgerApprovalEntry extends LedgerEntryBase {
   readonly toolName: string
   readonly args: string
   readonly outcome?: 'allowed-once' | 'rejected' | undefined
+  /**
+   * OP-06 (approval–execution binding) — optional and additive.
+   *
+   * The host's approval request carries no arguments; the bridge captures them at
+   * `tools/pre-execute` and records this fingerprint so a reader can tell that the grant described
+   * a concrete call rather than only a tool name. Rows written before the binding existed, and
+   * rows whose arguments the host never exposed, simply omit these fields.
+   */
+  readonly argsHash?: string | undefined
+  /** `verified-args` when the grant was bound to captured arguments; `args-unavailable` otherwise. */
+  readonly binding?: 'verified-args' | 'args-unavailable' | undefined
+  /** When the binding stops being executable (ISO 8601). */
+  readonly expiresAt?: string | undefined
 }
 
 /**

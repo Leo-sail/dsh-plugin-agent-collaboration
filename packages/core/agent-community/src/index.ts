@@ -34,6 +34,7 @@ import type {
   DeliveredFile,
   HarnessAttribution,
   FinishEvidence,
+  RunEvidence,
 } from './types.ts'
 import { routeMessage, namedBotIdsIn, mentionsEveryone } from './routing.ts'
 import { renderAttachmentReference, storeAttachments, type StoredAttachment } from './attachments.ts'
@@ -53,6 +54,7 @@ import { LedgerProjection } from './ledger-projection.ts'
 import { GroupTaskDriver, type GroupTaskState } from './group-task.ts'
 import { chooseFinalDelivery, publishOf, type RunPublish } from './publish-policy.ts'
 import { checkFinishEvidence } from './finish-gate.ts'
+import { buildRunEvidence, classifyFaultSide, finishPathOf } from './run-evidence.ts'
 import { registerCollaborationTools } from './collaboration-tools.ts'
 import { crossRoomError, screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
 import {
@@ -2907,7 +2909,7 @@ export class AgentCommunityService extends TypertRemoteService {
     const nextRetryAt = shouldRetry
       ? new Date(Date.now() + retryBackoffMs(retryPolicy, prev.attempt)).toISOString()
       : undefined
-    const updated: BotRun = {
+    const base: BotRun = {
       ...prev,
       status: shouldRetry ? 'queued' : input.status,
       controlRevision: prev.controlRevision + 1,
@@ -2925,7 +2927,7 @@ export class AgentCommunityService extends TypertRemoteService {
       updatedAt: nowIso(),
     }
     let runs = [...this.state.runs]
-    runs[idx] = updated
+    runs[idx] = base
     let messages = this.state.messages
     // ── ONE RUN, ONE DELIVERY ──────────────────────────────────────────────────
     //
@@ -2943,9 +2945,23 @@ export class AgentCommunityService extends TypertRemoteService {
     // which is what stops one delivery from rendering twice: once with the run's
     // reasoning, once as a bare ledger row.
     const replyText = input.reply?.text ?? ''
-    const retrying = updated.status === 'queued'
+    const retrying = base.status === 'queued'
     const publish = publishOf(prev)
     const finishReport = retrying ? undefined : this.takeFinishReport(prev)
+    // ── RUN EVIDENCE (OP-04) ────────────────────────────────────────────────────
+    //
+    // The run's measurable record: duration and finish path folded in HERE (the executor
+    // cannot know how a finish_task report is delivered, or what the real wall-clock cost
+    // was up to settle); failure side attributed from the resolved failure kind/error.
+    // Both are additive — nothing in the delivery/retry/publish flow reads them.
+    const durationMs = runDurationMs(base)
+    const evidence = this.finalizeRunEvidence(base, input, failureKind, finishReport, durationMs)
+    const updated: BotRun = {
+      ...base,
+      evidence,
+      ...(evidence.faultSide !== undefined ? { faultSide: evidence.faultSide } : {}),
+    }
+    runs[idx] = updated
     const delivery = retrying
       ? { text: '', publishFinal: false }
       : chooseFinalDelivery({
@@ -2953,7 +2969,6 @@ export class AgentCommunityService extends TypertRemoteService {
           ...(finishReport !== undefined ? { finishReport } : {}),
           publish,
         })
-    const durationMs = runDurationMs(updated)
     if (delivery.publishFinal) {
       // Idempotent: a settle observed twice (or a retry that already delivered once) must
       // not append the same body again.
@@ -4462,6 +4477,44 @@ export class AgentCommunityService extends TypertRemoteService {
       `证据门连续 3 次未通过：本次完成按 bypassed 放行并标记为「未验证」（原因：${reason}）。`,
     )
     return { ok: true, bypassed: true }
+  }
+
+  /**
+   * Fold the settle's inputs into the run's evidence record (OP-04).
+   *
+   * Pure apart from reading the request: the executor supplies counters, this adds what only
+   * the service knows — the wall-clock duration up to settle and the REAL finish path (a
+   * `finish_task` report is `finish_task`, not just `reply`). A failed run also gets its
+   * `faultSide`, which is persisted both on the run and inside the evidence.
+   */
+  private finalizeRunEvidence(
+    run: BotRun,
+    input: SettleBotRunRequest,
+    failureKind: ReturnType<typeof classifyFailure> | undefined,
+    finishReport: string | undefined,
+    durationMs: number,
+  ): RunEvidence {
+    const finishPath = finishPathOf({
+      status: input.status,
+      ...(input.reply?.text !== undefined ? { replyText: input.reply.text } : {}),
+      ...(finishReport !== undefined ? { finishReport } : {}),
+      ...(failureKind !== undefined ? { failureKind } : {}),
+    })
+    const faultSide = input.status === 'failed'
+      ? classifyFaultSide({
+          ...(failureKind !== undefined ? { failureKind } : {}),
+          ...(input.error !== undefined ? { error: input.error } : {}),
+          finishPath,
+        })
+      : input.status === 'interrupted'
+        ? 'user'
+        : undefined
+    return buildRunEvidence({
+      ...input.evidence,
+      durationMs,
+      finishPath,
+      ...(faultSide !== undefined ? { faultSide } : {}),
+    })
   }
 
   /** Remember a `finish_task` report until its run settles (see `pendingFinishReports`). */
