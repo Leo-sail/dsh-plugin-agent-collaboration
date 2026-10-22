@@ -1,3 +1,15 @@
+## Unreleased — long-task active-tool exemption
+
+- `tool/call` / `tool/result` now feed distinct `tool-start` / `tool-end` progress events.
+- Run budget tracks in-flight tool calls: while at least one is active, the no-progress
+  stop is suspended and an expired deadline is rolled forward (bounded by the overall cap).
+  A silent shell/build/download therefore no longer looks like a dead provider stream.
+- E2E in an isolated profile with a deliberately tiny policy (5s no-progress floor, 10s
+  bootstrap): a real `sleep 20` tool completed in 25s instead of being killed; the 3s
+  control run stopped before the tool started.
+- Test: `activeToolExemptsNoProgress` boundary + full **542/542**; core tsc/build OK.
+- Installed as a local hotfix over the 0.3.4 desktop package; not yet republished.
+
 ## 0.3.4 — 论文驱动优化：稳定性、记忆、协作与 UI
 
 本版把论文库扫描后的 P0/P1/P2 机制全部落地，并完成真实任务测试：

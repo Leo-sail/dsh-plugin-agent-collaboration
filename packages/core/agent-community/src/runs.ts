@@ -46,6 +46,7 @@ import {
   resolveRetryPolicy,
   resolveTimeoutPolicy,
   retryBackoffMs,
+  activeToolExemptsNoProgress,
   shouldExtend,
   taskClassOf,
   type FailureKind,
@@ -243,6 +244,11 @@ interface RunBudgetState {
   progressEvents: number
   lastPersistMs: number
   lastProgressSeenMs: number
+  /**
+   * Tool calls currently in flight for THIS run. A long shell/command is real work even
+   * though it emits no frames; while this is > 0 the no-progress guard is suspended.
+   */
+  activeTools: number
   /** Gaps between progress events (bounded), so a chatty run gets a wider silence window. */
   readonly progressGapsMs: number[]
 }
@@ -1382,6 +1388,7 @@ export class RunExecutor {
       progressEvents: 0,
       lastPersistMs: now,
       lastProgressSeenMs: now,
+      activeTools: 0,
       progressGapsMs: [],
     }
   }
@@ -1390,10 +1397,12 @@ export class RunExecutor {
    * A real sign of work from the runner: update the in-memory progress clock (authoritative
    * for the deadline check) and persist it at most every few seconds.
    */
-  private noteProgress(runId: string, _kind: ProgressKind): void {
+  private noteProgress(runId: string, kind: ProgressKind): void {
     const budget = this.runBudgets.get(runId)
     if (budget === undefined) return
     const now = Date.now()
+    if (kind === 'tool-start') budget.activeTools += 1
+    else if (kind === 'tool-end' && budget.activeTools > 0) budget.activeTools -= 1
     const gap = now - budget.lastProgressAtMs
     if (gap > 0) {
       budget.progressGapsMs.push(gap)
@@ -1440,6 +1449,27 @@ export class RunExecutor {
       // A run settled/aborted elsewhere drops out of supervision silently.
       if (run === undefined || run.status !== 'running') {
         this.runBudgets.delete(runId)
+        continue
+      }
+      // ── ACTIVE TOOL EXEMPTION ──────────────────────────────────────────────
+      // A shell command / long tool may run for hours without emitting frames or the
+      // tool/result event. That is genuine work, not a dead provider stream: suspend
+      // the silence rule and roll an expired deadline forward (bounded by cap) until the
+      // tool reports. A truly hung tool is still bounded by the overall cap and by the
+      // user's stop button.
+      if (activeToolExemptsNoProgress(budget.activeTools)) {
+        const capAtMs = budget.startedAtMs + this.timeoutPolicy.capMs
+        if (now >= capAtMs) {
+          await this.failRunForBudget(
+            run, budget, 'timeout',
+            `活跃工具运行超过总上限 ${Math.round(this.timeoutPolicy.capMs / 1000)}s`,
+          )
+          continue
+        }
+        if (now >= budget.deadlineAtMs) {
+          budget.deadlineAtMs = Math.min(capAtMs, now + budget.baseBudgetMs)
+          this.svc.updateRunBudget(runId, { deadlineAt: new Date(budget.deadlineAtMs).toISOString() })
+        }
         continue
       }
       const observedGapP95 = budget.progressGapsMs.length >= 5
@@ -2204,8 +2234,9 @@ export class RunExecutor {
           args: call.arguments,
           at: new Date().toISOString(),
         })
+        onProgress?.('tool-start')
         const outcome = await runner.run(call)
-        onProgress?.('tool')
+        onProgress?.('tool-end')
         this.ledger?.push({
           type: 'tool-result',
           roomId: run.roomId,

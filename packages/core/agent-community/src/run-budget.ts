@@ -246,6 +246,15 @@ export function noProgressLimitMs(policy: RunTimeoutPolicy, observedGapP95Ms?: n
   return Math.round(clamp(observed, floor, Math.max(floor, policy.noProgressCapMs)))
 }
 
+/**
+ * An in-flight tool call is genuine work even when it emits no frames for a long time
+ * (a shell command, a long build, a download). The executor suspends the no-progress rule
+ * while at least one tool is active; the overall cap and the user's stop are still bounds.
+ */
+export function activeToolExemptsNoProgress(activeTools: number): boolean {
+  return activeTools > 0
+}
+
 /** Whether the run produced any progress inside the no-progress window. */
 export function progressIsRecent(nowMs: number, lastProgressAtMs: number | undefined, policy: RunTimeoutPolicy): boolean {
   if (lastProgressAtMs === undefined || !Number.isFinite(lastProgressAtMs)) return false

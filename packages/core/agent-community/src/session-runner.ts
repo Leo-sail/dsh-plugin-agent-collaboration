@@ -116,7 +116,7 @@ export type TurnEndReason = 'completed' | 'max-tokens' | 'aborted' | 'error'
  * produced); `tool` = a tool call started or finished. A heartbeat is NOT progress: a hung
  * provider still heartbeats, and treating it as progress would make "no-progress" useless.
  */
-export type ProgressKind = 'frame' | 'tool'
+export type ProgressKind = 'frame' | 'tool-start' | 'tool-end'
 
 export interface TurnOutcome {
   /** Visible text the model put in the message channel. Empty means it said nothing. */
@@ -548,7 +548,11 @@ export class SessionRunner {
       if (type !== 'tool/call' && type !== 'tool/result') return
       const owner = SessionRunner.parseSessionId(sessionId)
       if (owner === undefined) return
-      this.progressHandlers.get(SessionRunner.key(owner.roomId, owner.botId))?.('tool')
+      // START/END are distinct: while a tool is in flight its silence is REAL work,
+      // not a dead provider stream. RunExecutor keeps the active count and exempts it.
+      this.progressHandlers.get(SessionRunner.key(owner.roomId, owner.botId))?.(
+        type === 'tool/call' ? 'tool-start' : 'tool-end',
+      )
     }, { global: true })
     this.progressUninstall = () => { offFrame(); offEvent() }
   }
@@ -716,7 +720,8 @@ export class SessionRunner {
     /**
      * Called once per REAL sign of work inside this turn: a model stream frame, or a tool
      * call starting/ending. The executor turns these into `lastProgressAt` for the adaptive
-     * deadline (a heartbeat is not progress — see {@link ProgressKind}).
+     * deadline, and keeps `tool-start`…`tool-end` pairs open as an active-tool exemption
+     * (a heartbeat is not progress — see {@link ProgressKind}).
      *
      * Observation only: it changes no result and is removed with the turn. Optional so every
      * existing caller keeps working unchanged.

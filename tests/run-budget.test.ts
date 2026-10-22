@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
+  activeToolExemptsNoProgress,
   clamp,
   classifyFailure,
   deriveDeadlineBudget,
@@ -290,6 +291,14 @@ test('the runtime source carries no hardcoded 600 000 deadline', () => {
     const text = readFileSync(new URL(file, base), 'utf8')
     assert.equal(/600[_,]?000/.test(text), false, `${file} still contains a 600 000 literal`)
   }
+})
+
+test('an in-flight tool is active work and exempts the no-progress stop', () => {
+  // A long shell/build emits no model frames; the executor must not treat that as a dead
+  // provider stream. The count is tool-start minus tool-end, so 0 means no exemption.
+  assert.equal(activeToolExemptsNoProgress(0), false)
+  assert.equal(activeToolExemptsNoProgress(1), true)
+  assert.equal(activeToolExemptsNoProgress(2), true)
 })
 
 test('clamp is total', () => {
