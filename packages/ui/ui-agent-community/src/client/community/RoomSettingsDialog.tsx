@@ -15,10 +15,9 @@
  */
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import type { BotId, BotIdentity, BotRoom, BotRun } from '@dsh-plugin/agent-community'
+import type { BotId, BotIdentity, BotRoom } from '@dsh-plugin/agent-community'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { NativeDialog } from '../conversation/NativeDialog.tsx'
-import { contextSectionRows } from '../conversation/threadView.ts'
 import { css } from '../styles.ts'
 import type { CommunityRemote } from './types.ts'
 import { describe } from './types.ts'
@@ -28,12 +27,6 @@ export interface RoomSettingsDialogProps {
   room: BotRoom
   /** The live bot directory the member checkboxes are drawn from. */
   bots: BotIdentity[]
-  /**
-   * The room's runs. OP-04/OP-15 diagnostics are read-only: `evidence.finishPath` /
-   * `faultSide` / `contextSections` are counters the host already persisted, so this dialog
-   * renders them from the snapshot it was opened with — no extra RPC, no settings write.
-   */
-  runs?: readonly BotRun[] | undefined
   /** The shell's shared busy flag: a save in flight holds every dialog's primary button. */
   busy: boolean
   setBusy: (busy: boolean) => void
@@ -42,38 +35,6 @@ export interface RoomSettingsDialogProps {
   onClose: () => void
   /** Saved: the shell closes the dialog and reloads the snapshot. */
   onSaved: () => void
-}
-
-/** How many recent runs the diagnostics section shows. */
-const DIAGNOSTIC_RUN_COUNT = 3
-
-/** Chinese labels for the host's closed run vocabularies (unknown values print verbatim). */
-const RUN_STATUS_LABELS: Readonly<Record<string, string>> = {
-  queued: '排队中',
-  running: '运行中',
-  completed: '已完成',
-  failed: '运行失败',
-  cancelled: '已取消',
-  interrupted: '已停止',
-}
-const FINISH_PATH_LABELS: Readonly<Record<string, string>> = {
-  finish_task: 'finish_task',
-  reply: '正常回复',
-  empty: '没有输出',
-  stopped: '用户停止',
-  timeout: '超时',
-  'no-progress': '无进展',
-  failed: '失败',
-  unknown: '未知',
-}
-const FAULT_SIDE_LABELS: Readonly<Record<string, string>> = {
-  model: '模型侧',
-  harness: '框架侧',
-  tool: '工具侧',
-  memory: '记忆侧',
-  'room-goal': '房间/目标侧',
-  user: '用户侧',
-  unknown: '未知',
 }
 
 /** `2026-10-22 10:05` in local time; the raw string when unparseable. */
@@ -126,30 +87,8 @@ const mutedLineStyle = {
   lineHeight: '18px',
 } as const
 
-const contextRowStyle = {
-  display: 'grid',
-  gridTemplateColumns: '80px minmax(0, 1fr) 96px',
-  gap: 8,
-  alignItems: 'center',
-  fontSize: 11,
-  lineHeight: '16px',
-} as const
-
-const contextTrackStyle = {
-  height: 6,
-  borderRadius: 3,
-  background: 'var(--dsw-alias-interactive-bg-hover)',
-  overflow: 'hidden',
-} as const
-
-const contextFillStyle = {
-  display: 'block',
-  height: '100%',
-  background: 'var(--dsw-alias-state-business-primary)',
-} as const
-
 export function RoomSettingsDialog({
-  room, bots, runs, busy, setBusy, remote, onClose, onSaved,
+  room, bots, busy, setBusy, remote, onClose, onSaved,
 }: RoomSettingsDialogProps) {
   const [name, setName] = useState(room.name)
   const [members, setMembers] = useState<BotId[]>([...room.memberIds] as BotId[])
@@ -157,10 +96,6 @@ export function RoomSettingsDialog({
   const [paused, setPaused] = useState(room.paused ?? false)
   const [error, setError] = useState<string>()
 
-  /** Newest-first, capped: the diagnostics section is a summary, not a run log. */
-  const diagnosticRuns = [...(runs ?? [])]
-    .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0))
-    .slice(0, DIAGNOSTIC_RUN_COUNT)
   const patternCards = [...(room.patternCards ?? [])].sort(
     (a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0),
   )
@@ -269,48 +204,6 @@ export function RoomSettingsDialog({
                   <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>{whenText(card.createdAt)}</span>
                 </article>
               ))}
-            </div>
-          )}
-      </section>
-
-      {/* ── 运行诊断 (OP-04 / OP-15) — read-only ───────────────────────────────────
-          The most recent runs plus their prompt-section cost. Everything here comes from
-          the snapshot's run evidence: counters, no prompt text. */}
-      <section style={blockStyle} data-run-diagnostics="">
-        <h4 style={blockTitleStyle}>运行诊断（最近 {diagnosticRuns.length} 次）</h4>
-        {diagnosticRuns.length === 0
-          ? <p style={mutedLineStyle}>暂无运行数据</p>
-          : (
-            <div style={scrollerStyle}>
-              {diagnosticRuns.map(run => {
-                const rows = contextSectionRows(run.evidence?.contextSections)
-                const finishPath = run.evidence?.finishPath
-                const faultSide = run.evidence?.faultSide ?? run.faultSide
-                const promptTokens = run.evidence?.promptTokensEstimate
-                return (
-                  <article key={run.id} style={cardStyle} data-diagnostic-run={run.id}>
-                    <span style={{ color: 'var(--dsw-alias-label-primary)', fontWeight: 500 }}>
-                      {RUN_STATUS_LABELS[run.status] ?? run.status}
-                      {finishPath !== undefined && ` · ${FINISH_PATH_LABELS[finishPath] ?? finishPath}`}
-                      {faultSide !== undefined && ` · 责任：${FAULT_SIDE_LABELS[faultSide] ?? faultSide}`}
-                      {promptTokens !== undefined && ` · 约 ${promptTokens} tokens`}
-                    </span>
-                    {rows.length === 0
-                      ? <span style={mutedLineStyle}>暂无上下文分段统计</span>
-                      : rows.map(row => (
-                        <span key={row.key} style={contextRowStyle} data-context-section={row.key}>
-                          <span style={{ color: 'var(--dsw-alias-label-tertiary)' }}>{row.label}</span>
-                          <span style={contextTrackStyle}>
-                            <span style={{ ...contextFillStyle, width: `${Math.round(row.ratio * 100)}%` }} />
-                          </span>
-                          <span style={{ textAlign: 'right', color: 'var(--dsw-alias-label-tertiary)' }}>
-                            {row.chars} 字 · {Math.round(row.ratio * 100)}%
-                          </span>
-                        </span>
-                      ))}
-                  </article>
-                )
-              })}
             </div>
           )}
       </section>

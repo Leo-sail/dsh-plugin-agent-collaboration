@@ -1,3 +1,13 @@
+## Unreleased — failure diagnosis moves from settings into the conversation
+
+- 群聊设置删除「运行诊断」整块（不再展示最近 run 状态/上下文分段占比）；设置里保留群协作模式、
+  协作遵从度和成员列表。
+- 新增 `run-diagnosis.ts`：仅在 run 真正出问题时生成一行灰色普通 notice，正文固定前缀「诊断：」，
+  包含原因（模型侧/框架侧超时/无进展/工具/记忆/房间目标/未归因）+ 截断后的 error 摘要 +
+  最大上下文段（如「记忆 911 字（10%）」）；不含建议复盘/审计/目标可能偏移等彩色标签词。
+- settle 后由 `maybeDiagnoseRun` 写 notice：completed/interrupted/stopped/cancelled 不触发；
+  每个 runId 只写一次；不 retry/不暂停/不改任务。原选择性审计 notice 调用移除（模块保留未用）。
+- 新增 `tests/run-diagnosis.test.ts` 13 例；全量 **537/537**；core/UI tsc、build 通过。
 ## Unreleased — UI fix: member rows show only the bot name
 
 - 群聊设置的成员列表不再渲染头像 emoji 与 Bot 描述，只保留复选框 + Bot 名称；成员选择/保存逻辑不变。

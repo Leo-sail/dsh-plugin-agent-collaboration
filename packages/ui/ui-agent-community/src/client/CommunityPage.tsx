@@ -535,9 +535,6 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
         <RoomSettingsDialog
           room={editingRoom}
           bots={visibleBots}
-          /* OP-04/OP-15: the edited room's OWN runs drive the diagnostics section; the
-             snapshot already carries them, so the dialog needs no extra poll or RPC. */
-          runs={runs.filter(run => run.roomId === editingRoom.id)}
           busy={busy}
           setBusy={setBusy}
           remote={remote}

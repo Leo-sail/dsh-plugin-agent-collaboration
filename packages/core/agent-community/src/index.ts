@@ -61,7 +61,7 @@ import { ReputationWatchdog } from './reputation.ts'
 import { buildGroupPatternCard, mergeGroupPatterns, renderGroupPatternsBlock } from './group-patterns.ts'
 import { normalizeSubscriptions } from './intent-subscription.ts'
 import { assessGoalDrift } from './goal-drift.ts'
-import { auditNotice, selectAuditSamples } from './handoff-audit.ts'
+import { diagnoseRunFailure } from './run-diagnosis.ts'
 import { copyHandoffFile, planFileHandoff } from './file-handoff.ts'
 import { buildRunEvidence, classifyFaultSide, finishPathOf } from './run-evidence.ts'
 import { registerCollaborationTools } from './collaboration-tools.ts'
@@ -409,13 +409,8 @@ const WRITE_COALESCE_MS = 250
  */
 const GOAL_DRIFT_NOTICE_INTERVAL_MS = 10 * 60_000
 
-/**
- * Minimum gap between two selective-audit notices for one room (OP-16).
- *
- * An audit asks a human to look at a run, so it must stay rare and readable: one notice per
- * room per ten minutes, and only when a failure actually deserves attention.
- */
-const AUDIT_NOTICE_INTERVAL_MS = 10 * 60_000
+/** How many run ids the diagnosis dedupe set remembers before evicting the oldest. */
+const DIAGNOSED_RUN_IDS_MAX = 200
 
 /** Read the PID a lock file records, or undefined when it records nothing usable. */
 async function recordedLockPid(lockPath: string): Promise<number | undefined> {
@@ -735,10 +730,10 @@ export class AgentCommunityService extends TypertRemoteService {
    */
   private readonly goalDriftWarnedAt = new Map<string, number>()
   /**
-   * Last selective-audit notice per room (OP-16). Advisory only: the audit never retries a run
-   * or edits anything; it asks a human to look at the most informative failure.
+   * Runs that already got their one grey diagnosis line. A settle can be observed twice (a
+   * re-delivered settle, a recovery pass); the transcript must not say it twice.
    */
-  private readonly auditNoticedAt = new Map<string, number>()
+  private readonly diagnosedRunIds = new Set<string>()
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'agentCommunity')
@@ -3254,7 +3249,7 @@ export class AgentCommunityService extends TypertRemoteService {
       || updated.status === 'interrupted' || updated.status === 'cancelled') {
       this.afterRunSettled(prev, updated.status, replyText, input.reply?.toolActivity?.length ?? 0)
       // OP-16: after the room reacted, decide whether this settle deserves a human's attention.
-      this.maybeAuditSettledRun(updated)
+      this.maybeDiagnoseRun(updated)
     }
     // NOTE: deliberately NO re-seed here.
     //
@@ -5192,43 +5187,34 @@ export class AgentCommunityService extends TypertRemoteService {
   }
 
   /**
-   * Selective run audit (OP-16): one short notice, only for failures worth a human's time.
+   * In-session failure diagnosis: ONE plain grey line in the room that explains a failure.
    *
-   * Triggered by a FAILED terminal settle or an UNATTRIBUTED failure; the sample is chosen from
-   * the room's recent runs by `selectAuditSamples` (priority-ranked, de-duplicated per room and
-   * failure type). The notice carries ids/enums/counters only — never prompt text, reasoning or
-   * tool output — and it never retries, cancels or patches anything.
+   * This replaced the settings-page run-diagnostics panel: the reason is useful exactly where
+   * the failure is visible. The line is built by the pure `diagnoseRunFailure` (cause + short
+   * error detail + largest context section) and deliberately contains none of the words the UI
+   * uses for its coloured, actionable rows (建议复盘/审计/目标可能偏移/bypass).
+   *
+   * Deduplicated per run id (settles can be observed twice), and nothing else: no retry, no
+   * pause, no task changes.
    */
-  private maybeAuditSettledRun(run: BotRun): void {
-    if (run.status === 'queued') return // a retry is still a live turn, not an audit target
-    if (run.status !== 'failed' && run.faultSide !== 'unknown') return
-    const now = Date.now()
-    if (now - (this.auditNoticedAt.get(run.roomId) ?? 0) < AUDIT_NOTICE_INTERVAL_MS) return
-    // Map the persisted runs into the auditor's CLOSED shape: no prompt/reply/reasoning field
-    // exists on it, so the notice cannot leak transcript content even by accident.
-    const recent = this.state.runs
-      .filter(candidate => candidate.roomId === run.roomId)
-      .slice(-20)
-      .map(candidate => ({
-        id: String(candidate.id),
-        roomId: String(candidate.roomId),
-        status: candidate.status,
-        ...(candidate.faultSide !== undefined ? { faultSide: candidate.faultSide } : {}),
-        ...(candidate.evidence !== undefined
-          ? {
-              evidence: {
-                ...(candidate.evidence.finishPath !== undefined ? { finishPath: candidate.evidence.finishPath } : {}),
-                ...(candidate.evidence.toolCalls !== undefined ? { toolCalls: candidate.evidence.toolCalls } : {}),
-                ...(candidate.evidence.toolFailures !== undefined ? { toolFailures: candidate.evidence.toolFailures } : {}),
-              },
-            }
-          : {}),
-        ...(candidate.rootMessageId !== undefined ? { rootMessageId: String(candidate.rootMessageId) } : {}),
-      }))
-    const samples = selectAuditSamples({ runs: recent, limit: 3 })
-    if (samples.length === 0) return
-    this.auditNoticedAt.set(run.roomId, now)
-    this.recordNotice(run.roomId, auditNotice(samples[0]!))
+  private maybeDiagnoseRun(run: BotRun): void {
+    const runId = String(run.id)
+    if (this.diagnosedRunIds.has(runId)) return
+    const diagnosis = diagnoseRunFailure({
+      status: run.status,
+      ...(run.faultSide !== undefined ? { faultSide: run.faultSide } : {}),
+      ...(run.failureKind !== undefined ? { failureKind: run.failureKind } : {}),
+      ...(run.error !== undefined ? { error: run.error } : {}),
+      ...(run.evidence?.finishPath !== undefined ? { finishPath: run.evidence.finishPath } : {}),
+      ...(run.evidence?.contextSections !== undefined ? { contextSections: run.evidence.contextSections } : {}),
+    })
+    if (diagnosis === undefined) return
+    this.diagnosedRunIds.add(runId)
+    if (this.diagnosedRunIds.size > DIAGNOSED_RUN_IDS_MAX) {
+      const oldest = this.diagnosedRunIds.values().next().value
+      if (oldest !== undefined) this.diagnosedRunIds.delete(oldest)
+    }
+    this.recordNotice(run.roomId, diagnosis.text)
   }
 
   /**
