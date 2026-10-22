@@ -1,3 +1,40 @@
+## Unreleased — P1 batch B (OP-10 routing cost, OP-11 priors/budget, OP-15 section cost, OP-16 selective audit)
+
+P1 机制批次 B；只改插件源码/测试，不改 Bot。
+
+### OP-10 · 路由/审稿降本
+- 新增 `proposal-policy.ts`：短名单恰 2 人、含 source bot、另一候选 fit≥2、任务 simple 时
+  **跳过 group-proposal 模型判断**，用确定性选人（reason「按能力匹配确定性选人，省去一次模型判断」）；
+  其余模糊/低分/多人情况仍走原模型路径。
+- `validateConsultDecision` 抽出统一校验（成员在短名单、leader 合法、≥2 人、去重/封顶），
+  模型结果与确定性结果共用。
+
+### OP-11 · 历史协作先验 + 难度预算
+- 新增 `collaboration-priors.ts`：任务难度 simple/standard/complex；roster budget 2/3/4；
+  从各房间 taskState.assignments 统计 bot done/failed 成功率（≥2 样本）；只在 fit score 近似时
+  用成功率做 tie-break，不压过能力匹配。
+- group-flow 用 `Math.min(MAX_PROPOSED_MEMBERS, rosterBudget(...))` 限制候选宽度；无历史/无先验
+  时行为不变；用户显式 memberIds 不受影响。
+
+### OP-15 · 按段成本归因
+- 新增 `context-cost.ts`：按 prompt-contract 段名统计字符数/占比（code point，CJK/emoji 准确），
+  `estimateTokens` 明确是 chars/1.5 粗略上界，不用于预算决策。
+- `runs.composePrompt` 返回 `{prompt, sections}`，`buildPrompt` 保持字符串兼容；RunEvidence 增加
+  `contextSections`/`promptTokensEstimate`（只存数字，不存正文）；snapshot-lite 白名单透传。
+- 隔离实例实测：`role=8127 / memory=911 / history=226 / goal=62 / input=31` 字符，
+  estimate≈6238；定位到 role 是当前最大上下文成本项。
+
+### OP-16 · 选择性审计
+- 新增 `handoff-audit.ts`：对 failed/unknown/harness/empty/tool 失败等按权重排序采样（同房/同类去重、
+  limit 5），只输出 runId/roomId/reason 等封闭字段，绝不带 prompt/reasoning/tool 正文。
+- settle 后仅终态 failed 或 faultSide=unknown 触发；同房 10 分钟最多一条可见 notice
+  「建议复盘…仅提醒：不会自动重试，也不会自动修改代码」；不做 retry/暂停/改代码。
+
+### 验证
+- `node --test tests/*.test.ts`：**411/411**；core/UI typecheck 过滤宿主噪声 0 真实错误；
+  四包构建 + check-build OK。
+- prompt 字节未变，`PROMPT_CONTRACT_VERSION=3`/`HARNESS_REVISION=paper-batch5` 保持不变。
+- 未发布 npm / 未更新市场；只同步 GitHub 源码。
 ## Unreleased — P1 batch A (OP-09 patterns, OP-12 abstention, OP-13 drift, OP-14 threads)
 
 P1 机制批次 A；只改插件源码/测试，不改 Bot。

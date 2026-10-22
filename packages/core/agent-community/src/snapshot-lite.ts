@@ -123,6 +123,10 @@ export interface SnapshotRunEvidence {
   } | undefined
   readonly finishPath?: RunFinishPath | undefined
   readonly faultSide?: RunFaultSide | undefined
+  /** OP-15: per-section character counts (numbers only — never the prompt text). */
+  readonly contextSections?: Readonly<Record<string, number>> | undefined
+  /** OP-15: rough prompt-token estimate (label only). */
+  readonly promptTokensEstimate?: number | undefined
 }
 
 /** Clip message text to the snapshot budget, code-point safe and with an explicit marker. */
@@ -206,6 +210,20 @@ function snapshotEvidence(evidence: RunEvidence): SnapshotRunEvidence {
     } : {}),
     ...(evidence.finishPath !== undefined ? { finishPath: evidence.finishPath } : {}),
     ...(evidence.faultSide !== undefined ? { faultSide: evidence.faultSide } : {}),
+    // A bounded, numeric copy: section names + character counts only, so nothing textual can
+    // ride into the poll payload through the measurement.
+    ...(evidence.contextSections !== undefined
+      ? {
+          contextSections: Object.fromEntries(
+            Object.entries(evidence.contextSections)
+              .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+              .slice(0, 32),
+          ),
+        }
+      : {}),
+    ...(evidence.promptTokensEstimate !== undefined
+      ? { promptTokensEstimate: evidence.promptTokensEstimate }
+      : {}),
   }
 }
 

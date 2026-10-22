@@ -384,6 +384,13 @@ export interface RunEvidence {
   } | undefined
   readonly finishPath?: RunFinishPath | undefined
   readonly faultSide?: RunFaultSide | undefined
+  /**
+   * OP-15: characters per prompt section (`role`/`skills`/`goal`/`constraints`/`patterns`/
+   * `memory`/`history`/`input`). Measured, not estimated, and never the text itself.
+   */
+  readonly contextSections?: Readonly<Record<string, number>> | undefined
+  /** OP-15: ROUGH prompt-token estimate (label only; see `context-cost.ts`). */
+  readonly promptTokensEstimate?: number | undefined
 }
 
 /**

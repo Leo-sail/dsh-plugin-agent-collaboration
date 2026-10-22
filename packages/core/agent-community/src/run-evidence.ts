@@ -139,12 +139,38 @@ export interface RunEvidenceInput {
   readonly usage?: RunEvidenceUsage | undefined
   readonly finishPath?: RunFinishPath | undefined
   readonly faultSide?: RunFaultSide | undefined
+  /** OP-15: measured characters per prompt section (no text). */
+  readonly contextSections?: Readonly<Record<string, number>> | undefined
+  /** OP-15: rough token estimate for the whole prompt. */
+  readonly promptTokensEstimate?: number | undefined
 }
 
 /** A finite, non-negative integer, or undefined (never NaN/Infinity/negative in persisted state). */
 function counter(value: number | undefined): number | undefined {
   if (value === undefined || !Number.isFinite(value) || value < 0) return undefined
   return Math.round(value)
+}
+
+/**
+ * Normalize a per-section character record: non-negative integers only, empty/zero sections
+ * dropped, keys bounded and sorted (deterministic persisted state, no smuggled free text).
+ */
+function contextSectionsOf(
+  value: Readonly<Record<string, number>> | undefined,
+): Readonly<Record<string, number>> | undefined {
+  if (value === undefined) return undefined
+  const entries: Array<[string, number]> = []
+  for (const [key, chars] of Object.entries(value)) {
+    const name = key.trim()
+    if (name === '' || name.length > 40) continue
+    const count = counter(chars)
+    if (count === undefined || count === 0) continue
+    entries.push([name, count])
+    if (entries.length >= 32) break
+  }
+  if (entries.length === 0) return undefined
+  entries.sort((left, right) => left[0].localeCompare(right[0]))
+  return Object.fromEntries(entries)
 }
 
 function usageOf(value: RunEvidenceUsage | undefined): RunEvidence['usage'] {
@@ -184,5 +210,11 @@ export function buildRunEvidence(input: RunEvidenceInput): RunEvidence {
     ...(usageOf(input.usage) !== undefined ? { usage: usageOf(input.usage)! } : {}),
     ...(input.finishPath !== undefined ? { finishPath: input.finishPath } : {}),
     ...(input.faultSide !== undefined ? { faultSide: input.faultSide } : {}),
+    ...(contextSectionsOf(input.contextSections) !== undefined
+      ? { contextSections: contextSectionsOf(input.contextSections)! }
+      : {}),
+    ...(counter(input.promptTokensEstimate) !== undefined
+      ? { promptTokensEstimate: counter(input.promptTokensEstimate)! }
+      : {}),
   }
 }

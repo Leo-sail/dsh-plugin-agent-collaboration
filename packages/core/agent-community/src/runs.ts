@@ -33,6 +33,7 @@ import {
   type PromptSections,
 } from './prompt-contract.ts'
 import { buildRunEvidence, classifyFaultSide, finishPathOf } from './run-evidence.ts'
+import { estimateTokens, sectionStats } from './context-cost.ts'
 import type { ProgressKind, SessionRunner } from './session-runner.ts'
 import type { LedgerProjector } from './ledger.ts'
 import {
@@ -1176,13 +1177,21 @@ export class RunExecutor {
       this.heartbeats.set(run.id, hbInterval)
 
       let settled = false
-      // OP-04: run evidence is built from these two facts plus the reply.
+      // OP-04/OP-15: run evidence is built from these facts plus the reply.
       const startedAtMs = Date.now()
       let promptChars = 0
+      let contextSections: Readonly<Record<string, number>> | undefined
+      let promptTokensEstimate: number | undefined
       try {
         const bot = this.svc.getBot(run.botId)
-        const prompt = this.buildPrompt(run, bot, run.botId)
+        const composed = this.composePrompt(run, bot, run.botId)
+        const prompt = composed.prompt
         promptChars = prompt.length
+        const stats = sectionStats(composed.sections)
+        // Measured characters per section + one clearly-rough token estimate. No prompt text
+        // is stored anywhere: the evidence keeps numbers only.
+        contextSections = stats.chars
+        promptTokensEstimate = estimateTokens(stats.totalChars)
         // Progress = a stream frame or a tool event, fed back into the budget state. It is
         // what lets a long-but-working turn be extended instead of killed at the deadline.
         const onProgress = (kind: ProgressKind): void => { this.noteProgress(run.id, kind) }
@@ -1207,6 +1216,8 @@ export class RunExecutor {
           evidence: buildRunEvidence({
             durationMs: Date.now() - startedAtMs,
             promptChars,
+            ...(contextSections !== undefined ? { contextSections } : {}),
+            ...(promptTokensEstimate !== undefined ? { promptTokensEstimate } : {}),
             toolActivity: reply.toolActivity,
             deliverableCount: reply.deliverables?.length ?? 0,
             usage: reply.usage,
@@ -1241,6 +1252,8 @@ export class RunExecutor {
                 evidence: buildRunEvidence({
                   durationMs: Date.now() - startedAtMs,
                   promptChars,
+                  ...(contextSections !== undefined ? { contextSections } : {}),
+                  ...(promptTokensEstimate !== undefined ? { promptTokensEstimate } : {}),
                   finishPath: 'stopped',
                   faultSide: 'user',
                 }),
@@ -1268,6 +1281,8 @@ export class RunExecutor {
                 evidence: buildRunEvidence({
                   durationMs: Date.now() - startedAtMs,
                   promptChars,
+                  ...(contextSections !== undefined ? { contextSections } : {}),
+                  ...(promptTokensEstimate !== undefined ? { promptTokensEstimate } : {}),
                   finishPath: 'failed',
                   faultSide: classifyFaultSide({ failureKind, error: msg }),
                 }),
@@ -1584,11 +1599,18 @@ export class RunExecutor {
    * role") let the model opt out of ordinary messages, which made the first
    * message in a fresh DM or group go unanswered.
    */
-  private buildPrompt(
+  /**
+   * Assemble this turn's prompt AND the per-section measurement (OP-15).
+   *
+   * The prompt bytes/order are unchanged; `sections` is the same map `assemblePrompt` consumed,
+   * kept so the executor can attribute the turn's context cost per section without re-parsing
+   * (or storing) the text.
+   */
+  private composePrompt(
     run: RunSnapshot,
     bot: BotSnapshot | undefined,
     botId: string,
-  ): string {
+  ): { prompt: string; sections: PromptSections } {
     const roomForFold = this.svc.getRoom(run.roomId)
     const messages = this.svc.listMessages(run.roomId)
     // Folding is a window operation: the folded rows keep their place in the transcript
@@ -1723,7 +1745,16 @@ export class RunExecutor {
       sections.history = `${historyHeader(this.historyMessages, history.truncated)}\n${history.text}`
     }
     sections.input = inputBlock(run.prompt)
-    return assemblePrompt(sections)
+    return { prompt: assemblePrompt(sections), sections }
+  }
+
+  /** Back-compat for callers/tests that only need the bytes. */
+  private buildPrompt(
+    run: RunSnapshot,
+    bot: BotSnapshot | undefined,
+    botId: string,
+  ): string {
+    return this.composePrompt(run, bot, botId).prompt
   }
 
   /**

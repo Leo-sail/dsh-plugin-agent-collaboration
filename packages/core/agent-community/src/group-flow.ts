@@ -32,11 +32,17 @@ import {
 } from './task-board.ts'
 import { resolveRoomLeader } from './room-leader.ts'
 import {
+  classifyTaskDifficulty,
+  historicalMemberPriors,
+  rankWithPriors,
+  rosterBudget,
+} from './collaboration-priors.ts'
+import { shouldSkipModelConsult, validateConsultDecision } from './proposal-policy.ts'
+import {
   buildCapabilityCard,
   chooseValidLeader,
   defaultProposalLeader,
   fallbackSelection,
-  sanitizeCollaborateSelection,
   shortlistFor,
   type CapabilityCard,
   type RankedCandidate,
@@ -270,10 +276,24 @@ export class GroupFlowService {
       ...(bot.systemPrompt !== undefined ? { systemPrompt: bot.systemPrompt } : {}),
       ...(bot.skillProfile !== undefined ? { skillProfile: { names: bot.skillProfile.names } } : {}),
     }))
-    const shortlist = shortlistFor(message.text, cards, room.directBotId, MAX_PROPOSED_MEMBERS)
+    // ── OP-11: THE ROSTER SIZE FOLLOWS THE TASK, AND HISTORY BREAKS NEAR-TIES ──
+    //
+    // A simple task ("translate this line") used to consider four candidates and could propose
+    // three members; a genuinely complex one considered the same four. The difficulty estimate
+    // is deterministic (see `collaboration-priors.ts`) and only ever SHRINKS or keeps the
+    // historical width — the hard cap still applies here.
+    const shortlistLimit = Math.min(
+      MAX_PROPOSED_MEMBERS,
+      Math.max(2, rosterBudget(classifyTaskDifficulty(message.text))),
+    )
+    const shortlist = shortlistFor(message.text, cards, room.directBotId, shortlistLimit)
     // The source bot is always on the shortlist, so fewer than two means there is no second
     // bot to collaborate with.
     if (shortlist.length < 2) return undefined
+    // Finished/failed policy work is already on the rooms' boards. It is a TIE-BREAK only: the
+    // fit score stays primary, so a well-matched bot can never be displaced by a mediocre one
+    // with a lucky record.
+    const rankedShortlist = rankWithPriors(shortlist, historicalMemberPriors(this.port.listRooms()))
 
     const explicit = (input.memberIds ?? []).filter(id => typeof id === 'string' && id !== '')
     const decided = explicit.length > 0
@@ -283,7 +303,7 @@ export class GroupFlowService {
         name: input.name,
         reason: input.reason,
       }
-      : await this.decideMembers(room, sourceBot, message.text, shortlist, cards)
+      : await this.decideMembers(room, sourceBot, message.text, rankedShortlist, cards)
     if (decided === undefined) return undefined
 
     const members: BotId[] = []
@@ -880,6 +900,37 @@ export class GroupFlowService {
     cards: readonly CapabilityCard[],
   ): Promise<{ members: string[]; leaderId?: string | undefined; name?: string | undefined; reason?: string | undefined } | undefined> {
     if (text.trim() === '') return undefined
+    // ── OP-10: DETERMINISTIC SHORT-CIRCUIT ─────────────────────────────────────
+    //
+    // A short, simple task whose shortlist is exactly "source bot + one clear fit" has nothing
+    // for the model to decide: the ranking already names the roster and the source bot is the
+    // default leader. Skipping the consult saves a full model call on the common path — but the
+    // shortcut is validated like any other selection below, and every ambiguous case still asks.
+    const shortcut = shouldSkipModelConsult({
+      shortlist,
+      ...(room.directBotId !== undefined ? { directBotId: room.directBotId } : {}),
+      taskText: text,
+      maxMembers: MAX_PROPOSED_MEMBERS,
+    })
+    if (shortcut !== false && shortcut.selection !== undefined) {
+      const verified = validateConsultDecision(
+        { members: shortcut.selection.members, leaderId: shortcut.selection.leaderId },
+        shortlist.map(candidate => candidate.botId),
+        room.directBotId,
+        MAX_PROPOSED_MEMBERS,
+      )
+      if (verified.ok) {
+        this.port.logger?.info?.(
+          `agent-community: group proposal skipped model consult (${shortcut.reason}) `
+          + `members=[${verified.selection.members.join(',')}]`,
+        )
+        return {
+          members: [...verified.selection.members],
+          leaderId: verified.selection.leaderId,
+          reason: shortcut.reason,
+        }
+      }
+    }
     const verdict = await this.consultModel(sourceBot, text, shortlist, cards)
     if (verdict.kind === 'no-group') return undefined
     if (verdict.kind === 'decided') {
@@ -893,7 +944,7 @@ export class GroupFlowService {
           .map(card => [card.name, card.botId] as const),
       )
       const resolve = (reference: string): string => byName.get(reference) ?? reference
-      const selection = sanitizeCollaborateSelection(
+      const checked = validateConsultDecision(
         {
           members: verdict.members.map(resolve),
           ...(verdict.leaderId !== undefined ? { leaderId: resolve(verdict.leaderId) } : {}),
@@ -902,10 +953,10 @@ export class GroupFlowService {
         room.directBotId,
         MAX_PROPOSED_MEMBERS,
       )
-      if (selection !== undefined) {
+      if (checked.ok) {
         return {
-          members: [...selection.members],
-          leaderId: selection.leaderId,
+          members: [...checked.selection.members],
+          leaderId: checked.selection.leaderId,
           ...(verdict.name !== undefined ? { name: verdict.name } : {}),
           ...(verdict.reason !== undefined ? { reason: verdict.reason } : {}),
         }
