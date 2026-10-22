@@ -27,6 +27,7 @@ import type {
   BotMessageSenderKind,
   BotRoomId,
   BotRun,
+  HarnessAttribution,
 } from './types.ts'
 import type { FailureKind } from './run-budget.ts'
 
@@ -84,6 +85,12 @@ export interface SnapshotRun {
   readonly lastProgressAt?: string | undefined
   readonly extensions?: number | undefined
   readonly failureKind?: FailureKind | undefined
+  /**
+   * Harness attribution (OP-01): prompt contract + preset + context budgets this run ran
+   * under. Small (six scalar fields) and genuinely useful in the panel/audit trail, so it is
+   * kept while `prompt`, reasoning and tool output stay out.
+   */
+  readonly harness?: HarnessAttribution | undefined
 }
 
 /** Clip message text to the snapshot budget, code-point safe and with an explicit marker. */
@@ -140,6 +147,9 @@ export function summarizeSnapshotRun(run: BotRun): SnapshotRun {
     ...(run.lastProgressAt !== undefined ? { lastProgressAt: run.lastProgressAt } : {}),
     ...(run.extensions !== undefined ? { extensions: run.extensions } : {}),
     ...(run.failureKind !== undefined ? { failureKind: run.failureKind } : {}),
+    // A frozen attribution object copied by reference: its six scalar fields are bounded and
+    // `Object.freeze` means the snapshot cannot be mutated through this path.
+    ...(run.harness !== undefined ? { harness: run.harness } : {}),
   }
 }
 

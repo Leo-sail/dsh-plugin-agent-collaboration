@@ -32,6 +32,7 @@ import type {
   BotMemoryEntry,
   RoomGoal,
   DeliveredFile,
+  HarnessAttribution,
 } from './types.ts'
 import { routeMessage, namedBotIdsIn, mentionsEveryone } from './routing.ts'
 import { renderAttachmentReference, storeAttachments, type StoredAttachment } from './attachments.ts'
@@ -59,6 +60,12 @@ import {
   DEFAULT_GOAL_MAX_ROUNDS, GOAL_STALL_LIMIT, type BotGoalAction, type GoalActor,
 } from './room-goal.ts'
 import { planDispatch, handoffReport, MAX_DISPATCH_TASKS, type DispatchTask } from './dispatch.ts'
+import {
+  buildHarnessAttribution,
+  readPluginVersion,
+  HARNESS_REVISION,
+} from './harness-attribution.ts'
+import { PROMPT_CONTRACT_VERSION } from './prompt-contract.ts'
 import {
   classifyFailure,
   isRetryableFailureKind,
@@ -3273,6 +3280,11 @@ export class AgentCommunityService extends TypertRemoteService {
       progressEvents: 0,
       nextRetryAt: undefined,
       failureKind: undefined,
+      // ── WHO IS RUNNING THIS (OP-01) ────────────────────────────────────────────
+      // Recorded once, at the moment the run really starts; a retry/requeue keeps the same
+      // attribution (`prev.harness`), because the harness of the attempt that produced the
+      // result is what a stored evaluation must be compared against.
+      harness: prev.harness ?? this.currentHarnessAttribution(),
       updatedAt: nowIso(),
     }
     const runs = [...this.state.runs]
@@ -3280,6 +3292,25 @@ export class AgentCommunityService extends TypertRemoteService {
     this.state = { ...this.state, runs }
     this.enqueueWrite()
     return updated
+  }
+
+  /**
+   * The harness a run claimed NOW would be attributed to (OP-01).
+   *
+   * Read at claim time, from the live configuration, and stored on the run: a later config
+   * change, a plugin upgrade or a prompt-contract bump must not retroactively relabel the runs
+   * that already produced results. `readPluginVersion` reads package.json at runtime — the
+   * source deliberately contains no version literal.
+   */
+  private currentHarnessAttribution(): HarnessAttribution {
+    return buildHarnessAttribution({
+      pluginVersion: readPluginVersion(),
+      harnessRevision: HARNESS_REVISION,
+      promptContract: PROMPT_CONTRACT_VERSION,
+      preset: this.cfg.botAgentPreset ?? 'bot',
+      historyMessages: this.cfg.historyMessagesInPrompt ?? 10,
+      memoryPromptEntries: this.cfg.memoryPromptEntries ?? 8,
+    })
   }
 
   /**

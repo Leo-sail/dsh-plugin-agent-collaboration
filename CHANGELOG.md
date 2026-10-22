@@ -1,3 +1,32 @@
+## Unreleased — paper batch 1 (OP-01 harness attribution, OP-05 prompt contract)
+
+论文全库扫描后的第一批机制改进；只改插件源码/测试，不改 Bot。
+
+### OP-05 · 每轮提示词格式成为可测试契约
+- 新增 `prompt-contract.ts`：固定段序 `role → skills → goal → memory → history → input`、
+  唯一分隔符 `\n\n`、历史 header（含截断标记）、`[本轮输入]` 生成、`assemblePrompt` 纯函数；
+  `PROMPT_CONTRACT_VERSION=1`。
+- `runs.buildPrompt` 改为按契约填段并 `assemblePrompt`；**输出与改前逐字节一致**（测试用
+  旧/新实例对跑两套 fixture 并固化 golden）。以后改段序/分隔/格式必须 bump 版本。
+- 新增 `tests/prompt-contract.test.ts`（11）：golden 精确串、键序无关、缺段无空行、
+  history 两种 header、input 恒最后、空段跳过、真实 buildPrompt 精确 golden。
+
+### OP-01 · 每个 run 记录“谁产出了这个结果”
+- 新增 `HarnessAttribution`：`pluginVersion`（运行时读 package.json，不写死版本）、
+  `harnessRevision`（手工批次标记）、`promptContract`、`preset`、`historyMessages`、
+  `memoryPromptEntries`；`BotRun.harness?` 在 `claimRun` 时写一次，重试沿用。
+- `snapshot-lite` 保留 harness 六字段（不泄漏 prompt/reasoning/tool 输出）。
+- 新增 `tests/harness-attribution.test.ts`（10）：字段/冻结/默认、真实 package.json 读取、
+  注入 loader、unknown 回退、snapshot 保留且不泄漏重字段。
+- 新增 `tests/PROTOCOL.md`：协议卡模板（model-dependent?/fixtures/窗口预算/权限/失败判据/
+  重复次数/归因/运行命令）+ 2 个示例；`tests/README.md` 更新完整测试清单与协议卡纪律。
+
+### 验证
+- `node --test tests/*.test.ts`：**197/197**（既有 176 + 新增 21）。
+- core/UI typecheck（过滤宿主噪声）：0 真实错误；四包构建 + check-build OK。
+- 隔离实例实跑一条 run：`harness={pluginVersion:'0.3.2', harnessRevision:'paper-batch1-2026-10-22',
+  promptContract:1, preset:'bot', historyMessages:10, memoryPromptEntries:8}` 已持久化。
+- 未发布 npm / 未更新市场；只同步 GitHub 源码。
 ## Unreleased — stability batch 9 (UI follow-up from the real-instance retest)
 
 用户复测提出的两个界面问题：

@@ -25,6 +25,12 @@ import { buildPerception, type Perception, type PerceptionValue } from './percep
 import { optionalService } from './session-runner.ts'
 import { renderMemoryDelta } from './bot-memory.ts'
 import { buildHistoryWindow } from './context-window.ts'
+import {
+  assemblePrompt,
+  historyHeader,
+  inputBlock,
+  type PromptSections,
+} from './prompt-contract.ts'
 import type { ProgressKind, SessionRunner } from './session-runner.ts'
 import type { LedgerProjector } from './ledger.ts'
 import {
@@ -1567,7 +1573,15 @@ export class RunExecutor {
     // `members` still documents who the room holds); the group rule text itself moved to the
     // system prompt.
 
-    const parts: string[] = []
+    // ── THE PROMPT CONTRACT (OP-05) ─────────────────────────────────────────────
+    //
+    // This used to be a `parts: string[]` joined here, which made the section order and the
+    // separators an implicit convention of this function — any refactor could reorder two
+    // blocks and make every stored evaluation compare different harnesses. The names, order
+    // and separator now live in `prompt-contract.ts` and are golden-tested; this function only
+    // fills the sections. THE ASSEMBLED BYTES ARE UNCHANGED — same blocks, same order, same
+    // `\n\n` between them (tests assert the exact output).
+    const sections: PromptSections = {}
     if (bot !== undefined) {
       // The bot's own system prompt belongs here. It was only ever read by the LEGACY
       // non-session path, so on the native prompt path — the one every real run takes — a bot
@@ -1575,7 +1589,7 @@ export class RunExecutor {
       const persona = bot.systemPrompt !== undefined && bot.systemPrompt !== ''
         ? `${bot.systemPrompt}\n你是 ${bot.name}。${bot.description ?? ''}`
         : `你是 ${bot.name}。${bot.description ?? ''}`
-      parts.push(`[角色]\n${persona}`)
+      sections.role = `[角色]\n${persona}`
     }
     // ── 没有要求就不要开工 ────────────────────────────────────────────────────────────────────────
     // Stated on EVERY turn, not just when a question is pending: a bot that treats an unanswered
@@ -1599,7 +1613,7 @@ export class RunExecutor {
     // THIS bot and still lists the full name universe so nothing is unreachable. The
     // builder used to render its own names-only list, which ignored the profile.
     const skillBlock = this.svc.skillPromptFor(run.roomId, botId)
-    if (skillBlock !== undefined && skillBlock !== '') parts.push(skillBlock)
+    if (skillBlock !== undefined && skillBlock !== '') sections.skills = skillBlock
     // ── WHAT THIS BOT ALREADY DID IN THIS ROOM ──────────────────────────────────
     //
     // Before the recent-message window on purpose: this is standing knowledge about the room,
@@ -1612,7 +1626,7 @@ export class RunExecutor {
     // one the model should read before its memory: "what are we doing here" outranks "what
     // have I done here".
     const goal = this.svc.roomGoalBlock(run.roomId)
-    if (goal !== undefined) parts.push(goal)
+    if (goal !== undefined) sections.goal = goal
     if (bot !== undefined && this.memoryPromptEntries > 0) {
       // BASELINE ONCE, DELTA AFTER: the executor remembers what this pair has already been
       // shown, so a turn carries the recent memory only when it is the first, and otherwise
@@ -1622,19 +1636,16 @@ export class RunExecutor {
       const delta = renderMemoryDelta(this.svc.botMemoryFor(run.roomId, bot.id), this.injectedMemory.get(key), {
         limit: this.memoryPromptEntries,
       })
-      if (delta.block !== undefined) parts.push(delta.block)
+      if (delta.block !== undefined) sections.memory = delta.block
       if (delta.newestId !== undefined) this.injectedMemory.set(key, delta.newestId)
     }
     if (history.text !== '') {
       // Say so when the block was clipped: a model that is told the window is partial
       // asks for the file/command instead of assuming the transcript ends there.
-      const header = history.truncated
-        ? `[最近 ${this.historyMessages} 条消息（已按长度截断）]`
-        : `[最近 ${this.historyMessages} 条消息]`
-      parts.push(`${header}\n${history.text}`)
+      sections.history = `${historyHeader(this.historyMessages, history.truncated)}\n${history.text}`
     }
-    parts.push(`[本轮输入]\n${run.prompt}`)
-    return parts.join('\n\n')
+    sections.input = inputBlock(run.prompt)
+    return assemblePrompt(sections)
   }
 
   /**

@@ -278,6 +278,30 @@ export interface BotMessage {
   readonly targetNames?: readonly string[] | undefined
 }
 
+/**
+ * WHICH harness produced a run's results (OP-01).
+ *
+ * Recorded once when a run is claimed (i.e. when it really starts), and never rewritten: a
+ * stored result must always be traceable to the prompt format, preset and context windows
+ * that produced it. `promptContract` is the version of `prompt-contract.ts`;
+ * `harnessRevision` is the hand-maintained batch marker (the git commit is not a substitute:
+ * it changes for docs and UI too).
+ */
+export interface HarnessAttribution {
+  /** The plugin package version, read from package.json at runtime; 'unknown' if unreadable. */
+  readonly pluginVersion: string
+  /** Hand-bumped batch marker of model-visible behaviour. */
+  readonly harnessRevision: string
+  /** Version of the per-turn prompt format contract. */
+  readonly promptContract: number
+  /** Agent preset the bot session runs under (e.g. 'bot'). */
+  readonly preset: string
+  /** How many recent messages the prompt window was configured for. */
+  readonly historyMessages: number
+  /** How many remembered entries the prompt was configured to inject. */
+  readonly memoryPromptEntries: number
+}
+
 export interface BotRun {
   readonly id: BotRunId
   readonly botId: BotId
@@ -329,6 +353,11 @@ export interface BotRun {
   readonly failureKind?: FailureKind | undefined
   /** Per-run deadline override from the panel; absent = derived from history. */
   readonly timeoutOverrideMs?: number | undefined
+  /**
+   * Who produced this run's results (OP-01): prompt contract, harness batch, preset and the
+   * context-window budgets. Written once, at claim; absent on runs that never started.
+   */
+  readonly harness?: HarnessAttribution | undefined
 }
 
 export interface BotCommunitySnapshot {
