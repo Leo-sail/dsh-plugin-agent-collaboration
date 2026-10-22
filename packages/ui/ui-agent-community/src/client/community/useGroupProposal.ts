@@ -35,8 +35,12 @@ export interface GroupProposalFlowInput {
   setTab: (tab: ActiveTab) => void
   setSelectedId: (roomId: string) => void
   setNotice: (text: string) => void
-  /** Fetch the snapshot now; `preferId` asks to keep that room selected while it still exists. */
-  load: (preferId?: string) => Promise<void>
+  /**
+   * Fetch the snapshot now. No room argument on purpose: after an answer the selection is
+   * applied first (directly, or through `pendingNavigation`), and the shell's arbitration
+   * (`selection.ts`) must keep it rather than carrying the room this flow was issued from.
+   */
+  load: () => Promise<void>
 }
 
 /** Everything the shell needs to render and answer {@link GroupProposalDialog}. */
@@ -176,7 +180,10 @@ export function useGroupProposal({
     setTab(nav.tab)
     setSelectedId(nav.selectedId)
     if (cause === 'timeout') setNotice(PROPOSAL_TIMED_OUT_NOTICE)
-    void load(nav.selectedId)
+    // Selection first, then the reload: `load()` no longer takes a room (the shell keeps
+    // whatever was selected when the answer lands), so passing the old source room here as
+    // a preference is neither possible nor wanted.
+    void load()
   }
 
   return { proposal, detectProposal, onConfirm, onDecline, onConfirmed, onDeclined }

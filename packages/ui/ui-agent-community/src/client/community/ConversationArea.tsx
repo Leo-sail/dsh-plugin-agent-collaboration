@@ -63,8 +63,13 @@ export interface ConversationAreaProps {
    * ask for the older "opened at" mark on the next tick — a request the host can only refuse.
    */
   onMarkRead: (roomId: string, upTo: { id: string; createdAt: string } | null) => void
-  /** Reload the snapshot, optionally keeping `preferId` selected (the fork path). */
-  onReload: (preferId?: string) => Promise<void>
+  /**
+   * Reload the snapshot now. Deliberately takes no room: the reload must keep whatever the
+   * user has selected by the time it lands. Passing the room this panel was showing (the old
+   * fork path did) dragged the selection back when the user switched away mid-request — see
+   * `selection.ts` and `useCommunitySnapshot`.
+   */
+  onReload: () => Promise<void>
   /** Land in a freshly forked bot's room: switch to the bots tab and select it. */
   onOpenBotRoom: (roomId: string) => void
 }
@@ -155,7 +160,7 @@ export function ConversationArea({
             // timestamp compared against the client's clock — and the whole message object is
             // handed over, because the panel's snapshot does not contain it yet.
             onMarkRead(roomId, { id: sent.id, createdAt: sent.createdAt })
-            void onReload(roomId)
+            void onReload()
             // §5.4: only a DM can escalate into a group — a group already has
             // its members — and the check runs AFTER the send resolved so the
             // message the proposal is about is already in the room.
@@ -211,7 +216,7 @@ export function ConversationArea({
               void remote.updateBot({ id: botId, permission: subId as 'read-only' | 'workspace-write' | 'full-access' })
                 .then(() => {
                   onNotice(`已把「${botName}」的权限设为：${label}。正在进行的这一轮不受影响，下一次运行生效。`)
-                  return onReload(roomId)
+                  return onReload()
                 })
                 .catch((e: unknown) => { onNotice(`设置权限失败：${describe(e)}`) })
               return
@@ -241,7 +246,7 @@ export function ConversationArea({
                   // The provider belongs in the notice: two providers offer the same model
                   // ids, so "model set to X" alone cannot tell the user what changed.
                   onNotice(`已把「${botName}」的模型设为：${modelName}（提供方：${providerName}）。正在进行的这一轮不受影响，下一次运行生效。`)
-                  return onReload(roomId)
+                  return onReload()
                 })
                 .catch((e: unknown) => { onNotice(`设置模型失败：${describe(e)}`) })
               return
@@ -276,7 +281,7 @@ export function ConversationArea({
                   // the messages this call just replaced would stay on screen. Bumping the
                   // epoch remounts the panel, which fetches the host's rebuilt ledger.
                   setTranscriptEpoch(epoch => epoch + 1)
-                  return onReload(roomId)
+                  return onReload()
                 })
                 .catch((e: unknown) => { onNotice(`压缩失败：${describe(e)}`) })
               return
@@ -303,8 +308,10 @@ export function ConversationArea({
             void remote.copyBot(botId, room.id, messageId)
               .then(({ bot, room: copy }) => {
                 onNotice(`已分叉出新 Bot：${bot.name}（已带上该条及之前的消息）`)
-                // Land in the copy's conversation, not the original's.
-                void onReload(copy.id).then(() => {
+                // Land in the copy's conversation, not the original's. The reload itself
+                // carries no room: `onOpenBotRoom` is what moves the selection, and it has
+                // to run AFTER the fresh snapshot so the copy's room exists to be selected.
+                void onReload().then(() => {
                   onOpenBotRoom(copy.id)
                 })
               })

@@ -121,8 +121,10 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
   // P1-A: @mention bot picker (fallback textarea mode only)
 
   // Snapshot fetching, the poll schedule and the direct-room repair pass: see community/.
-  const { snapshot, setSnapshot, error, setError, load, roomIdsKey } = useCommunitySnapshot({
-    remote, tab, selectedId, setSelectedId,
+  // No `selectedId` goes in: the hook owns the poll and must not capture the selection it
+  // would then write back. Click handlers call `noteUserSelection()` instead — see there.
+  const { snapshot, setSnapshot, error, setError, load, noteUserSelection, roomIdsKey } = useCommunitySnapshot({
+    remote, tab, setSelectedId,
   })
   // P1-4 / §5.4: the pending group proposal for the open DM room, its gate, and the
   // navigation that follows an answer — see community/useGroupProposal.ts.
@@ -462,14 +464,16 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
       >
         <RoomList
           tab={tab}
-          onSelectTab={(next) => { setTab(next); setSelectedId(undefined) }}
+          // `noteUserSelection()` BEFORE each pick: a snapshot fetch that started earlier
+          // must lose to this click when it lands, which is the whole point of the timestamp.
+          onSelectTab={(next) => { noteUserSelection(); setTab(next); setSelectedId(undefined) }}
           bots={visibleBots}
           rooms={visibleRooms}
           selectedId={selectedId}
           unread={unread}
           directTabUnread={directTabUnread}
           groupTabUnread={groupTabUnread}
-          onSelectRoom={(id) => { setSelectedId(id) }}
+          onSelectRoom={(id) => { noteUserSelection(); setSelectedId(id) }}
           onCreate={openCreateForm}
           onEditBot={openEditForm}
           onOpenRoomSettings={openRoomSettings}

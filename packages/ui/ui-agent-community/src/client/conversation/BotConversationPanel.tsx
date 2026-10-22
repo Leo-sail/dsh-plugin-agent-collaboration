@@ -6,6 +6,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { CSSProperties } from 'react'
 import type { LedgerEntry, AttachmentItem, InFlightMessage } from './types.ts'
+import { mergeLedgerEntries, missingAnswerRunIds, nextBackfillPage } from './ledgerWindow.ts'
 import {
   IconChevronDownOutlineRegular, IconPanelLeftOutlineRegular,
 } from './NativeIcons.tsx'
@@ -172,13 +173,23 @@ export interface BotConversationPanelProps {
 const PAGE_SIZE = 50
 
 /**
- * Order transcript rows by when they happened.
+ * How many pages the answer-row backfill may walk backwards.
  *
- * `sequence` alone is not safe: it is a ledger-internal counter, and any path that
- * renumbers rows (a re-seed from persisted state) breaks the correspondence with the
- * real send order — a tool row was once sorted above the user message that preceded
- * it. `at` is the actual event time, so it orders correctly regardless of numbering.
+ * The first page is the newest {@link PAGE_SIZE} rows and a tool-heavy turn keeps its
+ * answer row at the turn's START (the row is reserved when the run begins, so its
+ * sequence is the smallest of the turn) while its tool rows fill the tail. The reply
+ * can therefore sit one or more pages behind the first screen. Eight pages = 400 rows,
+ * comfortably more than the longest turn measured so far (≈180 rows for an 89-tool
+ * turn), and the walk stops far earlier as soon as the answers are in the window. A
+ * full `force` read was rejected: it transfers the whole room on every mount.
  */
+const MAX_BACKFILL_PAGES = 8
+
+/** Run statuses that can no longer produce ledger rows. */
+function isTerminalRun(run: RunInfo): boolean {
+  return run.status !== 'running' && run.status !== 'queued'
+}
+
 /** Stable empty list: a fresh array every render would defeat memoized children. */
 const EMPTY_TASKS: ReadonlyArray<RoomTaskRow> = []
 
@@ -197,13 +208,6 @@ function roundStartOf(entries: ReadonlyArray<LedgerEntry>): string | undefined {
     if (at !== '' && (newest === undefined || at > newest)) newest = at
   }
   return newest
-}
-
-function byTimeThenSequence(a: LedgerEntry, b: LedgerEntry): number {
-  const ta = Date.parse(a.at)
-  const tb = Date.parse(b.at)
-  if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta - tb
-  return a.sequence - b.sequence
 }
 
 export function BotConversationPanel({
@@ -248,6 +252,24 @@ export function BotConversationPanel({
   const entriesRef = useRef<LedgerEntry[]>([])
   useEffect(() => { entriesRef.current = entries }, [entries])
 
+  // ── ANSWER-VISIBILITY BACKFILL ────────────────────────────────────────────────
+  //
+  // `runs` is a fresh array on every snapshot poll, and the async walk below must see
+  // the CURRENT run records without making `backfillAnswers` change identity on every
+  // tick (it is a dependency of the effects that reload the first page). Same pattern
+  // as `entriesRef` above.
+  const runsRef = useRef<readonly RunInfo[]>(runs)
+  runsRef.current = runs
+  /**
+   * Runs whose answer row this mount has already looked for.
+   *
+   * A failed run that produced no text has no `bot-text` row at all, so it looks
+   * "missing" after every settle reload. The answer row of a terminal run cannot
+   * appear later, so one bounded walk per run per mount is enough — and it keeps a
+   * room full of old failed runs from walking pages on every refresh.
+   */
+  const backfillAttempted = useRef(new Set<string>())
+
   const isRunning = runs.some(r =>
     (isGroup ? true : bots.some(b => b.id === r.botId)) &&
     (r.status === 'running' || r.status === 'queued')
@@ -260,6 +282,57 @@ export function BotConversationPanel({
   /** A bot is blocked on this question: it takes the composer's place until answered. */
   const question = pendingQuestion(entries)
 
+  /**
+   * Walk backwards from the oldest loaded row until every targeted run has an answer row.
+   *
+   * WHY THIS EXISTS: the first page is the newest {@link PAGE_SIZE} rows, and a turn's
+   * answer row is reserved when its run STARTS — its `sequence` is the smallest of the
+   * turn — while its reasoning/tool rows stream in afterwards. A tool-heavy turn
+   * therefore pushes its own answer out of the newest page, and the incremental cursor
+   * (`changedAfterSequence` = rows at/after the newest sequence held) can never fetch a
+   * row below it. The reader saw the turn's work steps but no reply, until
+   * 「加载更早」 asked for `beforeSequence` — the reported 「回复被隐藏」.
+   *
+   * Deliberately paginated, never `force`: a room can hold thousands of rows and a full
+   * read on every mount/settle is exactly the storm the cursor exists to avoid. The
+   * walk stops as soon as the targeted answers are in hand or the history runs out, and
+   * every run is walked at most once per mount (see `backfillAttempted`).
+   *
+   * `seed` lets the caller walk from a page it just fetched instead of waiting for the
+   * entries state commit to reach `entriesRef` (on mount the ref is still empty when
+   * the first fetch resolves).
+   */
+  const backfillAnswers = useCallback(async (
+    targetRunIds: readonly string[],
+    seed?: LedgerEntry[],
+  ): Promise<void> => {
+    const targets: string[] = []
+    for (const runId of targetRunIds) {
+      if (backfillAttempted.current.has(runId)) continue
+      backfillAttempted.current.add(runId)
+      targets.push(runId)
+    }
+    if (targets.length === 0) return
+    const targetSet = new Set(targets)
+    let working = seed ?? entriesRef.current
+    for (let page = 0; page < MAX_BACKFILL_PAGES; page++) {
+      const cursor = nextBackfillPage(working, PAGE_SIZE)
+      if (cursor === undefined) return
+      let data: LedgerEntry[]
+      try {
+        data = await listLedger(roomId, cursor)
+      } catch (e) {
+        setLedgerError(e instanceof Error ? e.message : String(e))
+        return
+      }
+      if (data.length === 0) return
+      working = mergeLedgerEntries(working, data)
+      setEntries(prev => mergeLedgerEntries(prev, data))
+      const stillMissing = missingAnswerRunIds(working, runsRef.current)
+      if (!stillMissing.some(runId => targetSet.has(runId))) return
+    }
+  }, [roomId, listLedger])
+
   // Load ledger on mount and when roomId changes
   const loadInitial = useCallback(async () => {
     try {
@@ -270,28 +343,34 @@ export function BotConversationPanel({
       // reply, including its duration, reaches the client) and those rows get FRESH
       // sequence numbers. A hard replace therefore reordered the whole transcript in
       // one commit — visible as the message list flashing and a row appearing to
-      // duplicate. Merging keeps every row we already hold and updates it in place.
-      setEntries(prev => {
-        const byId = new Map(prev.map(e => [e.id, e]))
-        for (const e of data) byId.set(e.id, e)
-        return Array.from(byId.values()).sort(byTimeThenSequence)
-      })
+      // duplicate. Merging keeps every row we already hold and updates it in place
+      // (by `rev`), and it returns the same array when the page carried nothing new.
+      const merged = mergeLedgerEntries(entriesRef.current, data)
+      setEntries(prev => mergeLedgerEntries(prev, data))
       setHasEarlier(data.length >= PAGE_SIZE)
       setLedgerError(undefined)
+      // The newest page is not turn-aligned: a tool-heavy turn's answer row can have
+      // fallen below it. Fetch the pages between here and that turn NOW, instead of
+      // leaving the reply invisible until the reader clicks 「加载更早」.
+      const missing = missingAnswerRunIds(merged, runsRef.current)
+      if (missing.length > 0) await backfillAnswers(missing, merged)
     } catch (e) {
       setLedgerError(e instanceof Error ? e.message : String(e))
     }
-  }, [roomId, listLedger])
+  }, [roomId, listLedger, backfillAnswers])
 
   useEffect(() => {
     setEntries([])
     setQueue([])
+    // A different room is a different run history; the attempt guard is per mount, and
+    // this is the one place the panel can change rooms without remounting.
+    backfillAttempted.current = new Set()
     void loadInitial()
   }, [roomId, loadInitial])
 
   // Poll for new entries. The interval is deliberately very short because a room's
   // own message must appear the moment it is sent. That is only affordable because
-  // the poll is cursor-based: it asks the host for entries strictly after the last
+  // the poll is cursor-based: it asks the host for entries at/after the newest
   // sequence it holds, so each tick transfers just the delta rather than the whole
   // room history.
   // IMPORTANT: entries must NOT be in the deps array — it causes the interval
@@ -327,22 +406,11 @@ export function BotConversationPanel({
         if (!mounted) return
         setLedgerError(undefined)
         if (data.length > 0) {
-          setEntries(prev => {
-            const idMap = new Map(prev.map(e => [e.id, e]))
-            let changed = false
-            for (const e of data) {
-              const before = idMap.get(e.id)
-              // `rev` is bumped by the host on every in-place update (`types.ts`), so an identical
-              // re-send is detectable without deep comparison. Returning the SAME array when nothing
-              // changed is what keeps React from re-rendering the whole transcript on every tick —
-              // the merge used to rebuild and re-sort the room on each poll regardless.
-              if (before !== undefined && (before as { rev?: number }).rev === (e as { rev?: number }).rev) continue
-              idMap.set(e.id, e)
-              changed = true
-            }
-            if (!changed) return prev
-            return Array.from(idMap.values()).sort(byTimeThenSequence)
-          })
+          // `mergeLedgerEntries` compares `rev` (bumped by the host on every in-place
+          // update) and returns the SAME array when the page carries nothing new. That
+          // is what keeps React from re-rendering the whole transcript on every tick —
+          // the merge used to rebuild and re-sort the room on each poll regardless.
+          setEntries(prev => mergeLedgerEntries(prev, data))
         }
       } catch (e) {
         if (mounted) setLedgerError(e instanceof Error ? e.message : String(e))
@@ -367,7 +435,7 @@ export function BotConversationPanel({
     return () => { mounted = false; clearInterval(interval); document.removeEventListener('visibilitychange', onVisible) }
   }, [roomId, isRunning, listLedger])
 
-  // Force a FULL reload the moment a run stops being live.
+  // Re-read the moment a run stops being live.
   //
   // The incremental tick above advances a cursor derived from the newest entry it
   // already holds, so the final state of the turn — the settled text, its duration,
@@ -375,19 +443,22 @@ export function BotConversationPanel({
   // the turn as still running until the reader left the room and came back, which
   // re-mounted the component and reloaded from scratch. A run ending is exactly the
   // moment the panel must re-read, so do it explicitly.
-  // Count of runs that have reached a terminal state. Each new one re-reads the
-  // ledger in full.
   //
-  // Watching only the live->idle transition missed replies: two bots can settle in
-  // the same tick, and a run that starts and finishes between two snapshot samples
-  // never flips the flag at all. The panel then showed no answer until the reader
-  // left the room and came back (which re-mounted it). A monotonic settled count is
-  // a signal that cannot be skipped.
-  const settledRuns = runs.filter(r => r.status !== 'running' && r.status !== 'queued').length
-  const seenSettled = useRef(settledRuns)
+  // Watching only the live->idle transition missed replies: two bots can settle in the
+  // same tick, and a run that starts and finishes between two snapshot samples never
+  // flips the flag at all. The SET of terminal run ids is a signal that cannot be
+  // skipped, and it also names the runs whose answer rows the backfill must look for —
+  // a settled reply can sit below the newest page exactly like it did on mount.
+  const terminalRunIds = runs.filter(isTerminalRun).map(run => run.id)
+  const terminalRunIdsKey = terminalRunIds.join(',')
+  const seenTerminalRuns = useRef(terminalRunIdsKey)
   useEffect(() => {
-    if (settledRuns <= seenSettled.current) { seenSettled.current = settledRuns; return }
-    seenSettled.current = settledRuns
+    const previous = seenTerminalRuns.current === '' ? [] : seenTerminalRuns.current.split(',')
+    seenTerminalRuns.current = terminalRunIdsKey
+    const seen = new Set(previous)
+    const newlySettled = (terminalRunIdsKey === '' ? [] : terminalRunIdsKey.split(','))
+      .filter(runId => !seen.has(runId))
+    if (newlySettled.length === 0) return
     // Re-read now, and once more shortly after.
     //
     // The incremental poll stops the moment the snapshot reports the run as idle, so
@@ -395,20 +466,27 @@ export function BotConversationPanel({
     // listening: the turn kept showing the whale and its live timer, and no duration,
     // until the reader left the room. The immediate read closes that window; the
     // delayed one covers a settle that lands a beat after the snapshot.
+    //
+    // `loadInitial` already backfills runs whose answer row is below its first page;
+    // the explicit call names the runs that JUST settled, which closes the smaller
+    // window where the settle is visible in the run list before the ledger has the row.
     void loadInitial()
+    void backfillAnswers(newlySettled)
     const t = setTimeout(() => { void loadInitial() }, 400)
     return () => clearTimeout(t)
-  }, [settledRuns, loadInitial])
+  }, [terminalRunIdsKey, loadInitial, backfillAnswers])
 
   // Load earlier entries (pagination)
   const handleLoadEarlier = useCallback(async () => {
     if (loadingEarlier) return
     setLoadingEarlier(true)
     try {
-      const firstSeq = entries[0]?.sequence
-      const data = await listLedger(roomId, { ...(firstSeq !== undefined ? { beforeSequence: firstSeq } : {}), limit: PAGE_SIZE })
+      const cursor = nextBackfillPage(entries, PAGE_SIZE)
+      const data = await listLedger(roomId, cursor ?? { limit: PAGE_SIZE })
       if (data.length > 0) {
-        setEntries(prev => [...data, ...prev])
+        // Merge, do not prepend: a page boundary can move under a re-seed and the same
+        // row can legitimately arrive twice; the transcript must stay one row per id.
+        setEntries(prev => mergeLedgerEntries(prev, data))
         setHasEarlier(data.length >= PAGE_SIZE)
       } else {
         setHasEarlier(false)

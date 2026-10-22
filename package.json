@@ -7,6 +7,7 @@
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "typecheck": "pnpm -r exec tsc -p tsconfig.json --noEmit",
+    "test": "node --test tests/*.test.ts",
     "bundle": "pnpm -r run bundle && node scripts/check-build.mjs",
     "build": "pnpm run bundle",
     "install:profile": "bash scripts/install-profile.sh",

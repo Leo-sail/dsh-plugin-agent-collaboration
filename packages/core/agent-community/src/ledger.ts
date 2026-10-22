@@ -749,9 +749,13 @@ export class LedgerProjector {
 
   /**
    * Paginated read in one of three modes:
-   *  • `afterSequence` — the forward poll: newest `limit` entries strictly after
-   *    the cursor. The panel polls this every few tens of ms, so it must transfer
-   *    only the delta rather than the whole room history.
+   *  • `afterSequence` / `changedAfterSequence` — the forward poll: the NEWEST
+   *    `limit` entries at or after the cursor. The panel polls this every few tens of
+   *    ms, so it must transfer only the delta rather than the whole room history.
+   *    Newest page, not oldest: a re-seed / replay can move more than `limit` rows at
+   *    or above the cursor at once, and returning the oldest page of that range meant
+   *    the newest rows (the settled reply) were never delivered — the transcript
+   *    stayed one page behind for ever.
    *  • `beforeSequence` — backwards paging for "load earlier".
    *  • neither — the newest `limit` entries (initial load).
    */
@@ -794,10 +798,16 @@ export class LedgerProjector {
       // Inclusive on the boundary: the entry at the cursor may itself have been
       // patched (streaming text grows, then `streaming` flips to false), and the
       // client re-merges by id, so re-sending it is how edits arrive at all.
-      return all.filter(e => e.sequence >= changedAfterSequence).slice(0, limit)
+      //
+      // NEWEST page (`slice(-limit)`), not the oldest: a replay/re-seed can put more
+      // than `limit` rows at or above the cursor, and the older window would then keep
+      // re-delivering the head of that range while the settled reply — the rows that
+      // matter — never reached the panel.
+      return all.filter(e => e.sequence >= changedAfterSequence).slice(-limit)
     }
     if (afterSequence !== undefined) {
-      return all.filter(e => e.sequence > afterSequence).slice(0, limit)
+      // Same rule as the cursor branch: the newest page at/after the cursor.
+      return all.filter(e => e.sequence > afterSequence).slice(-limit)
     }
     const filtered = beforeSequence !== undefined ? all.filter(e => e.sequence < beforeSequence) : all
     return filtered.slice(-limit)

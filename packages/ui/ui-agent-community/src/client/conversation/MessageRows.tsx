@@ -5,7 +5,7 @@ import {
   ResponseItem, RunningItem, TailItem, TurnFlow, ProcessItem,
   type SettledReason, type TurnFlowItem } from './turnFlow.tsx'
 import { processKindOf } from './processSteps.tsx'
-import { avatarStyle, nameLabel, botEmoji } from './styles.ts'
+import { avatarStyle, nameLabel, botEmoji, mutedText } from './styles.ts'
 import { DeliverableGroup } from './DeliverableCard.tsx'
 import type { CommunityRemote } from '../community/types.ts'
 import type { DeliveredFile } from './types.ts'
@@ -223,6 +223,28 @@ export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runS
     items.push({
       kind: 'response',
       node: <ResponseItem text={textEntry.text ?? ''} hasText={hasText} isLive={isLive} />,
+    })
+  }
+
+  // ── THE ANSWER ROW THAT IS NOT HERE ────────────────────────────────────────
+  //
+  // A run reserves its `bot-text` row when it STARTS, so a tool-heavy turn keeps the
+  // answer row before the rows the panel's newest page holds — 「回复被隐藏，点加载
+  // 更早才出现」. The panel now walks backwards itself when that happens; if the row
+  // is still absent, the reply is beyond the history this client was willing to read
+  // (or the page walk failed). A settled turn showing work steps and no reply reads
+  // as "the bot said nothing", so say what happened and name the one action that can
+  // still find it. A live turn keeps the "processing" affordance instead.
+  if (textEntry === undefined && !isLive && (hasProcess || hasReasoning)) {
+    items.push({
+      kind: 'response',
+      node: (
+        <div>
+          <span style={mutedText}>
+            （该回合的回复不在已加载的历史中：可点上方「加载更早」继续查找）
+          </span>
+        </div>
+      ),
     })
   }
 

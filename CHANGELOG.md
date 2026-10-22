@@ -1,3 +1,31 @@
+## Unreleased — stability batch 1 (S1 selection arbitration, S2 reply visibility)
+
+修复用户反馈的两个稳定性问题；只改插件源码，不改任何 Bot。
+
+### S1 · 点击其他 Bot 单聊后会话不切换（需多次点击）
+- 轮询不再把"发起请求那一刻的 selectedId"当 `preferId` 回写；选择决策抽到纯函数
+  `community/selection.ts`：无 `preferId` 时只修复"房间已消失"，有 `preferId` 时只有
+  "请求晚于用户最后一次点击"才生效。
+- `load()` 增加请求世代与用户选择时间戳；旧响应不再覆盖新快照/新选择/新错误。
+- `onReload` 拆成"纯刷新"（无参数）：发送/改模型/权限/压缩/fork 后的刷新不再把选择拉回旧房间；
+  fork 仍通过 `onOpenBotRoom` 落到新房间。
+- 新增 `tests/selection.test.ts`（9 个用例，纯函数）。
+
+### S2 · Bot 最终回复被隐藏，只有点"加载更早"才出现
+- 面板首屏/结算后按"缺失回答的 run"用 `beforeSequence` 向前补读（最多 8 页），不再要求用户
+  手动点「加载更早」；`ledgerWindow.ts` 抽出 merge/missing/backfill 纯函数。
+- `ledger.ts` 的 `changedAfterSequence` / `afterSequence` 改为返回**最新一页**，重播/重编号超过
+  limit 时最新 settle 回复也能送达。
+- merge 按 id + `rev`，同 id 不再重复/回退；「加载更早」去重并统一按 `(at, sequence)` 排序。
+- 回合有过程行但没有回答行时，显示"回复不在已加载历史中"提示（兜底）。
+- 新增 `tests/ledger-window.test.ts`（9 个用例，纯函数）。
+
+### 验证
+- `node --test tests/*.test.ts`：18/18 通过。
+- UI typecheck（过滤宿主缺失 d.ts 噪声 `TS2307/7016/7006`）：0 真实错误；core 改动文件
+  `ledger.ts` 0 错误（core 其余错误是未安装 `@deepseek-ai/*` 的既有级联，与本次改动无关）。
+- 本轮只同步 GitHub 源码；未发布 npm、未更新插件市场（等用户通知）。
+
 ## 0.3.3 — 未读角标：按未读回复计数，不再把多条折成 1
 
 修复用户报告：**Bot 单聊 / 群聊里明明有很多条未读消息，未读角标却只显示 1 条**。
