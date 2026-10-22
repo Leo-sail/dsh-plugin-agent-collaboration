@@ -1,3 +1,26 @@
+## Unreleased — stability batch 9 (UI follow-up from the real-instance retest)
+
+用户复测提出的两个界面问题：
+
+### 1. 删除会话顶部的运行状态条
+- 移除 `RunStatusStrip`（「运行中 · 已用 Xs · 预计截止 HH:mm 剩余 …」）及其纯函数/测试；
+  `ConversationArea` 恢复为两行 grid（GoalStrip + transcript）。会话里仍保留停止按钮和
+  已有的运行/失败提示，不再常驻一条计时条。
+
+### 2. 侧栏 Bot 状态不再永远是绿色「空闲」
+- 根因：`snapshot().bots` 直接返回持久化的 BotIdentity，presence 字段从未被写；UI 对
+  `undefined` 一律按"空闲/绿点"渲染，所以正在跑的 Bot 也不变。
+- 修复：`snapshot()` 用同一次快照里的 runs 派生 `presence`（running > queued > idle），
+  Bot 在跑时侧栏显示「运行中」+ 进行中圆点，结束后恢复「空闲」。规则仍集中在
+  `getBotPresence`，不会与 run 状态出现第二套判断。
+
+### 验证
+- `node --test tests/*.test.ts`：**176/176**（移除 run-status 15 个用例）。
+- core/UI typecheck 过滤宿主噪声：0 真实错误；四包构建 + check-build OK。
+- 隔离实例实跑：小董执行 `sleep 8` 期间侧栏显示「运行中」，8 秒后回到「空闲」；
+  会话顶部无「运行中 · 已用/预计截止」条。
+- 真实 profile 已安装；需要重启 DSH 后生效。未发布 npm / 未更新市场。
+
 ## Unreleased — stability batch 8 (fixes found by end-to-end testing)
 
 两个在隔离实例 + Playwright 真机验收中发现的问题（不是推断，是复现后修掉）：

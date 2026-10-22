@@ -5351,7 +5351,14 @@ export class AgentCommunityService extends TypertRemoteService {
       ((room as BotRoom & { tasks?: BotTask[] }).tasks ?? []).map(t => ({ ...t, roomId: room.id as string })),
     )
     return {
-      bots: this.state.bots,
+      // ── PRESENCE IS DERIVED, NOT STORED ──────────────────────────────────────
+      //
+      // The raw bot row has no presence field, so the sidebar (RoomList) read
+      // `undefined` for every bot and painted a green dot with 空闲 even while a run was
+      // streaming. Derive it HERE, from the runs the same snapshot is about to ship, so
+      // the dot and the run state can never disagree. `getBotPresence` is the one rule
+      // (running > queued > idle) and is also exposed as its own RPC.
+      bots: this.state.bots.map(bot => ({ ...bot, presence: this.getBotPresence(bot.id) })),
       rooms: this.state.rooms,
       messages: summarizeSnapshotMessages(this.state.messages) as unknown as BotCommunitySnapshot['messages'],
       runs: summarizeSnapshotRuns(this.state.runs) as unknown as BotCommunitySnapshot['runs'],

@@ -15,7 +15,6 @@ import { describe } from './types.ts'
 import { css } from '../styles.ts'
 import { GoalStrip } from './GoalStrip.tsx'
 import { shouldConsiderGroup } from './proposalGate.ts'
-import { RunStatusStrip } from '../conversation/RunStatusStrip.tsx'
 import { BotConversationPanel } from '../conversation/BotConversationPanel.tsx'
 import type { BotConversationPanelProps } from '../conversation/BotConversationPanel.tsx'
 import type { AttachmentItem } from '../conversation/types.ts'
@@ -120,24 +119,18 @@ export function ConversationArea({
         height: '100%',
         minHeight: 0,
         overflow: 'hidden',
-        // Three rows: the goal strip (S3), the run status line (S11), then the transcript. A GRID,
-        // not a flex column, so the panel below stays a direct child and its own `height: 100%`
-        // resolves to the remaining track instead of the whole wrapper. Each strip keeps its own
-        // wrapping div so an auto row is still occupied when the strip renders nothing — the
-        // transcript can then always land in the `minmax(0, 1fr)` track. Both strips are siblings
-        // of the scroller, never rows inside it: their state must be readable without scrolling.
+        // Two rows: the goal strip (S3), then the transcript. A GRID, not a flex column, so the
+        // panel below stays a direct child and its own `height: 100%` resolves to the remaining
+        // track instead of the whole wrapper. The strip keeps its own wrapping div so the auto row
+        // is still occupied when it renders nothing — the transcript then lands in the
+        // `minmax(0, 1fr)` track. The strip is a sibling of the scroller, never a row inside it.
         display: 'grid',
-        gridTemplateRows: 'auto auto minmax(0, 1fr)',
+        gridTemplateRows: 'auto minmax(0, 1fr)',
       }}>
         {/* S3: the room goal's authorization state and the user's controls. Renders nothing
             when the room has no goal, or when the goal is done. */}
         <div style={{ minWidth: 0 }}>
           <GoalStrip room={room} remote={remote} onReload={onReload} onNotice={onNotice} />
-        </div>
-        {/* S11: the room's CURRENT run — elapsed time and deadline while live, or why it stopped.
-            Reads the same snapshot the page already polls; renders nothing for a clean finish. */}
-        <div style={{ minWidth: 0 }}>
-          <RunStatusStrip roomId={roomId!} runs={runs} />
         </div>
         <BotConversationPanel
           key={`${roomId}#${transcriptEpoch}`}
