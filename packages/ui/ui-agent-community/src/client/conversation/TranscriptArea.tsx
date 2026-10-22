@@ -10,6 +10,7 @@ import type { LedgerEntry } from './types.ts'
 import { groupIntoTurns } from './turns.ts'
 import type { TurnGroup } from './turns.ts'
 import type { CommunityRemote } from '../community/types.ts'
+import { replyTargetFor, threadSnippet, type ReplyTarget, type ThreadQuoteData } from './threadView.ts'
 
 interface Props {
   entries: LedgerEntry[]
@@ -48,10 +49,15 @@ interface Props {
   stoppedRunIds?: ReadonlySet<string> | undefined
   /** Host RPCs for the deliverable cards (preview, OS open/reveal). */
   remote?: CommunityRemote | undefined
+  /**
+   * OP-14: reply to a message. Receives the clicked row already turned into the composer's
+   * reply target (id + snippet + its thread/task linkage); omitted means no reply affordance.
+   */
+  onReply?: ((target: ReplyTarget) => void) | undefined
 }
 
 export function TranscriptArea({
-  entries, onLoadEarlier, loadingEarlier = false, hasEarlier = false, bots, onFork, skillNames, liveRunIds, runDurations, runStarts, stoppedRunIds, remote,
+  entries, onLoadEarlier, loadingEarlier = false, hasEarlier = false, bots, onFork, skillNames, liveRunIds, runDurations, runStarts, stoppedRunIds, remote, onReply,
 }: Props) {
   const { containerRef, atBottom, scrollToBottom, captureAnchor, restoreAnchor } = useStickToBottom()
   // Pure function of `atBottom`, which is already state: mirroring it through an effect cost an
@@ -118,6 +124,27 @@ export function TranscriptArea({
   }, [captureAnchor, onLoadEarlier])
 
   const rows = groupIntoTurns(entries)
+
+  // ── OP-14 reply quotes ──────────────────────────────────────────────────────
+  //
+  // A reply row carries only `replyTo`; the parent's TEXT has to come from rows the panel
+  // already holds. One map for the whole render (not a `find` per row) keeps this linear on
+  // every poll; a parent outside the loaded ledger window degrades to its short id — the
+  // reply stays anchored even when the quoted text is not loaded.
+  const entryById = new Map(entries.map(entry => [entry.id, entry]))
+  const quoteFor = (entry: LedgerEntry): ThreadQuoteData | undefined => {
+    const replyTo = entry.replyTo
+    if (replyTo === undefined || replyTo === '') return undefined
+    return {
+      replyTo,
+      snippet: threadSnippet(entryById.get(replyTo)?.text ?? '', 60),
+      ...(entry.threadId !== undefined && entry.threadId !== '' ? { threadId: entry.threadId } : {}),
+      ...(entry.taskId !== undefined && entry.taskId !== '' ? { taskId: entry.taskId } : {}),
+    }
+  }
+  /** The action-row reply button for one row, or undefined when the panel did not wire it. */
+  const replyActionFor = (entry: LedgerEntry): (() => void) | undefined =>
+    onReply === undefined ? undefined : () => onReply(replyTargetFor(entry))
 
   return (
     <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
@@ -199,14 +226,22 @@ export function TranscriptArea({
             : `entry-${row.id}`
           void idx
           if ('entries' in row) {
+            const group = row as TurnGroup
+            // The turn's answer row is what a thread reply points at (the host attaches the
+            // linkage to the bot-text row, not to every tool row of the turn).
+            const answerEntry = group.entries.find(entry => entry.type === 'bot-text')
+            const replyQuote = answerEntry === undefined ? undefined : quoteFor(answerEntry)
+            const replyAction = answerEntry === undefined ? undefined : replyActionFor(answerEntry)
             return (
               // `data-turn-id` is the anchor the turn rail jumps to.
-              <div key={key} data-turn-id={(row as TurnGroup).runId ?? ''}>
+              <div key={key} data-turn-id={group.runId ?? ''}>
                 <BotTurn
                   remote={remote}
-                  group={row as TurnGroup}
+                  group={group}
                   bots={bots}
                   onFork={onFork}
+                  {...(replyQuote !== undefined ? { replyQuote } : {})}
+                  {...(replyAction !== undefined ? { onReply: replyAction } : {})}
                   {...(row.runId !== undefined && runDurations?.has(row.runId) === true
                     ? { runDurationMs: runDurations.get(row.runId)! } : {})}
                   /* The timer origin, straight off the run record — available before
@@ -230,7 +265,20 @@ export function TranscriptArea({
             )
           }
           const e = row as LedgerEntry
-          if (e.type === 'user') return <UserMessage key={key} entry={e} onFork={onFork} skillNames={skillNames} />
+          if (e.type === 'user') {
+            const replyQuote = quoteFor(e)
+            const replyAction = replyActionFor(e)
+            return (
+              <UserMessage
+                key={key}
+                entry={e}
+                onFork={onFork}
+                skillNames={skillNames}
+                {...(replyQuote !== undefined ? { replyQuote } : {})}
+                {...(replyAction !== undefined ? { onReply: replyAction } : {})}
+              />
+            )
+          }
           if (e.type === 'error') return <ErrorRow key={key} entry={e} />
           if (e.type === 'dispatch') return <DispatchRow key={key} entry={e} />
           return null

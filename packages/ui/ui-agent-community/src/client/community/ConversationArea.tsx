@@ -15,6 +15,7 @@ import { describe } from './types.ts'
 import { css } from '../styles.ts'
 import { GoalStrip } from './GoalStrip.tsx'
 import { shouldConsiderGroup } from './proposalGate.ts'
+import { threadSendFields } from '../conversation/threadView.ts'
 import { BotConversationPanel } from '../conversation/BotConversationPanel.tsx'
 import type { BotConversationPanelProps } from '../conversation/BotConversationPanel.tsx'
 import type { AttachmentItem } from '../conversation/types.ts'
@@ -153,15 +154,20 @@ export function ConversationArea({
           skillsError={skillsError}
           onLoadSkill={onLoadSkill}
           onListSkillFiles={onListSkillFiles}
-          onSend={async (roomId, text, modelPayload, attachments, mentions) => {
+          onSend={async (roomId, text, modelPayload, attachments, mentions, reply) => {
             // `text` is the draft (what the bubble shows); `modelPayload` adds the
             // expanded `/skill` bodies for the model only. Attachments travel as base64
             // bytes: the page cannot see the host's filesystem, and the host refuses to
             // accept a caller-supplied path. The host stores each file inside the
             // receiving bot's own workspace and appends an `[附件]` block to the MODEL
             // payload, so the bubble still shows exactly what the user typed.
+            //
+            // OP-14: a reply carries `replyTo` (the host validates it against messages in
+            // THIS room) plus the target's existing thread/task label, so the sent message
+            // stays in the same thread instead of starting an unrelated one.
             const sent = await remote.sendMessage({
               roomId, text, modelText: modelPayload,
+              ...(reply !== undefined ? threadSendFields(reply) : {}),
               ...(attachments.length > 0
                 ? { attachments: await readAttachmentsForRpc(attachments) }
                 : {}),

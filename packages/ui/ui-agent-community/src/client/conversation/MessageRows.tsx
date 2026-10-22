@@ -7,6 +7,8 @@ import {
 import { processKindOf } from './processSteps.tsx'
 import { avatarStyle, nameLabel, botEmoji, mutedText } from './styles.ts'
 import { DeliverableGroup } from './DeliverableCard.tsx'
+import { ThreadBadge, ThreadQuote } from './ThreadQuote.tsx'
+import type { ThreadQuoteData } from './threadView.ts'
 import type { CommunityRemote } from '../community/types.ts'
 import type { DeliveredFile } from './types.ts'
 
@@ -16,7 +18,7 @@ export { UserMessage } from './userMessage.tsx'
 
 // ── BotTurn ───────────────────────────────────────────────────────────────────
 
-export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runStartedAtMs, stopped = false, remote }: {
+export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runStartedAtMs, stopped = false, remote, replyQuote, onReply }: {
   group: TurnGroup
   /**
    * Duration computed from the host's run record (finishedAt - startedAt).
@@ -50,6 +52,10 @@ export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runS
   onFork?: ((messageId: string) => void) | undefined
   /** Host RPCs for the deliverable cards (preview, OS open/reveal). */
   remote?: CommunityRemote | undefined
+  /** OP-14: the message this turn's answer replies to, resolved to a display snippet. */
+  replyQuote?: ThreadQuoteData | undefined
+  /** OP-14: reply to this turn's answer (sets the composer's reply target). */
+  onReply?: (() => void) | undefined
 }) {
   // ── DELIVERED FILES ────────────────────────────────────────────────────────
   //
@@ -275,6 +281,7 @@ export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runS
           messageId={textEntry.id}
           onFork={onFork}
           branchUnavailable={!endsWithResponse}
+          {...(onReply !== undefined ? { onReply } : {})}
         />
       ),
     })
@@ -299,11 +306,20 @@ export function BotTurn({ group, bots, onFork, live = false, runDurationMs, runS
         style={{ minWidth: 0, flex: 1 }}
         data-actions-reveal={endsWithResponse ? 'always' : 'hover'}
       >
+        {/* OP-14: what this answer replies to. One quote strip, above the name row — the
+            transcript stays chronological and the thread is a fact about the turn, not a
+            second conversation column. */}
+        {replyQuote !== undefined && (
+          <div style={{ marginBottom: 6 }}>
+            <ThreadQuote data={replyQuote} />
+          </div>
+        )}
         {/* Header — one avatar plus one name row. Native assistant chrome carries
             no clock here (the clock lives in the action tail, §2.1) and no separate
             streaming dot: liveness is the deep-diving line's job (§2.16). */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
           <span style={nameLabel}>{group.botName}</span>
+          {textEntry?.threadId !== undefined && <ThreadBadge threadId={textEntry.threadId} />}
         </div>
 
         <TurnFlow items={items} />

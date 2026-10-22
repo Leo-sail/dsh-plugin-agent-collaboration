@@ -18,6 +18,7 @@ import { QuestionComposer, pendingQuestion } from './QuestionComposer.tsx'
 import { TaskDockCard, currentRoundTasks, currentRoundTodos, shouldShowTaskDock, type RoomTaskRow } from './TaskDockCard.tsx'
 import type { ComposerProps } from './ComposerArea.tsx'
 import { QUEUE_LABEL, QUEUE_NOTE, QUEUE_WAIT_PREVIOUS, QUEUE_WAIT_SLOT } from './nativeStrings.ts'
+import type { ReplyTarget } from './threadView.ts'
 
 export interface BotInfo { id: string; name: string; avatarSeed?: string | undefined }
 export interface RunInfo {
@@ -134,7 +135,7 @@ export interface BotConversationPanelProps {
   onListSkillFiles: (dir: string) => Promise<Array<{ path: string; isDir: boolean }>>
   /** Populated when the skill RPC failed, so an empty group is explicable. */
   skillsError?: string | undefined
-  onSend: (roomId: string, text: string, modelPayload: string, attachments: AttachmentItem[], mentions: string[]) => Promise<void>
+  onSend: (roomId: string, text: string, modelPayload: string, attachments: AttachmentItem[], mentions: string[], reply?: ReplyTarget | undefined) => Promise<void>
   /** Host RPCs for the deliverable cards (preview, OS open/reveal). */
   remote?: CommunityRemote | undefined
   /** The room's task board, straight from the polled snapshot. */
@@ -245,6 +246,15 @@ export function BotConversationPanel({
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [queue, setQueue] = useState<InFlightMessage[]>([])
   const [busy, setBusy] = useState(false)
+  /**
+   * OP-14: the message the next send answers, or undefined.
+   *
+   * Lives in the panel (not the composer) because BOTH sides need it: the transcript's
+   * action rows SET it and the composer banner SHOWS it. The panel is remounted per room, so
+   * a reply target can never leak from one conversation into another.
+   */
+  const [replyTarget, setReplyTarget] = useState<ReplyTarget | undefined>(undefined)
+  const cancelReply = useCallback(() => setReplyTarget(undefined), [])
   // Ledger fetch failures were swallowed by empty catch blocks, which made a broken
   // RPC indistinguishable from an empty room. Surface the failure instead.
   const [ledgerError, setLedgerError] = useState<string | undefined>(undefined)
@@ -513,13 +523,16 @@ export function BotConversationPanel({
   const pendingApproval = entries.slice().reverse().find(e => e.type === 'approval' && e.outcome === undefined)
 
   // Send handler
-  const handleSend = useCallback(async (text: string, modelPayload: string, attachments: AttachmentItem[], mentions: string[]) => {
+  const handleSend = useCallback(async (text: string, modelPayload: string, attachments: AttachmentItem[], mentions: string[], reply?: ReplyTarget | undefined) => {
     if (busy) return
     const id = Math.random().toString(36).slice(2)
     setQueue(q => [...q, { id, text }])
     setBusy(true)
     try {
-      await onSend(roomId, text, modelPayload, attachments, mentions)
+      await onSend(roomId, text, modelPayload, attachments, mentions, reply)
+      // The reply banner clears only once the host accepted the message: a failed send keeps
+      // the target so the user can retry the same answer instead of re-picking the message.
+      if (reply !== undefined) setReplyTarget(undefined)
     } finally {
       setQueue(q => q.filter(m => m.id !== id))
       setBusy(false)
@@ -643,6 +656,9 @@ export function BotConversationPanel({
           hasEarlier={hasEarlier}
           bots={bots.map(b => ({ id: b.id, name: b.name, avatarSeed: b.avatarSeed }))}
           onFork={isGroup ? undefined : onFork}
+          /* OP-14: reply buttons live on every action row; the target becomes the composer's
+             banner and rides the next send as replyTo (+ its thread/task linkage). */
+          onReply={setReplyTarget}
           skillNames={new Set((skills ?? []).map(sk => sk.name))}
           liveRunIds={new Set(runs.filter(r => r.status === 'running' || r.status === 'queued').map(r => r.id))}
           /* A user stop settles the run as `interrupted` (cancel writes `cancelled`).
@@ -719,6 +735,8 @@ export function BotConversationPanel({
         onLoadSkill={onLoadSkill}
         onListSkillFiles={onListSkillFiles}
         {...(skillsError !== undefined ? { skillsError } : {})}
+        {...(replyTarget !== undefined ? { reply: replyTarget } : {})}
+        onCancelReply={cancelReply}
         onSend={handleSend}
         onStop={handleStop}
         onApprove={handleApprove}

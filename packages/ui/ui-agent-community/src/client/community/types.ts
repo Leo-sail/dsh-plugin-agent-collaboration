@@ -142,6 +142,8 @@ export interface CommunityRemote {
     message?: string; code?: string;
     /** Deliverable files (deliverable row only). */
     files?: Array<{ path: string; name: string; description?: string; size?: number }>;
+    /** OP-14 threading/task linkage (user and bot-text rows; absent when none). */
+    replyTo?: string; threadId?: string; taskId?: string;
   }>>
   // P0-3: approval
   answerBotQuestion(input: { roomId: string; questionId: string; answer?: string; skip?: boolean }): Promise<{ ok: boolean }>

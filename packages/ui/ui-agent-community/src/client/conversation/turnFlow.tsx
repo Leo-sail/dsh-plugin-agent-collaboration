@@ -20,6 +20,7 @@ import { ToolRowFromLedger } from './ToolRow.tsx'
 import { UsageControl } from './UsageControl.tsx'
 import { fmtUsage } from './format.ts'
 import { DeepDiving } from './DeepDiving.tsx'
+import { ReplyAction } from './ThreadQuote.tsx'
 import {
   WORK_LIVE, formatRunDuration, turnStatusLabel,
   TURN_WORKED, TURN_FAILED } from './nativeStrings.ts'
@@ -224,7 +225,7 @@ export function ResponseItem({ text, hasText, isLive }: {
  * (`always` when the turn ends with a visible response, `hover` otherwise);
  * this renders the row itself.
  */
-export function TailItem({ text, at, usage, messageId, onFork, branchUnavailable }: {
+export function TailItem({ text, at, usage, messageId, onFork, branchUnavailable, onReply }: {
   text: string
   at: string
   usage?: TokenUsage | undefined
@@ -232,6 +233,8 @@ export function TailItem({ text, at, usage, messageId, onFork, branchUnavailable
   messageId: string
   onFork?: ((messageId: string) => void) | undefined
   branchUnavailable: boolean
+  /** OP-14: reply to this bot message (rides the native extraActions slot). */
+  onReply?: (() => void) | undefined
 }) {
   return (
     <MessageIconActions
@@ -241,6 +244,7 @@ export function TailItem({ text, at, usage, messageId, onFork, branchUnavailable
       className="ac-actions-tail"
       {...(onFork !== undefined ? { onBranch: () => onFork(messageId) } : {})}
       branchUnavailable={branchUnavailable}
+      {...(onReply !== undefined ? { extraActions: <ReplyAction onReply={onReply} /> } : {})}
       usageAction={
         usage !== undefined
           ? <UsageControl usage={usage} {...(fmtUsage(usage) ?? { label: '', exact: '' })} />

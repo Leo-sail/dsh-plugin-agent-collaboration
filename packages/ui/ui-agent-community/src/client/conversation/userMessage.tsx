@@ -12,6 +12,8 @@ import { MessageIconActions } from './messageActions.tsx'
 import { renderHighlighted } from './highlight.tsx'
 import { metaLabel } from './styles.ts'
 import { IconPaperclipOutlineRegular } from './NativeIcons.tsx'
+import { ReplyAction, ThreadBadge, ThreadQuote } from './ThreadQuote.tsx'
+import type { ThreadQuoteData } from './threadView.ts'
 
 const EMPTY_NAMES: ReadonlySet<string> = new Set()
 
@@ -25,22 +27,30 @@ const EMPTY_NAMES: ReadonlySet<string> = new Set()
  * native "hide until hover when another user message follows" rule applies.
  */
 export function UserMessage({
-  entry, onFork, skillNames,
+  entry, onFork, skillNames, replyQuote, onReply,
 }: {
   entry: LedgerEntry
   /** Skill names whose `/name` token is painted in the link colour. */
   skillNames?: ReadonlySet<string> | undefined
   /** Fork from this message: receiving it means the room allows branching. */
   onFork?: ((messageId: string) => void) | undefined
+  /** OP-14: the message this one replies to, already resolved to a display snippet. */
+  replyQuote?: ThreadQuoteData | undefined
+  /** Reply to this message: the panel turns it into the composer's reply target. */
+  onReply?: (() => void) | undefined
 }) {
   if (entry.type !== 'user') return null
   return (
     <div className="ac-user-row" data-chat-flow-kind="user">
-      {/* Name only — the clock belongs to the native action row below. */}
-      <span style={{ ...metaLabel, marginRight: 4 }}>
+      {/* Name only — the clock belongs to the native action row below. The thread chip
+          sits next to it: the quote strip already shows WHAT is answered, this shows which
+          thread the row belongs to when it has no explicit parent. */}
+      <span style={{ ...metaLabel, marginRight: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
         {entry.senderName ?? '用户'}
+        {entry.threadId !== undefined && <ThreadBadge threadId={entry.threadId} />}
       </span>
       <div className="ac-user-stack">
+        {replyQuote !== undefined && <ThreadQuote data={replyQuote} />}
         {/* Reference tokens keep the link colour here too, so a sent `/skill`
             reads the same as it did in the composer. */}
         <div className="ac-user-bubble">
@@ -57,12 +67,13 @@ export function UserMessage({
       </div>
       {/* Clock (start) + copy, plus branch when the room is forkable: a user turn
           is the natural point to branch from, since the reply that follows is what
-          the fork is meant to re-answer. */}
+          the fork is meant to re-answer. Reply rides the native extraActions slot. */}
       <MessageIconActions
         text={entry.text ?? ''}
         time={entry.at}
         clock="start"
         {...(onFork !== undefined ? { onBranch: () => onFork(entry.id) } : {})}
+        {...(onReply !== undefined ? { extraActions: <ReplyAction onReply={onReply} /> } : {})}
       />
     </div>
   )

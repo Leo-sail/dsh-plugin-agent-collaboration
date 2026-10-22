@@ -7,6 +7,7 @@ import { clearDraft, getDraft, setDraft } from '../drafts.ts'
 import type { ReactNode } from 'react'
 import type { AttachmentItem, InFlightMessage } from './types.ts'
 import type { LedgerEntry } from './types.ts'
+import type { ReplyTarget } from './threadView.ts'
 import { IconSendOutlineRegular, IconPlusOutlineMedium } from './NativeIcons.tsx'
 import { Tooltip } from './Tooltip.tsx'
 import { renderHighlighted } from './highlight.tsx'
@@ -40,9 +41,14 @@ export interface ComposerProps {
   /**
    * `text` is exactly what the user typed; `modelPayload` additionally carries the
    * expanded `/skill` bodies. They are kept apart so the panel can render the draft
-   * while the model still receives the instructions.
+   * while the model still receives the instructions. `reply` (OP-14) is the message this
+   * send answers, forwarded verbatim when the reply banner is up.
    */
-  onSend: (text: string, modelPayload: string, attachments: AttachmentItem[], mentions: string[]) => void
+  onSend: (text: string, modelPayload: string, attachments: AttachmentItem[], mentions: string[], reply?: ReplyTarget | undefined) => void
+  /** OP-14: the message being answered — shows the reply banner above the composer. */
+  reply?: ReplyTarget | undefined
+  /** Drop the reply target (the banner's 取消). */
+  onCancelReply: () => void
   onStop: () => void
   onApprove: (callId: string) => void
   onReject: (callId: string) => void
@@ -174,6 +180,7 @@ export function ComposerArea({
   roomId, isGroup, bots, isRunning, pendingApproval, queue,
   modelGroups, onRefreshModels, onSend, onStop, onApprove, onReject,
   onEditQueue, onRemoveQueue, onSteerQueue, onCommand, skills = [], onLoadSkill, onListSkillFiles, skillsError,
+  reply, onCancelReply,
 }: ComposerProps) {
   // The draft belongs to the ROOM: this component unmounts when the user switches rooms, and its
   // local text used to vanish with it (reported as "输入框中的内容消失了").
@@ -330,7 +337,9 @@ export function ComposerArea({
     // trips per skill, which measured at 127s versus ~3s for a normal reply.
     const { skills: sk, skillBodies: bodies, skillDirs: dirs, skillListings: listings } = skillStateRef.current
     const modelPayload = expandSkillGestures(trimmed, sk, bodies, dirs, listings)
-    onSend(trimmed, modelPayload, attachments, mentions)
+    // OP-14: the reply pointer rides the send; the PANEL clears the banner on success, so a
+    // failed send keeps the target for a retry.
+    onSend(trimmed, modelPayload, attachments, mentions, reply)
     clearDraft(roomId)
     setTextState('')
     setAttachments([])
@@ -339,7 +348,7 @@ export function ComposerArea({
     closeSlashMenu()
     setMentionOpen(false)
     if (inputRef.current) { inputRef.current.style.height = 'auto' }
-  }, [text, attachments, mentions, onSend])
+  }, [text, attachments, mentions, onSend, reply])
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (isComposing.current) return
@@ -561,6 +570,49 @@ export function ComposerArea({
           onPick={openFilePicker}
           onRemove={id => setAttachments(prev => prev.filter(a => a.id !== id))}
         />
+      )}
+
+      {/* OP-14: the composer's reply banner. Shown above the card, dismissed by 取消 or by a
+          successful send (the panel clears the target); the target itself is display-only —
+          `reply.id` is what the host validates on send. */}
+      {reply !== undefined && (
+        <div
+          data-reply-banner=""
+          style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            margin: '0 12px 6px',
+            padding: '4px 10px',
+            borderLeft: '2px solid var(--dsw-alias-state-business-primary, var(--dsw-alias-border-l3))',
+            borderRadius: 'var(--dsw-radius-sm, 4px)',
+            background: 'var(--dsw-alias-bg-layer-1)',
+            color: 'var(--dsw-alias-label-secondary)',
+            fontSize: 12,
+            lineHeight: '18px',
+          }}
+        >
+          <span style={{ flexShrink: 0, color: 'var(--dsw-alias-label-tertiary)' }}>正在回复：</span>
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {reply.text}
+          </span>
+          <button
+            type="button"
+            onClick={onCancelReply}
+            aria-label="取消回复"
+            style={{
+              flexShrink: 0,
+              height: 20,
+              padding: '0 8px',
+              border: '0.5px solid var(--dsw-alias-border-l3)',
+              borderRadius: 'var(--dsw-radius-sm, 4px)',
+              background: 'transparent',
+              color: 'var(--dsw-alias-label-secondary)',
+              fontSize: 11,
+              cursor: 'pointer',
+            }}
+          >
+            取消
+          </button>
+        </div>
       )}
 
       {/* Native composer card: radius-panel, specific-input-major fill, elevated. */}

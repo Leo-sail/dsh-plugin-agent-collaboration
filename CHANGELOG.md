@@ -1,3 +1,18 @@
+## Unreleased — UI display layer (patterns, threads, context cost, audit notices)
+
+只改 UI 包；不改 core/后端/Bot。
+
+- **群协作模式**：`RoomSettingsDialog` 只读展示 `room.patternCards`（task/做法/注意/证据/时间），
+  空态「暂无」；数据来自 snapshot，不新增 RPC。
+- **运行诊断**：设置对话框只读展示最近 ≤3 次 run 的 status/finishPath/faultSide/
+  promptTokensEstimate，以及 `contextSections` 横向条（区段/字符数/占比）。
+- **线程/引用回复**：user 与 bot 消息动作行新增「回复」；ComposerArea 显示「正在回复…」横幅；
+  sendMessage 透传 `replyTo/threadId/taskId`；消息上方渲染引用条 + thread 徽标（一层，无嵌套）。
+- **notice 样式**：dispatch 行按文本分类为「完成门 / 目标 / 审计」，加轻量标签与描边；
+  普通 notice 不变，文字不改。
+- `tests/thread-view.test.ts` 13 例（snippet/标签/notice 分类/context 排序）；全量 **424/424**；
+  UI tsc（过滤宿主噪声）0 真实错误；tsdown + wrap、check-build OK。
+- 未发布 npm / 未更新市场；只同步 GitHub 源码。
 ## Unreleased — P1 batch B (OP-10 routing cost, OP-11 priors/budget, OP-15 section cost, OP-16 selective audit)
 
 P1 机制批次 B；只改插件源码/测试，不改 Bot。

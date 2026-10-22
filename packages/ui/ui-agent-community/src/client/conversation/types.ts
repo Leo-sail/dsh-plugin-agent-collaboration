@@ -110,6 +110,16 @@ export interface LedgerEntry {
   message?: string
   code?: string
   // dispatch
+  /**
+   * OP-14 threading/task linkage, passed through by the host on user and bot-text rows.
+   *
+   * `replyTo` points at an earlier message in the same room (the host drops pointers that do
+   * not resolve there); `threadId`/`taskId` are opaque labels. All optional: older rows and
+   * rows with no threading simply lack them, and every reader must render them as absent.
+   */
+  replyTo?: string
+  threadId?: string
+  taskId?: string
 }
 
 export interface BotInfo {
