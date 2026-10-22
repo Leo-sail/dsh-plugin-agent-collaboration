@@ -69,6 +69,10 @@ import {
   type RunRetryPolicy,
   type RunTimeoutPolicy,
 } from './run-budget.ts'
+import {
+  summarizeSnapshotMessages,
+  summarizeSnapshotRuns,
+} from './snapshot-lite.ts'
 import { searchMemory, taskMemoryText } from './bot-memory.ts'
 import { MemoryStore, memoryPaths, type RoomMemoryMeta } from './memory-store.ts'
 import { scanPromotions } from './memory-promote.ts'
@@ -78,6 +82,7 @@ import { resolveRoomLeader } from './room-leader.ts'
 import {
   COMPACT_SENDER_NAME,
   clampKeepLast,
+  foldedMessageIds,
   splitForCompaction,
   summariseHistory,
   summaryMessageText,
@@ -349,6 +354,16 @@ const STATE_LOCK_WAIT_MS = 30_000
  */
 const STALE_LOCK_AGE_MS = 10 * 60_000
 
+/**
+ * How long mutations are coalesced before one state write.
+ *
+ * Inside the panel's 400 ms poll window and short enough that a crash loses at most a quarter
+ * of a second of state; long enough that the four writes one settled run used to enqueue
+ * (runs, messages, goal, ledger) collapse into ONE. Deletion/session paths do not wait for
+ * this: they call `flushNow()`, which cancels the timer and writes immediately.
+ */
+const WRITE_COALESCE_MS = 250
+
 /** Read the PID a lock file records, or undefined when it records nothing usable. */
 async function recordedLockPid(lockPath: string): Promise<number | undefined> {
   try {
@@ -575,6 +590,16 @@ export class AgentCommunityService extends TypertRemoteService {
   private readonly statePath: string
   private readonly sessionsDir: string
   private saveQueue: Promise<void> = Promise.resolve()
+  /**
+   * Pending coalesced write, if any.
+   *
+   * Every state mutation used to enqueue its own FULL write of state.json (8+ MB on this
+   * board, including one per heartbeat). A mutation burst — one settled run updates runs,
+   * messages, ledger and goal — therefore serialized several full copies of the same growing
+   * file. This timer collapses all mutations inside one window into a single write of the
+   * CURRENT state; `flushNow` bypasses and drains it.
+   */
+  private writeTimer: ReturnType<typeof setTimeout> | undefined
   /** Set when the state file is unreadable/damaged: no writer may run. See blockWrites(). */
   private writesBlocked = false
   /** Human-readable reason surfaced through snapshot() when writes are blocked. */
@@ -1003,14 +1028,28 @@ export class AgentCommunityService extends TypertRemoteService {
         `agent-community: startup failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
       )
     })
-    // Dispose executor and approval bridge when this service is disposed
-    ;(ctx as unknown as { on(event: string, fn: () => void): void })
-      .on('dispose', () => {
-        this.executor?.dispose()
-        this.approvalBridgeDispose?.()
-        if (this.proposalSweeper !== undefined) clearInterval(this.proposalSweeper)
-        if (this.botScheduleTimer !== undefined) clearInterval(this.botScheduleTimer)
-        this.questionBridge?.dispose()
+    // Dispose executor and approval bridge when this service is disposed.
+    //
+    // ASYNC ON PURPOSE: a coalesced write may still be waiting in `writeTimer`, and the old
+    // synchronous handler dropped it — the last mutations before quit were lost. Flush first
+    // (awaited), then tear down; a failed flush is logged and must not block teardown.
+    ;(ctx as unknown as { on(event: string, fn: () => void | Promise<void>): void })
+      .on('dispose', async () => {
+        try {
+          await this.flushNow()
+        } catch (error: unknown) {
+          this.ctx.logger?.warn?.(`agent-community: final state flush failed: ${String(error)}`)
+        } finally {
+          if (this.writeTimer !== undefined) {
+            clearTimeout(this.writeTimer)
+            this.writeTimer = undefined
+          }
+          this.executor?.dispose()
+          this.approvalBridgeDispose?.()
+          if (this.proposalSweeper !== undefined) clearInterval(this.proposalSweeper)
+          if (this.botScheduleTimer !== undefined) clearInterval(this.botScheduleTimer)
+          this.questionBridge?.dispose()
+        }
       })
   }
 
@@ -1621,27 +1660,60 @@ export class AgentCommunityService extends TypertRemoteService {
   }
 
   /**
-   * Persist immediately and await it, instead of queueing behind the debounced
-   * writer. Deletion must be on disk before its folders are removed, so the
-   * "gone" state can never be lost to a crash between the two.
+   * Persist immediately and await it, instead of queueing behind the coalescing writer.
+   *
+   * Deletion must be on disk before its folders are removed, so the "gone" state can never be
+   * lost to a crash between the two. This call also DROPS a pending coalesced write: the
+   * state written here is at least as new as anything that timer would have written.
    */
   private async flushNow(): Promise<void> {
     if (this.writesBlocked) return
-    // Drain whatever the debounced writer already owes, then make sure the state as of THIS call is
-    // on disk. Deletion paths await this so "gone" is durable before folders are removed.
+    // Cancel the pending debounce: this call is the write it was waiting to schedule.
+    if (this.writeTimer !== undefined) {
+      clearTimeout(this.writeTimer)
+      this.writeTimer = undefined
+    }
+    // Drain whatever the writer already owes, then make sure the state as of THIS call is on
+    // disk. Deletion paths await this so "gone" is durable before folders are removed.
     const snapshot = this.state
     const revision = ++this.writeRevision
     await this.saveQueue
     await this.writeSnapshot(snapshot, revision)
   }
 
+  /**
+   * Schedule one state write, coalescing every mutation inside the window.
+   *
+   * WHY NOT WRITE PER MUTATION: a single settled run mutates the runs array, appends a
+   * message, bumps the goal and pushes a ledger row — four `enqueueWrite()` calls inside one
+   * millisecond, each of which used to serialize the whole (multi-megabyte) state. With a
+   * full write per heartbeat on top, the writer was the board's hottest path for no gain.
+   *
+   * The timer captures nothing: when it fires, the CURRENT `this.state` is written and it is
+   * stamped with a new revision (`queueStateWrite`), so mutations that happen while a write is
+   * in flight still end up in the next one. `flushNow()` cancels this timer and writes at once.
+   */
   private enqueueWrite(): void {
     if (this.writesBlocked) return
-    // ── SNAPSHOT AT CALL TIME ────────────────────────────────────────────────────────────────────
-    // The previous version captured `this.state` when the queued task finally ran, so the bytes on
-    // disk were ordered by scheduling rather than by mutation order, and two writers (this queue and
-    // flushNow) could interleave. Capturing here, with a monotonic revision, makes "last mutation
-    // wins" true by construction and lets a write that a newer one already covered be skipped.
+    if (this.writeTimer !== undefined) return
+    this.writeTimer = setTimeout(() => {
+      this.writeTimer = undefined
+      this.queueStateWrite()
+    }, WRITE_COALESCE_MS)
+    // A pending save must not keep the host process alive on its own.
+    this.writeTimer.unref?.()
+  }
+
+  /**
+   * Enqueue one serialized write of the state AS OF NOW.
+   *
+   * The revision is captured here, not when the queued task finally runs: bytes on disk are
+   * ordered by mutation order, and a write a newer one already covered can be skipped
+   * (`writeSnapshot` compares revisions). This is also why two writers — this queue and
+   * `flushNow` — cannot interleave a stale snapshot over a newer one.
+   */
+  private queueStateWrite(): void {
+    if (this.writesBlocked) return
     const snapshot = this.state
     const revision = ++this.writeRevision
     this.saveQueue = this.saveQueue
@@ -1662,7 +1734,12 @@ export class AgentCommunityService extends TypertRemoteService {
     await withStateLock(this.statePath, async () => {
       // 0o600: state.json holds bot prompts and room history; the tree is user-private and
       // `dirMode` keeps it that way on first creation.
-      await writeFileAtomic(this.statePath, JSON.stringify(snapshot, null, 2), {
+      //
+      // COMPACT JSON ON PURPOSE: this file is machine state, not something a human edits by
+      // hand (damaged state is quarantined, not repaired in place). Pretty-printing cost
+      // ~30 % of the bytes on every write; the pretty copy a developer wants is one
+      // `jq . state.json` away.
+      await writeFileAtomic(this.statePath, JSON.stringify(snapshot), {
         mode: 0o600,
         dirMode: 0o700,
       })
@@ -2615,9 +2692,14 @@ export class AgentCommunityService extends TypertRemoteService {
     }
     // The ORIGINAL rows stay. The checkpoint is ADDED, and the folded ids are recorded so the
     // prompt can skip them — folding is a window operation, not a delete.
-    const foldedIds = this.state.messages
-      .filter(m => m.roomId === roomId && m.createdAt < summaryMessage.createdAt)
-      .map(m => m.id)
+    //
+    // THE IDS COME FROM THE SPLIT, NEVER FROM TIMESTAMPS. `older` IS the segment the summary
+    // replaced, so its ids are the fold set by construction. This used to be recomputed as
+    // `createdAt < summaryMessage.createdAt`, but the summary is deliberately stamped with the
+    // OLDEST replaced message's time (so the panel sorts the checkpoint where the replaced
+    // messages were) — the two conditions can never both hold, so `foldedIds` was always empty
+    // and the prompt kept replaying everything the summary had replaced.
+    const foldedIds = foldedMessageIds(older)
     this.state = {
       ...this.state,
       messages: [...this.state.messages, summaryMessage],
@@ -2635,9 +2717,30 @@ export class AgentCommunityService extends TypertRemoteService {
     }
     this.enqueueWrite()
     await this.flushNow()
+    // ── THE PANEL RENDERS THE LEDGER, NOT `state.messages` ────────────────────
+    //
+    // Without a rebuild the compaction was invisible in the room: the summary message has no
+    // runId, so `seedRoom`'s "a message without a runId is a coordination post, never render
+    // it" rule would drop it, and the live ledger still held the PRE-compaction rows. Rebuild
+    // the room now: nothing is live (refused above), the persisted state is already flushed,
+    // and the originals are still in `state.messages`, so the rebuild keeps every original row
+    // AND adds the checkpoint row. `seedLedgerRoom` sorts by time, so the checkpoint lands at
+    // the fold boundary. Best-effort: the state mutation already succeeded and a projection
+    // refresh must not turn a successful compaction into an error.
+    try {
+      this.ledger.clearRoom(brandId<BotRoomId>(roomId))
+      // Mark hydrated BEFORE seeding: a lazy `listLedger` would otherwise rebuild the room a
+      // second time on the panel's first poll (two rows per message, both with fresh ids).
+      this.ledgerHydrated.add(roomId)
+      this.maintenance.seedLedgerRoom(roomId)
+    } catch (error: unknown) {
+      this.ctx.logger?.warn?.(
+        `agent-community: compacted room ${roomId} but could not rebuild its ledger: ${String(error)}`,
+      )
+    }
     this.ctx.logger?.info?.(
       `agent-community: folded room ${roomId}: ${foldedIds.length} message(s) behind 1 checkpoint, `
-      + `${tail.length} kept in the window; originals retained, bot sessions untouched`,
+      + `${tail.length} kept in the window; originals retained (panel rebuilt), bot sessions untouched`,
     )
     return {
       compacted: true,
@@ -5227,6 +5330,20 @@ export class AgentCommunityService extends TypertRemoteService {
       .catch(() => undefined)
   }
 
+  /**
+   * The panel's poll payload — TRIMMED, because it is polled every 400 ms.
+   *
+   * The transcript, reasoning, tool cards and deliverables all reach the panel through the
+   * LEDGER (an incremental cursor), not through this snapshot; what the snapshot's messages
+   * are actually used for is the unread water mark (newest id/createdAt per room) and nothing
+   * else. Serializing the whole community here — every message's reasoning and tool output,
+   * every run's full prompt — put megabytes on the wire for fields no surface reads.
+   *
+   * `summarizeSnapshot*` are structural copies, so a heavy field added later cannot leak into
+   * the payload by accident. The declared return type stays `BotCommunitySnapshot` (the state
+   * schema is unchanged); the two arrays now carry the documented lite subset, which is a
+   * superset of every field the panel reads.
+   */
   snapshot(): BotCommunitySnapshot {
     const tasks = this.state.rooms.flatMap(room =>
       ((room as BotRoom & { tasks?: BotTask[] }).tasks ?? []).map(t => ({ ...t, roomId: room.id as string })),
@@ -5234,8 +5351,8 @@ export class AgentCommunityService extends TypertRemoteService {
     return {
       bots: this.state.bots,
       rooms: this.state.rooms,
-      messages: this.state.messages,
-      runs: this.state.runs,
+      messages: summarizeSnapshotMessages(this.state.messages) as unknown as BotCommunitySnapshot['messages'],
+      runs: summarizeSnapshotRuns(this.state.runs) as unknown as BotCommunitySnapshot['runs'],
       mailbox: this.state.mailbox,
       tasks,
       unread: this.unreadByRoom(),

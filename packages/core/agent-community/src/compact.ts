@@ -11,8 +11,22 @@
  * session-less LLM path (`ctx.llm.stream`, the same one the group-proposal judgement and
  * the skill profiler use) rather than inventing a second client.
  *
+ * TWO COMPACTIONS, ONE JOB EACH (kept separate on purpose):
+ *
+ *   · The HOST compacts a bot's own session (`dsh-compaction-basic`, at ~80% of the
+ *     window, keeping the newest ~16%). The plugin does not influence that and must not:
+ *     the session is DSH's business.
+ *   · The PLUGIN's compaction (this module + `compactRoom`) folds the ROOM's message
+ *     window that `buildPrompt` would otherwise replay every turn, and records one
+ *     durable summary message so the panel can show what happened. The original messages
+ *     are never deleted (the user's rule: 压缩必须可找回) — folding only tells the prompt
+ *     window to skip them, which is why the fold set is exactly the ids the summary
+ *     replaced ({@link foldedMessageIds}).
+ *
  * @module
  */
+
+import type { SeedRoomItem } from './ledger.ts'
 
 /** The sender name the summary row carries in the transcript and in the prompt history. */
 export const COMPACT_SENDER_NAME = '压缩摘要'
@@ -70,6 +84,52 @@ export function splitForCompaction<T>(
   const keep = Math.max(MIN_KEEP_LAST, Math.floor(keepLast))
   const cut = Math.max(0, messages.length - keep)
   return { older: messages.slice(0, cut), tail: messages.slice(cut) }
+}
+
+/**
+ * The ids the prompt window must skip after a compaction, oldest first.
+ *
+ * `older` is EXACTLY the segment the summary replaced — `splitForCompaction` already made
+ * that decision, so its ids ARE the fold set; asking the split is the only way the two can
+ * never disagree. This used to be recomputed from timestamps
+ * (`createdAt < summaryMessage.createdAt`) while the summary was deliberately stamped with
+ * the OLDEST replaced message's time (so the panel sorts the checkpoint where the replaced
+ * messages were). Those two conditions cannot both hold, so `foldedIds` came out EMPTY:
+ * `compactRoom` reported success while the prompt kept replaying every old message.
+ *
+ * Kept pure and generic so the rule is asserted without a service or a host.
+ */
+export function foldedMessageIds(older: readonly { readonly id: string }[]): string[] {
+  return older.map(message => message.id)
+}
+
+/** What a persisted summary message exposes to the panel rebuild. */
+export interface SummarySeedSource {
+  readonly id: string
+  readonly createdAt: string
+  readonly text: string
+  readonly senderName: string
+}
+
+/**
+ * The `SeedRoomItem` for one persisted summary message.
+ *
+ * THE PANEL RENDERS THE LEDGER, and a summary has no runId — the generic rebuild would hand
+ * it to `seedRoom` as a bot answer and the "a message without a runId is a coordination
+ * post, never render it" rule would drop it, so a compressed room looked untouched (and the
+ * checkpoint vanished on reload). Marking it `actor: 'summary'` makes `seedRoom` rebuild it
+ * as the same grey `dispatch` divider a durable notice uses. It lives here, pure and beside
+ * the fold rules, so the panel half of compaction is testable without a Maintenance host.
+ */
+export function summarySeedItem(message: SummarySeedSource): SeedRoomItem {
+  return {
+    id: message.id,
+    at: message.createdAt,
+    kind: 'notice',
+    senderName: message.senderName,
+    text: message.text,
+    actor: 'summary',
+  }
 }
 
 export interface SummaryPrompt {

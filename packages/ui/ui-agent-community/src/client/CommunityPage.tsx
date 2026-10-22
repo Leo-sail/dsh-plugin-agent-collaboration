@@ -411,10 +411,11 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
   }, [selectedId, remote])
   const runs: BotRun[] = (snapshot?.runs ?? []) as BotRun[]
   // Clear / stop-all / delete: the state they own and the three handlers live in
-  // community/useRoomActions.ts.
+  // community/useRoomActions.ts. `snapshotMessages` is deliberately NOT passed any more: the
+  // hook never read it, and the snapshot no longer carries full message records (S13 keeps
+  // only the unread-anchor fields — the transcript comes from the ledger).
   const roomActions = useRoomActions({
     remote, selectedId, selectedRoom, runs,
-    snapshotMessages: snapshot?.messages ?? [],
     busy, setBusy, setError, load,
   })
   const confirmDelete = roomActions.confirmDelete

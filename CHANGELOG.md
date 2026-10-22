@@ -1,3 +1,35 @@
+## Unreleased — stability batch 7 (S13 snapshot/persistence + S14 compaction)
+
+P2 收尾：快照与状态写瘦身、退出不丢写、压缩折叠与摘要进面板。只改插件源码，不改任何 Bot。
+
+### S13 · 快照瘦身 / 持久化合并写
+- `snapshot()` 的 `messages` 改为白名单轻量摘要：`{id, roomId, sender, text(240 code points), createdAt,
+  sequence, mentions?}`；`runs` 只保留 UI 实际读取的字段，丢弃 `prompt`/lease/assignment/sessionId。
+  用真实 state.json 只读回放（540 条消息 / 374 run）：messages+runs 快照 **6,091,762 B → 358,960 B
+  （约 5.9%，17×）**；最重单条 227,424 B → 502 B。schema/version 不变。
+- 持久化：`enqueueWrite` 改为 250ms 合并窗（窗内多次 mutation 只写一次）；`flushNow` 清 timer
+  后立即写当前 state；dispose 监听改为 async，先 `await flushNow()` 再销毁 executor/timer；
+  state 用紧凑 JSON 序列化（实测 6.51MB → 6.20MB）。删除路径（clear/delete）仍 await flush。
+- UI 清理：`useRoomActions` 的未使用 `snapshotMessages` prop 与对应传参删除。
+
+### S14 · 压缩折叠修复 / 摘要进面板
+- **foldedIds 恒空修复**：`compactRoom` 改用 `foldedMessageIds(older)`（= `older.map(id)`），
+  不再用 `createdAt < summary.createdAt` 比较（summary 的时间戳故意取最旧被替换消息，两条件
+  永远不可能同时成立）。12 条 / keepLast=4 的窗口现在 = 4 条 tail + 摘要，旧 8 条不进 prompt。
+- **摘要进面板**：summary 消息无 runId，原重建路径会按"协调消息"隐藏；现在
+  `maintenance.seedLedgerRoom` 为 `kind:'summary'` 生成 `summarySeedItem`，
+  `ledger.seedRoom` 用 `actor:'summary'` 渲染为灰色 `dispatch` 分隔行；`compactRoom` 成功后
+  `clearRoom` + `seedLedgerRoom` 重建该房 ledger，原消息保留（压缩可找回），重复 seed 按
+  summary id 去重。
+- 注释明确插件 fold 与宿主 session compaction 的职责分工（插件只折房间 prompt 窗口，
+  摘要行进面板；宿主压缩 bot 自己的 session）。
+- 新增 `tests/compact-fold.test.ts`（8）、`tests/snapshot-lite.test.ts`（8）。
+
+### 验证
+- `node --test tests/*.test.ts`：**188/188 通过**。
+- UI/core typecheck（过滤宿主缺失 d.ts 噪声）：0 真实错误；四包 tsdown + check-build = OK。
+- 本轮只同步 GitHub 源码；未安装/未重启、未发布 npm、未更新插件市场。
+
 ## Unreleased — stability batch 6 (S10 + S11 + S12)
 
 P1 收尾：消息源/游标/上下文治理、自动运行与运行状态 UI、宿主工具面/提示词/leader 收敛。

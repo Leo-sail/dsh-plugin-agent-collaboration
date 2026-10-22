@@ -13,6 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { BotId, BotRoom, BotRoomId, BotTask, RoomTaskState } from './types.ts'
 import type { LedgerProjector, SeedRoomItem } from './ledger.ts'
 import type { PersistedState } from './persistence.ts'
+import { summarySeedItem } from './compact.ts'
 import { SessionRunner, optionalService } from './session-runner.ts'
 
 /**
@@ -82,6 +83,23 @@ export class Maintenance {
     // every tool call, leaving only the final answers. The run's reasoning and tool
     // activity are persisted on the message for exactly this reconstruction.
     const items = ordered.flatMap((m) => {
+      // ── A COMPACTION CHECKPOINT IS A SYSTEM ROW, NOT A REPLY ──────────────────
+      //
+      // `compactRoom` persists its summary as a message with `kind: 'summary'` and NO
+      // runId — the plugin wrote it, no bot did. The generic rebuild below would hand it
+      // to `seedRoom` as a bot answer and the "a message with no runId is a coordination
+      // post, never render it" rule would drop it, so the panel could never show that the
+      // room had been compressed (and after a reload the checkpoint vanished). Seed it
+      // explicitly as a `summary` item, which `seedRoom` renders as the same grey
+      // `dispatch` divider a durable notice uses.
+      if (m.kind === 'summary') {
+        return [summarySeedItem({
+          id: m.id,
+          createdAt: m.createdAt,
+          text: m.text,
+          senderName: m.sender.name,
+        })]
+      }
       const base = {
         kind: m.sender.kind === 'user' ? ('user' as const) : ('bot' as const),
         senderName: m.sender.name,

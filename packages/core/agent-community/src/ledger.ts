@@ -264,8 +264,13 @@ export interface SeedRoomItem {
        * Which row to rebuild. Defaults to the answer (`bot-text`); the reasoning
        * and tool rows are reconstructed from the message that carried them so a
        * restart does not erase the thinking and tool sections.
+       *
+       * `summary` rebuilds a compaction checkpoint as a `dispatch` divider row (the same
+       * renderer a durable notice uses): the message has no runId, so without this actor
+       * it would be skipped as a coordination post and the panel could not show that the
+       * room had been compressed.
        */
-      readonly actor?: 'bot-text' | 'bot-reasoning' | 'tool-call' | 'tool-result' | 'deliverable' | undefined
+      readonly actor?: 'bot-text' | 'bot-reasoning' | 'tool-call' | 'tool-result' | 'deliverable' | 'summary' | undefined
       readonly callId?: string | undefined
       /** Deliverable file metadata for a {@link LedgerDeliverableEntry} rebuild. */
       readonly files?: readonly DeliveredFile[] | undefined
@@ -347,6 +352,13 @@ export class LedgerProjector {
           senderName: item.senderName,
           ...(item.attachments !== undefined ? { attachments: item.attachments } : {}),
         })
+      } else if (item.actor === 'summary') {
+        // A compaction checkpoint. Rendered exactly like a durable notice — a grey
+        // `dispatch` divider — because that is the truth: the plugin wrote it, no participant
+        // said it, and it is a marker in the transcript rather than a reply. Its id is the
+        // summary MESSAGE id, so a repeated seed rebuilds the same row instead of adding a
+        // second one (the `seenIds` guard above does the de-duplication).
+        list.push({ ...base, type: 'dispatch', text: item.text })
       } else if (item.kind === 'notice') {
         // A durable system row (room.notices). Same `dispatch` type the live path pushes, so a
         // rebuilt notice is byte-for-byte the row the user already saw — one renderer, one style.

@@ -13,7 +13,7 @@
  * stays whole rather than being half-deleted.
  */
 import { useState } from 'react'
-import type { BotMessage, BotRoom, BotRun } from '@dsh-plugin-agent-community/agent-community'
+import type { BotRoom, BotRun } from '@dsh-plugin-agent-community/agent-community'
 import type { ConfirmDeleteTarget } from './ConfirmDeleteDialog.tsx'
 import type { CommunityRemote } from './types.ts'
 import { describe } from './types.ts'
@@ -26,8 +26,6 @@ export interface RoomActionsInput {
   selectedRoom: BotRoom | undefined
   /** Live runs from the snapshot, for the stop-all pass. */
   runs: readonly BotRun[]
-  /** Snapshot messages; narrowed to the open room here. */
-  snapshotMessages: readonly BotMessage[]
   /** Another action is in flight: delete and stop-all hold each other off. */
   busy: boolean
   setBusy: (busy: boolean) => void
