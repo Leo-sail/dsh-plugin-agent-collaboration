@@ -33,6 +33,7 @@ import type {
   RoomGoal,
   DeliveredFile,
   HarnessAttribution,
+  FinishEvidence,
 } from './types.ts'
 import { routeMessage, namedBotIdsIn, mentionsEveryone } from './routing.ts'
 import { renderAttachmentReference, storeAttachments, type StoredAttachment } from './attachments.ts'
@@ -51,6 +52,7 @@ import { decideReadMark, repairReadMarks, totalUnread, unreadByRoom } from './un
 import { LedgerProjection } from './ledger-projection.ts'
 import { GroupTaskDriver, type GroupTaskState } from './group-task.ts'
 import { chooseFinalDelivery, publishOf, type RunPublish } from './publish-policy.ts'
+import { checkFinishEvidence } from './finish-gate.ts'
 import { registerCollaborationTools } from './collaboration-tools.ts'
 import { crossRoomError, screenRoomCreation, type RoomCreationActor } from './room-guard.ts'
 import {
@@ -90,7 +92,10 @@ import {
   COMPACT_SENDER_NAME,
   checkpointCreatedAt,
   clampKeepLast,
+  extractPinnedConstraints,
   foldedMessageIds,
+  mergePinnedConstraints,
+  roomConstraintsText,
   splitForCompaction,
   summariseHistory,
   summaryMessageText,
@@ -672,6 +677,13 @@ export class AgentCommunityService extends TypertRemoteService {
    * key is the fallback for a finish that arrives outside a run (older callers).
    */
   private readonly pendingFinishReports = new Map<string, string>()
+  /**
+   * Consecutive finish-gate rejections per (room, leader), plus the task-board signature they
+   * belong to. OP-02: the first two refusals are strict; the third lets the task close as
+   * `bypassed` (recorded as unverified) so a leader that cannot produce verifiable evidence
+   * cannot deadlock the room for ever. A changed board resets the count (new task).
+   */
+  private readonly finishGateRejections = new Map<string, { count: number; board: string }>()
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'agentCommunity')
@@ -1388,9 +1400,10 @@ export class AgentCommunityService extends TypertRemoteService {
         if (driver === undefined) return { assigned: [], refused: input.botIds }
         return driver.assign({ roomId: input.roomId, botIds: input.botIds, task: input.task })
       },
-      finishTask: (input) => {
-        void this.groupTask?.finish({ roomId: input.roomId, report: input.report })
-      },
+      // The gate runs first (OP-02): `finish_task` only closes the task when its evidence
+      // checks out. A rejection returns the reason and leaves the task open — the tool does
+      // NOT conclude the turn in that case, so the model can fix the evidence and retry.
+      finishTask: async (input) => await this.gateFinishTask(input),
       // A member's direct message. The existing post path already knows how to deliver to one bot
       // (`toBotName` → a mailbox entry with origin 'a2a'), so this is only the tool-side adapter:
       // the sender's session is derived from the pair, never from the model.
@@ -2530,6 +2543,10 @@ export class AgentCommunityService extends TypertRemoteService {
           taskState: undefined,
           notices: [],
           pendingGroupProposal: undefined,
+          // OP-03: constraints were pinned from THOSE messages. Keeping them would let a rule
+          // whose sentence was deleted rule a conversation that no longer exists, and the next
+          // compaction would re-inject it into the summary.
+          pinnedConstraints: [],
         } as BotRoom & { tasks: BotTask[] }
         : r,
     )
@@ -2686,12 +2703,26 @@ export class AgentCommunityService extends TypertRemoteService {
     // (80% of the window, keeping the newest 16% verbatim) — and retiring the session here was
     // the plugin deleting memory the user never asked it to delete.
 
+    // ── HARD CONSTRAINTS SURVIVE THE FOLD (OP-03) ──────────────────────────────
+    //
+    // The segment being replaced is about to leave the prompt. A summary model may paraphrase
+    // or silently drop a "必须/不要" rule stated there, so the user's hard constraints are
+    // extracted VERBATIM from `older` (user messages only) and merged with what this room
+    // already pinned. They are then: (a) appended to the summary message text, and (b) stored
+    // on the room, where `roomConstraintsBlock` re-injects them into EVERY later turn. The
+    // room is re-read here, not taken from the pre-summarise snapshot, so a concurrent change
+    // cannot be overwritten by a stale list.
+    const pinnedConstraints = mergePinnedConstraints(
+      this.state.rooms.find(r => r.id === roomId)?.pinnedConstraints,
+      extractPinnedConstraints(older),
+    )
+
     const summaryMessage: BotMessage = {
       id: brandId<BotMessageId>(randomUUID()),
       roomId: brandId<BotRoomId>(roomId),
       // `routine` is the honest kind: no bot and no user wrote this row, the plugin did.
       sender: { kind: 'routine', name: COMPACT_SENDER_NAME },
-      text: summaryMessageText(older.length, summary),
+      text: summaryMessageText(older.length, summary, pinnedConstraints),
       mentions: [],
       // Stamped at the FOLD BOUNDARY — just before the first kept message — so the rebuilt
       // transcript shows the checkpoint in the newest page. The first version used the oldest
@@ -2717,6 +2748,9 @@ export class AgentCommunityService extends TypertRemoteService {
           ...r,
           foldedSeqs: foldedIds,
           foldCheckpointId: summaryMessage.id,
+          // Pinned constraints live on the ROOM, not on the summary row: the summary ages out
+          // of the prompt window, a user rule must not. Cleared by `clearMessages`.
+          pinnedConstraints,
           // `compactCount` is deliberately NOT bumped: it advances the session generation,
           // which would abandon every member's conversation — the opposite of what the user
           // asked for.
@@ -4325,6 +4359,111 @@ export class AgentCommunityService extends TypertRemoteService {
     }) as unknown as LedgerProjector
   }
 
+  // ── FINISH GATE (OP-02) ────────────────────────────────────────────────────
+
+  /**
+   * The room's task board as the gate sees it.
+   *
+   * `room.taskState` is the PERSISTED board (assignments carry `done` once a member reported),
+   * which is exactly what "this task was really delivered" must be checked against — the
+   * in-memory driver has its own copy but this one survives a reload.
+   */
+  private finishGateBoard(roomId: string): ReadonlyArray<{ readonly id: string; readonly status?: string | undefined }> {
+    const assignments = this.state.rooms.find(r => r.id === roomId)?.taskState?.assignments ?? []
+    return assignments.map(assignment => ({
+      id: assignment.id,
+      ...(assignment.status !== undefined ? { status: assignment.status } : {}),
+    }))
+  }
+
+  /** Signature of the current board, so a rejection streak cannot leak into the NEXT task. */
+  private finishGateBoardSignature(roomId: string): string {
+    return this.finishGateBoard(roomId)
+      .map(assignment => `${assignment.id}:${assignment.status ?? ''}`)
+      .join('|')
+  }
+
+  /**
+   * Gate a `finish_task` declaration, then close the task through the driver.
+   *
+   * THE GATE IS THE AUTHORITY. Evidence is checked by `checkFinishEvidence` (files on the
+   * leader's disk, messages in THIS room, assignments reported on THIS board); every failure
+   * is returned at once so the model can fix them in one retry. Three consecutive rejections
+   * for the same leader+board are the deadlock guard: the third one closes the task with
+   * `gate: 'bypassed'` and a visible notice saying it is UNVERIFIED.
+   *
+   * `workspaceRoot` is the leader's real working directory (`runWorkspaceDir`): a relative
+   * evidence path means "the file the bot actually wrote", not a path relative to the server.
+   */
+  private async gateFinishTask(input: {
+    roomId: string
+    leaderId: string
+    report: string
+    evidence: readonly FinishEvidence[]
+  }): Promise<{ ok: boolean; reason?: string; bypassed?: boolean }> {
+    const driver = this.groupTask
+    if (driver === undefined) return { ok: false, reason: '任务驱动未就绪，不能结束任务。' }
+    const room = this.state.rooms.find(r => r.id === input.roomId)
+    if (room === undefined) return { ok: false, reason: '房间不存在。' }
+    const result = await checkFinishEvidence({
+      roomId: input.roomId,
+      workspaceRoot: this.runWorkspaceDir(input.leaderId),
+      evidence: input.evidence,
+    }, {
+      lookupMessage: (messageId) => {
+        const message = this.state.messages.find(candidate => candidate.id === messageId)
+        if (message === undefined) return undefined
+        return {
+          roomId: String(message.roomId),
+          ...(message.runId !== undefined ? { runId: String(message.runId) } : {}),
+        }
+      },
+      listAssignments: () => this.finishGateBoard(input.roomId),
+    })
+
+    const key = `${input.roomId}\u0000${input.leaderId}`
+    if (result.ok) {
+      this.finishGateRejections.delete(key)
+      await driver.finish({
+        roomId: input.roomId,
+        report: input.report,
+        evidence: input.evidence,
+        gate: 'passed',
+      })
+      return { ok: true }
+    }
+
+    const board = this.finishGateBoardSignature(input.roomId)
+    const previous = this.finishGateRejections.get(key)
+    const count = previous !== undefined && previous.board === board ? previous.count + 1 : 1
+    this.finishGateRejections.set(key, { count, board })
+    const reason = result.failures.join('；')
+    this.ctx.logger?.warn?.(
+      `agent-community: finish gate rejected room=${input.roomId} leader=${input.leaderId} `
+      + `(${count}/3 board=${board.slice(0, 80)}): ${reason}`,
+    )
+    if (count < 3) {
+      this.recordNotice(
+        input.roomId,
+        `完成未通过证据门（第 ${count}/3 次）：${reason}。任务仍未关闭，等 leader 补齐证据。`,
+      )
+      return { ok: false, reason }
+    }
+    // DEADLOCK GUARD: after the third refusal, close it anyway and SAY it is unverified.
+    this.finishGateRejections.delete(key)
+    await driver.finish({
+      roomId: input.roomId,
+      report: input.report,
+      evidence: input.evidence,
+      gate: 'bypassed',
+    })
+    this.recordNotice(
+      input.roomId,
+      `证据门连续 3 次未通过：本次完成按 bypassed 放行并标记为「未验证」（原因：${reason}）。`,
+    )
+    return { ok: true, bypassed: true }
+  }
+
   /** Remember a `finish_task` report until its run settles (see `pendingFinishReports`). */
   private recordFinishReport(roomId: string, leaderId: string, report: string): void {
     if (report.trim() === '') return
@@ -4664,6 +4803,21 @@ export class AgentCommunityService extends TypertRemoteService {
     const room = this.state.rooms.find(r => r.id === roomId)
     if (room === undefined) return undefined
     return goalPromptBlock(room.goal, room.name)
+  }
+
+  /**
+   * The `[本房间必须遵守的硬性约束]` block for a turn, or undefined when nothing is pinned.
+   *
+   * OP-03. These are the user's own hard rules, extracted verbatim when a compaction folded the
+   * messages they were stated in. Rendering them into EVERY turn's prompt (rather than only
+   * inside the summary row, which ages out of the window) is what makes "压缩不丢约束" true at
+   * the prompt level. Room-keyed like the goal/memory accessors: a rule pinned in one room can
+   * never be rendered for another.
+   */
+  roomConstraintsBlock(roomId: string): string | undefined {
+    const room = this.state.rooms.find(r => r.id === roomId)
+    if (room === undefined) return undefined
+    return roomConstraintsText(room.pinnedConstraints)
   }
 
   /**

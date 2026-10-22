@@ -189,6 +189,19 @@ export interface BotRoom {
    */
   readonly compactCount?: number | undefined
   /**
+   * Hard rules the USER stated in this room, pinned across compaction (OP-03).
+   *
+   * Compaction replaces older messages with a summary, and a summarising model may paraphrase
+   * or drop a "必须/不要" rule; once folded, the originals are no longer sent. These fragments
+   * are extracted verbatim from `sender.kind === 'user'` messages at compaction time, carried
+   * on the room, and re-rendered into EVERY turn's prompt by `roomConstraintsBlock` — so a rule
+   * outlives the window it was stated in. Deduped and bounded (≤20) by
+   * `mergePinnedConstraints`; cleared with the messages (`clearMessages`).
+   *
+   * Additive: an older state file lacks it and means "no pinned constraints yet".
+   */
+  readonly pinnedConstraints?: readonly string[] | undefined
+  /**
    * This room's durable system notices, oldest first (see {@link BotRoomNotice}).
    *
    * Additive: a state file written before this field simply lacks it, and an absent list means the
@@ -775,6 +788,41 @@ export interface RoomTaskAssignment {
 }
 
 /**
+ * One piece of verifiable evidence that a group task is really delivered (OP-02).
+ *
+ * A `finish_task` declaration is gated on these: a file that exists on disk, a message that
+ * exists in THIS room, or an assignment on this room's board that was reported/done. The three
+ * variants are deliberately about things the host can CHECK — a prose claim is not evidence.
+ */
+export type FinishEvidence =
+  | {
+    readonly kind: 'file'
+    /** Relative to the leader's workspace, or absolute. */
+    readonly path: string
+    /** Optional integrity check (hex sha256); files above 128 MB skip the hash. */
+    readonly sha256?: string | undefined
+  }
+  | {
+    readonly kind: 'message'
+    readonly messageId: string
+    /** When given, the message must belong to this run. */
+    readonly runId?: string | undefined
+  }
+  | {
+    readonly kind: 'task'
+    /** Assignment id from this room's task board. */
+    readonly taskId: string
+  }
+
+/** What the `finish_task` tool sends to the service. */
+export interface FinishTaskRequest {
+  readonly roomId: string
+  readonly leaderId: string
+  readonly report: string
+  readonly evidence: readonly FinishEvidence[]
+}
+
+/**
  * Background task board for one room (§5.4: "不建任务板 UI，但后台有任务板").
  *
  * It exists because the leader's own session is the only place progress would
@@ -784,7 +832,14 @@ export interface RoomTaskState {
   readonly round: number
   readonly maxRounds: number
   readonly assignments: readonly RoomTaskAssignment[]
-  readonly finished?: { readonly report: string; readonly at: string } | undefined
+  readonly finished?: {
+    readonly report: string
+    readonly at: string
+    /** What the finish gate accepted (OP-02); absent on tasks closed before the gate. */
+    readonly evidence?: readonly FinishEvidence[] | undefined
+    /** `bypassed` = passed after repeated gate rejections, i.e. NOT verified. */
+    readonly gate?: 'passed' | 'bypassed' | undefined
+  } | undefined
   /** The user's original task, kept verbatim so a member hand-off can restate it (§24.6). */
   readonly objective?: string | undefined
 }

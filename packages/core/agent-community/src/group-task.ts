@@ -31,7 +31,7 @@
  *   · a compaction is in flight
  * Only when none holds for several consecutive rounds is the task considered stuck.
  */
-import type { BotId, BotRoomId } from './types.ts'
+import type { BotId, BotRoomId, FinishEvidence } from './types.ts'
 
 /** One member assignment, tracked so the leader can be told what is outstanding. */
 export interface Assignment {
@@ -54,7 +54,17 @@ export interface GroupTaskState {
   readonly pendingReports: Array<{ botId: string; text: string; ok: boolean }>
   /** The user instruction this task belongs to, so a finish cannot outlive its task. */
   instructionAt?: string | undefined
-  finished?: { report: string; at: string; epoch?: string | undefined } | undefined
+  /**
+   * A closed task. `evidence`/`gate` come from the finish gate (OP-02): a task finished with
+   * `bypassed` was let through after repeated rejections and is explicitly NOT verified.
+   */
+  finished?: {
+    report: string
+    at: string
+    epoch?: string | undefined
+    evidence?: readonly FinishEvidence[] | undefined
+    gate?: 'passed' | 'bypassed' | undefined
+  } | undefined
 }
 
 /** What the driver needs from the community service. */
@@ -334,9 +344,25 @@ export class GroupTaskDriver {
     return state.finished !== undefined && !this.finishedIsStale(roomId, state)
   }
 
-  async finish(input: { roomId: string; report: string }): Promise<void> {
+  async finish(input: {
+    roomId: string
+    report: string
+    /**
+     * Evidence the service's finish gate accepted (OP-02). Stored on the finished record so a
+     * delivered task can always be audited; absent only for callers that predate the gate.
+     */
+    evidence?: readonly FinishEvidence[] | undefined
+    /** `bypassed` records that the gate was overridden after repeated rejections. */
+    gate?: 'passed' | 'bypassed' | undefined
+  }): Promise<void> {
     const state = this.ensure(input.roomId)
-    state.finished = { report: input.report, at: new Date().toISOString(), epoch: state.instructionAt }
+    state.finished = {
+      report: input.report,
+      at: new Date().toISOString(),
+      epoch: state.instructionAt,
+      ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
+      ...(input.gate !== undefined ? { gate: input.gate } : {}),
+    }
     state.runningBotIds.clear()
     this.save(input.roomId, state)
 

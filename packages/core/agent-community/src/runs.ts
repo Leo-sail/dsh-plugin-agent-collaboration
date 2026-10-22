@@ -286,6 +286,14 @@ export interface CommunityStateAccessor {
    * for another room's goal, so one room's objective can never appear in another's prompt.
    */
   roomGoalBlock(roomId: string): string | undefined
+  /**
+   * The `[本房间必须遵守的硬性约束]` block for THIS room, or undefined when there is none.
+   *
+   * Room-keyed for the same reason as the goal/memory accessors: a caller cannot ask for another
+   * room's constraints, so a rule stated in one room can never rule another. The constraints are
+   * pinned at compaction time (`compactRoom`) and survive the window the user stated them in.
+   */
+  roomConstraintsBlock(roomId: string): string | undefined
   /** Every bot in the community (id + name are what the prompt needs). */
   /** Every bot, with the role text a 1:1 needs to decide who to propose. */
   listBots(): Array<{
@@ -1573,14 +1581,20 @@ export class RunExecutor {
     // `members` still documents who the room holds); the group rule text itself moved to the
     // system prompt.
 
-    // ── THE PROMPT CONTRACT (OP-05) ─────────────────────────────────────────────
+    // ── THE PROMPT CONTRACT (OP-05, v2 in OP-03) ────────────────────────────────
     //
     // This used to be a `parts: string[]` joined here, which made the section order and the
     // separators an implicit convention of this function — any refactor could reorder two
     // blocks and make every stored evaluation compare different harnesses. The names, order
     // and separator now live in `prompt-contract.ts` and are golden-tested; this function only
-    // fills the sections. THE ASSEMBLED BYTES ARE UNCHANGED — same blocks, same order, same
-    // `\n\n` between them (tests assert the exact output).
+    // fills the sections.
+    //
+    // ROLE ISOLATION: every dynamic section below (role/skills/goal/constraints/memory/history/
+    // input) is assembled into ONE user message. None of it is ever placed in the system prompt
+    // or in a tool-instruction role — the system prompt is the static bot persona
+    // (`bot-prompt.ts`), and the instructions of this turn are only the `[本轮输入]` block.
+    // `memory` and `history` are untrusted context evidence; `assemblePrompt` puts the fixed
+    // `[上下文证据规则]` guard in front of the first of them, every turn they exist.
     const sections: PromptSections = {}
     if (bot !== undefined) {
       // The bot's own system prompt belongs here. It was only ever read by the LEGACY
@@ -1627,6 +1641,14 @@ export class RunExecutor {
     // have I done here".
     const goal = this.svc.roomGoalBlock(run.roomId)
     if (goal !== undefined) sections.goal = goal
+    // ── HARD CONSTRAINTS THE USER STATED (OP-03) ────────────────────────────────
+    //
+    // Pinned at compaction time from the user's own messages, so a "必须/不要" rule survives
+    // the fold that removes the sentence it was stated in. Placed AFTER the goal and BEFORE
+    // memory/history on purpose: standing user rules outrank remembered data, and the
+    // assembler inserts its trust-boundary guard right after this section.
+    const constraints = this.svc.roomConstraintsBlock(run.roomId)
+    if (constraints !== undefined && constraints !== '') sections.constraints = constraints
     if (bot !== undefined && this.memoryPromptEntries > 0) {
       // BASELINE ONCE, DELTA AFTER: the executor remembers what this pair has already been
       // shown, so a turn carries the recent memory only when it is the first, and otherwise

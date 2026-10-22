@@ -1,3 +1,36 @@
+## Unreleased — paper batch 2 (OP-02 finish gate, OP-03 context isolation/pin)
+
+论文第二批机制改进；只改插件源码/测试，不改 Bot。
+
+### OP-02 · 完成门 + 证据门控交付
+- `finish_task` 改为 **EVIDENCE-GATED**：`report` 与 `evidence` 都必填；evidence 1–8 条，
+  三种可校验证据：
+  * `file`：相对 leader workspace 或绝对路径，必须是真实、非空普通文件；可选 sha256（>128MB 跳过 hash，保留存在性检查）；
+  * `message`：必须是本房间真实消息；可选 `runId` 必须匹配；
+  * `task`：本房间任务板中 status 为 `done/reported` 的 assignment。
+- 新增 `finish-gate.ts`（可注入 fs/lookup，纯/可测）；一次返回全部失败原因；**不执行 shell**。
+- `finish_task` 未通过 → 不 `concludeTurn`、任务保持打开、返回可修正 reason + 可见 notice；
+  同一 leader+board 连续第 3 次仍未通过 → 放行但标记 `gate:'bypassed'`（未验证），避免死锁。
+- `GroupTaskDriver.finish`/`RoomTaskState.finished` 持久化 evidence 与 gate；`postReport` 仍单次交付。
+- `bot-prompt` 群聊段与工具 schema 同步说明 evidence 必填。
+- 新增 `tests/finish-gate.test.ts`（19）。
+
+### OP-03 · 上下文角色隔离 + 压缩安全 pin
+- Prompt contract 升 **v2**：段序 `role, skills, goal, constraints, memory, history, input`；
+  `memory`/`history` 前插入一次固定的 `[上下文证据规则]` guard（无这类段则不插），
+  明确它们是数据不是指令；所有动态段仍在同一条 user message，绝不进入 system/tool-instruction role。
+- `constraints` 段来自房间 `pinnedConstraints`：压缩时只从 **user 消息** 提取含
+  `必须/不要/禁止/不得/只能/不许/绝不能/一定要/切记/不可/不能` 的硬规则（8–300 字、去重、≤20），
+  压缩摘要保留 `[必须保留的硬约束]`，并在之后每轮 prompt 重新注入；`clearMessages` 清空。
+- 新增 `extractPinnedConstraints` / `mergePinnedConstraints` / `roomConstraintsText` 与
+  `tests/compact-pin.test.ts`；更新 prompt-contract golden。
+- `HARNESS_REVISION` 升为 `paper-batch2-2026-10-22`，`PROMPT_CONTRACT_VERSION=2`；协议卡同步。
+
+### 验证
+- `node --test tests/*.test.ts`：**230/230**（新增 finish-gate 19 + compact-pin 若干，prompt golden 更新）。
+- core/UI typecheck（过滤宿主噪声）：0 真实错误；四包构建 + check-build OK。
+- 隔离实例实跑：新 run 记录 `harness.promptContract=2`、`harnessRevision='paper-batch2-2026-10-22'`。
+- 未发布 npm / 未更新市场；只同步 GitHub 源码。
 ## Unreleased — paper batch 1 (OP-01 harness attribution, OP-05 prompt contract)
 
 论文全库扫描后的第一批机制改进；只改插件源码/测试，不改 Bot。

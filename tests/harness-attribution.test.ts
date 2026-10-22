@@ -35,7 +35,7 @@ const injected: HarnessAttribution = {
 }
 
 test('the harness revision is a fixed batch marker, not a git sha', () => {
-  assert.equal(HARNESS_REVISION, 'paper-batch1-2026-10-22')
+  assert.equal(HARNESS_REVISION, 'paper-batch2-2026-10-22')
   assert.equal(typeof HARNESS_REVISION, 'string')
   assert.ok(HARNESS_REVISION.length > 0)
 })

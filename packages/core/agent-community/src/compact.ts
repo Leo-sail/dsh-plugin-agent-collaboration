@@ -322,9 +322,132 @@ export async function summariseHistory(options: SummariseHistoryOptions): Promis
  *
  * The first line stays in the bubble AND in every later prompt: the model has to know that
  * what follows is a summary of a longer conversation, not something a participant said.
+ *
+ * OP-03: when hard constraints were pinned out of the replaced segment, they are appended
+ * verbatim. A summary model may paraphrase or drop a "不要/必须" rule, and the folded messages
+ * are no longer sent — so the constraint list is the ONLY thing standing between the user's
+ * explicit rule and it disappearing from the prompt. Omitting `pinned` (or passing an empty
+ * list) returns exactly the pre-OP-03 string, which keeps old fixtures and battle-tested text
+ * byte-identical.
  */
-export function summaryMessageText(removed: number, summary: string): string {
-  return `以下是此前 ${removed} 条消息的压缩摘要（原文已不再保留）：\n\n${summary}`
+export function summaryMessageText(removed: number, summary: string, pinned?: readonly string[]): string {
+  const base = `以下是此前 ${removed} 条消息的压缩摘要（原文已不再保留）：\n\n${summary}`
+  if (pinned === undefined || pinned.length === 0) return base
+  return [
+    base,
+    '',
+    '[必须保留的硬约束]',
+    ...pinned.map(constraint => `- ${constraint}`),
+  ].join('\n')
+}
+
+/**
+ * A hard-rule marker: the words a user uses when stating something must/must-not happen.
+ *
+ * Matching is deliberately lexical, not a model call: pinning runs inside `compactRoom`, whose
+ * failure mode must stay "the summary is worse", never "compaction failed because a classifier
+ * did". A missed marker means one rule relies on the summary; a false positive means one
+ * harmless line is pinned. Both are cheap.
+ */
+const CONSTRAINT_MARKERS: readonly string[] = [
+  '必须', '务必', '不要', '禁止', '不得', '只能', '不许', '绝不能', '一定要', '切记', '不可', '不能',
+]
+
+/** Pinned constraints kept per room. Hard cap, because the block is injected into every turn. */
+export const MAX_PINNED_CONSTRAINTS = 20
+
+/** Shortest fragment worth pinning (a rule needs words to carry a condition). */
+export const MIN_PINNED_CONSTRAINT_CHARS = 8
+
+/** Longest fragment kept — one line, not a paragraph. */
+export const MAX_PINNED_CONSTRAINT_CHARS = 300
+
+/** Split one message into candidate rule fragments: by line and by sentence punctuation. */
+function constraintFragments(text: string): string[] {
+  return text
+    .split(/[\n\r]+|(?<=[。；;！!？?])/u)
+    .map(fragment => fragment.replace(/\s+/gu, ' ').trim())
+    .filter(fragment => fragment !== '')
+}
+
+/**
+ * Extract the hard constraints the USER stated in a segment of room history.
+ *
+ * ONLY `sender.kind === 'user'` messages are considered: a bot's own reply (or a routine/summary
+ * row) often repeats "不要…" while describing what it did, and pinning that would turn a report
+ * into a standing rule. The user's own words are the only trustworthy source of an instruction.
+ *
+ * Fragments are literal slices of the message (whitespace collapsed, never rewritten), so a
+ * pinned rule can be traced back to what was actually typed. Deduped oldest-first and capped at
+ * {@link MAX_PINNED_CONSTRAINTS}; the caller merges with the room's existing list.
+ */
+export function extractPinnedConstraints(
+  messages: ReadonlyArray<{
+    readonly sender: { readonly kind: string }
+    readonly text?: string | undefined
+    readonly modelText?: string | undefined
+  }>,
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const message of messages) {
+    if (message.sender.kind !== 'user') continue
+    // The visible text is what the user typed; `modelText` can carry an attachment reference.
+    const text = message.text ?? ''
+    for (const fragment of constraintFragments(text)) {
+      if (fragment.length < MIN_PINNED_CONSTRAINT_CHARS) continue
+      if (fragment.length > MAX_PINNED_CONSTRAINT_CHARS) continue
+      if (!CONSTRAINT_MARKERS.some(marker => fragment.includes(marker))) continue
+      if (seen.has(fragment)) continue
+      seen.add(fragment)
+      out.push(fragment)
+      if (out.length >= MAX_PINNED_CONSTRAINTS) return out
+    }
+  }
+  return out
+}
+
+/**
+ * Merge the room's existing pinned constraints with newly extracted ones.
+ *
+ * Existing first (their order is what the user already agreed to), then new fragments that are
+ * not already present, oldest-first, capped at {@link MAX_PINNED_CONSTRAINTS}. Merging must be
+ * idempotent: compacting twice with the same messages yields the same list.
+ */
+export function mergePinnedConstraints(
+  existing: readonly string[] | undefined,
+  incoming: readonly string[],
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const constraint of [...(existing ?? []), ...incoming]) {
+    const text = constraint.trim()
+    if (text === '') continue
+    if (seen.has(text)) continue
+    seen.add(text)
+    out.push(text)
+    if (out.length >= MAX_PINNED_CONSTRAINTS) break
+  }
+  return out
+}
+
+/** Header of the per-turn hard-constraints block. */
+export const ROOM_CONSTRAINTS_HEADER = '[本房间必须遵守的硬性约束]'
+
+/**
+ * Render the per-turn `[本房间必须遵守的硬性约束]` block, or undefined when there is none.
+ *
+ * This is the prompt-side half of the pin: constraints pinned at compaction time must be read
+ * EVERY turn, not only inside the summary message (the summary is one row in the transcript and
+ * would age out of the window; the pinned list lives on the room until it is cleared).
+ */
+export function roomConstraintsText(pinned: readonly string[] | undefined): string | undefined {
+  if (pinned === undefined || pinned.length === 0) return undefined
+  return [
+    ROOM_CONSTRAINTS_HEADER,
+    '这些是用户在本房间明确提出的硬性约束；它们优先于记忆与历史消息，冲突时以这里为准。',
+    ...pinned.map(constraint => `- ${constraint}`),
+  ].join('\n')
 }
 
 /**

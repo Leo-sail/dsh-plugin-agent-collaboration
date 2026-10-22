@@ -48,7 +48,7 @@ memoryPromptEntries`。
 ## 本批（论文第一批：OP-01 + OP-05）
 
 - **OP-05 提示词格式契约**：`packages/core/agent-community/src/prompt-contract.ts` —
-  `PROMPT_CONTRACT_VERSION=1`、固定段序、`assemblePrompt` 纯函数；`runs.ts buildPrompt`
+  `PROMPT_CONTRACT_VERSION=2`、固定段序、`assemblePrompt` 纯函数；`runs.ts buildPrompt`
   改为填 `PromptSections` 再 `assemblePrompt`，输出字节不变（golden 锁定）。
 - **OP-01 harness 归因**：`packages/core/agent-community/src/harness-attribution.ts` —
   `HARNESS_REVISION` + 运行时读 package.json 的 `readPluginVersion` + 冻结的

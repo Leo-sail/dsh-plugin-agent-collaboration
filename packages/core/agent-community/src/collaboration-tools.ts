@@ -28,7 +28,7 @@
  *     because that is where coordination happens.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { DeliveredFile } from './types.ts'
+import type { DeliveredFile, FinishEvidence } from './types.ts'
 
 /** What the tools need from the service layer. */
 export interface CollaborationToolDeps {
@@ -150,7 +150,18 @@ export interface CollaborationToolDeps {
     task: string
   }): { assigned: readonly string[]; refused: readonly string[] }
   /** Declare the task complete; publishes the report as a group message. */
-  finishTask(input: { roomId: string; leaderId: string; report: string }): void
+  /**
+   * The finish gate + group-task finish (OP-02). Resolves after BOTH ran:
+   * `ok:false` means evidence was rejected and the task is still open — the tool must not
+   * conclude the turn; `bypassed:true` means the gate let it through after repeated refusals
+   * (recorded as unverified), which is a success with a warning.
+   */
+  finishTask(input: {
+    roomId: string
+    leaderId: string
+    report: string
+    evidence: readonly FinishEvidence[]
+  }): Promise<{ readonly ok: boolean; readonly reason?: string | undefined; readonly bypassed?: boolean | undefined }>
   /**
    * Send one member a direct message (a2a), and thereby let members talk to each other.
    *
@@ -969,15 +980,48 @@ export function registerCollaborationTools(
     name: 'finish_task',
     description:
       'Declare the group task complete and give the user the final report. This ends your turn '
-      + 'immediately — do not call any more tools afterwards.',
+      + 'immediately — do not call any more tools afterwards. FINISHING IS EVIDENCE-GATED: '
+      + 'report and evidence are BOTH required, and the host checks every evidence item before '
+      + 'the task is closed. Give 1-8 items: a real file (relative to your workspace, or '
+      + 'absolute; optional sha256), a message that exists in THIS room, or a task-board '
+      + 'assignment that has been reported/done. A rejected finish returns the reason and the '
+      + 'task stays open — fix the evidence and call again; do not describe work you cannot '
+      + 'point at.',
     properties: {
       report: {
         type: 'string',
         description: 'The final report: what was done, what was produced, what remains.',
       },
+      evidence: {
+        type: 'array',
+        // NOT `minItems: 1`, and evidence is NOT in `required` below: schema rejection would
+        // happen before the run body, so the gate's rejection counter could never advance and
+        // a model that keeps omitting evidence would loop without the deadlock guard. The body
+        // passes an empty list to the gate, which rejects it with a fixable reason and lets the
+        // third attempt bypass (with a visible "unverified" notice).
+        maxItems: 8,
+        description: '1-8 verifiable items. The host rejects paths/messages/tasks it cannot '
+          + 'confirm, and repeats are rejected. Missing evidence is a gate rejection, not a '
+          + 'schema error, so finish_task always returns an actionable reason.',
+        items: {
+          type: 'object',
+          properties: {
+            kind: { type: 'string', enum: ['file', 'message', 'task'] },
+            // file variant
+            path: { type: 'string', description: 'file：相对你的 workspace，或绝对路径' },
+            sha256: { type: 'string', description: 'file 可选：hex sha256 完整性校验' },
+            // message variant
+            messageId: { type: 'string', description: 'message：本房间内的消息 id' },
+            runId: { type: 'string', description: 'message 可选：消息必须属于该 run' },
+            // task variant
+            taskId: { type: 'string', description: 'task：本房间任务板上已回报完成的任务 id' },
+          },
+          required: ['kind'],
+        },
+      },
     },
     required: ['report'],
-    run: (args, exec) => {
+    run: async (args, exec) => {
       const who = caller(exec)
       if (typeof who === 'string') return { value: { ok: false }, text: who }
       if (who.kind !== 'group') {
@@ -989,11 +1033,57 @@ export function registerCollaborationTools(
       }
       const report = str(args, 'report')
       if (report.trim() === '') return { value: { ok: false }, text: 'report is required' }
-      deps.finishTask({ roomId: who.roomId, leaderId: who.botId, report })
-      // Ends the turn as soon as this result lands. The native loop has NO turn budget,
-      // so without this the model could keep calling tools after declaring completion.
+      // Evidence is parsed leniently here: the GATE is the authority on validity (it returns
+      // every problem at once), so the tool only guarantees the shape it passes on.
+      const rawEvidence = Array.isArray(args['evidence']) ? args['evidence'] as readonly unknown[] : []
+      const evidence: FinishEvidence[] = []
+      for (const item of rawEvidence) {
+        if (item === null || typeof item !== 'object') continue
+        const record = item as Record<string, unknown>
+        const kind = typeof record['kind'] === 'string' ? record['kind'] : ''
+        const text = (key: string): string | undefined =>
+          typeof record[key] === 'string' ? (record[key] as string).trim() : undefined
+        if (kind === 'file') {
+          const path = text('path')
+          if (path === undefined) continue
+          evidence.push({ kind: 'file', path, ...(text('sha256') !== undefined ? { sha256: text('sha256')! } : {}) })
+        } else if (kind === 'message') {
+          const messageId = text('messageId')
+          if (messageId === undefined) continue
+          evidence.push({ kind: 'message', messageId, ...(text('runId') !== undefined ? { runId: text('runId')! } : {}) })
+        } else if (kind === 'task') {
+          const taskId = text('taskId')
+          if (taskId === undefined) continue
+          evidence.push({ kind: 'task', taskId })
+        } else {
+          // Keep an unknown kind so the gate can report it precisely (instead of silently
+          // dropping the item and then complaining about the count).
+          evidence.push({ kind } as unknown as FinishEvidence)
+        }
+      }
+      if (evidence.length === 0) {
+        return {
+          value: { ok: false, reason: 'evidence is required' },
+          text: '未完成：finish_task 需要至少 1 条证据（file/message/task）。任务仍未关闭，请补齐证据后再调用。',
+        }
+      }
+      const result = await deps.finishTask({ roomId: who.roomId, leaderId: who.botId, report, evidence })
+      if (!result.ok) {
+        return {
+          value: { ok: false, reason: result.reason ?? 'evidence rejected' },
+          text: '未完成：完成证据未通过校验。' + (result.reason !== undefined ? `原因：${result.reason}. ` : '')
+            + '任务仍未关闭；请修正/补齐证据后再次调用 finish_task（文件 path、本房间消息 messageId、或已回报完成的任务 taskId）。',
+        }
+      }
+      // Only a PASSED (or explicitly bypassed) finish may end the turn: the native loop has
+      // NO turn budget, so without this the model could keep calling tools after finishing.
       exec.concludeTurn?.()
-      return { value: { ok: true, finished: true }, text: '已汇报并结束本轮。' }
+      return {
+        value: { ok: true, finished: true, ...(result.bypassed === true ? { bypassed: true } : {}) },
+        text: result.bypassed === true
+          ? '已结束本轮：证据门连续未通过，本次按 bypassed 放行（标记为未验证）。'
+          : '证据已通过校验，已汇报并结束本轮。',
+      }
     },
   })
 
