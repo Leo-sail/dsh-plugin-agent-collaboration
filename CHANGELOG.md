@@ -16,6 +16,13 @@
 真实任务测试（隔离实例）：leader 文件证据门 passed、群经验卡自动生成、真实文件 handoff 成功；
 全量测试 541/541。
 
+### 发布状态（2026-10-22）
+
+- npm：core **0.3.3**、tools **0.3.2**、ui **0.3.9**、bundle **0.3.4** 均已发布，bundle latest 已指向 0.3.4
+- GitHub Release：`v0.3.4`，附带同一 tarball（sha256 404dfef8…）
+- 插件市场：PR [awesome-dsh-plugin#8683](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/8683) 已提交，等待维护者合并
+- npm 依赖解析已验证：bundle 0.3.4 → core 0.3.3 / tools 0.3.2 / ui 0.3.9
+
 ## Unreleased — diagnose completed-but-empty turns
 
 - 运行诊断补充一种情况：`status=completed` 且 `finishPath=empty`（用户收到空回复）也视为问题，
