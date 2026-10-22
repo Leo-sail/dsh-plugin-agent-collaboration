@@ -567,6 +567,14 @@ export interface NoticeRoomRequest {
   readonly text: string
 }
 
+/** Remove one or more bots from a room (user action from room settings). */
+export interface RemoveBotsRequest {
+  readonly roomId: string
+  readonly botIds: readonly string[]
+  readonly actorId?: string | undefined
+  readonly reason?: string | undefined
+}
+
 /** Delete or confirm one learned room pattern card (OP-09 management). */
 export interface RoomPatternRequest {
   readonly roomId: string

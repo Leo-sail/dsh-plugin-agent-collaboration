@@ -87,12 +87,44 @@ export function RoomSettingsDialog({
   const [addSelected, setAddSelected] = useState<BotId[]>([])
   const [memberBusy, setMemberBusy] = useState(false)
   const [memberError, setMemberError] = useState<string>()
+  const [removeTarget, setRemoveTarget] = useState<string>()
   const adherence = room.taskState?.adherence
   const currentMembers = bots.filter(bot => members.includes(bot.id as BotId))
   const availableBots = bots.filter(bot => !members.includes(bot.id as BotId))
 
   const toggleAddMember = (id: BotId): void => {
     setAddSelected(prev => prev.includes(id) ? prev.filter(memberId => memberId !== id) : [...prev, id])
+  }
+
+  /** Remove one current member; the host reassigns leadership or dissolves as needed. */
+  async function removeMember(botId: string): Promise<void> {
+    if (memberBusy) return
+    if (members.length <= 1) {
+      setMemberError('群聊至少保留一名成员。')
+      setRemoveTarget(undefined)
+      return
+    }
+    setMemberBusy(true)
+    setMemberError(undefined)
+    try {
+      const result = await remote.removeBots({
+        roomId: room.id,
+        botIds: [botId],
+        reason: '用户从群聊设置移除',
+      })
+      if (!result.ok) {
+        setMemberError(result.error ?? result.refused[0]?.reason ?? '移除失败')
+        return
+      }
+      setMembers(result.memberIds !== undefined
+        ? [...result.memberIds] as BotId[]
+        : members.filter(id => id !== botId))
+      setRemoveTarget(undefined)
+    } catch (e) {
+      setMemberError(describe(e))
+    } finally {
+      setMemberBusy(false)
+    }
   }
 
   /** Add the selected non-members immediately; the main save only handles name/switches. */
@@ -183,8 +215,25 @@ export function RoomSettingsDialog({
           {currentMembers.length === 0
             ? <p className={css.formHint} style={{ margin: '4px 0' }}>本群还没有 Bot。</p>
             : currentMembers.map(bot => (
-              <div key={bot.id} data-room-member={bot.id} style={{ padding: '2px 0' }}>
-                {bot.name}
+              <div key={bot.id} data-room-member={bot.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 0' }}>
+                <span style={{ flex: 1, minWidth: 0 }}>{bot.name}</span>
+                {removeTarget === bot.id
+                  ? (
+                    <>
+                      <Button variant="outline" type="button" disabled={memberBusy} onClick={() => { void removeMember(bot.id) }}>确认移除</Button>
+                      <Button variant="outline" type="button" onClick={() => setRemoveTarget(undefined)}>取消</Button>
+                    </>
+                  )
+                  : (
+                    <Button
+                      variant="outline"
+                      type="button"
+                      disabled={memberBusy || members.length <= 1}
+                      onClick={() => { setRemoveTarget(bot.id); setMemberError(undefined) }}
+                    >
+                      移除
+                    </Button>
+                  )}
               </div>
             ))}
           {addOpen && (
@@ -215,6 +264,9 @@ export function RoomSettingsDialog({
               </div>
               {memberError !== undefined && <p className={css.error} style={{ marginTop: 6 }} role="alert">{memberError}</p>}
             </div>
+          )}
+          {memberError !== undefined && !addOpen && (
+            <p className={css.error} style={{ marginTop: 6 }} role="alert">{memberError}</p>
           )}
         </fieldset>
         <label className={css.check}>

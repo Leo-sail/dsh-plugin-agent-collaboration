@@ -1,3 +1,11 @@
+## Unreleased — group settings: remove members
+
+- 群成员行增加「移除」按钮；点击后行内二次确认「确认移除 / 取消」。
+- 移除走现有安全 RPC `removeBots`（服务端会取消该成员运行、清理会话、必要时移交 leader/解散空群），
+  而不是直接改 memberIds；成功后本地成员列表即时更新。
+- 群聊至少保留一名成员：只剩一人时移除按钮禁用并提示。
+- 新增 core `RemoveBotsRequest` 类型 + UI remote/descriptor；UI tsc/tsdown/wrap、check-build OK；
+  全量 540/540；隔离实例实测移除「小钱」后 memberIds 6→5。
 ## Unreleased — group settings: current members + add-member picker
 
 - 群聊设置的「成员」只列出**当前本群成员**（名称），不再把所有 Bot 都列成可勾选列表。

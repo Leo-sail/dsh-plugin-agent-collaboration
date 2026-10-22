@@ -167,6 +167,7 @@ const contribution = {
     // P1-2: host session predicate for conversation.view slot
     // P-clear: clear room messages + cancel stale failed runs
     descriptor('clearMessages', [param('roomId', str())]),
+    descriptor('removeBots', [param('input', obj('RemoveBotsRequest'))]),
     // OP-09 management: room experience cards (delete / confirm pending).
     descriptor('deleteRoomPattern', [param('input', obj('RoomPatternRequest'))]),
     descriptor('confirmRoomPattern', [param('input', obj('RoomPatternRequest'))]),
@@ -610,6 +611,7 @@ export function apply(ctx: ClientContext): void {
     getSessionVisibility: () => call('getSessionVisibility'),
     reconcileSessionVisibility: () => call('reconcileSessionVisibility'),
     clearMessages: (roomId) => call('clearMessages', roomId),
+    removeBots: (input) => call('removeBots', input),
     deleteRoomPattern: (input) => call('deleteRoomPattern', input),
     confirmRoomPattern: (input) => call('confirmRoomPattern', input),
     updateRoomExperience: (input) => call('updateRoomExperience', input),

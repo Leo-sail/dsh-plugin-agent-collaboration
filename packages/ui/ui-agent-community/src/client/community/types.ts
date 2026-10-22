@@ -153,6 +153,14 @@ export interface CommunityRemote {
   reconcileSessionVisibility(): Promise<void>
   /** Clear a room's transcript, cancel stale runs, and clear its ledger. */
   clearMessages(roomId: string): Promise<void>
+  /** Remove members from a room; the host reassigns leadership/dissolves when needed. */
+  removeBots(input: { roomId: string; botIds: readonly string[]; reason?: string }): Promise<{
+    ok: boolean
+    removed: readonly string[]
+    refused: ReadonlyArray<{ botId: string; reason: string }>
+    error?: string
+    memberIds?: readonly string[]
+  }>
   /** Delete one learned experience card from a room (settings management). */
   deleteRoomPattern(input: { roomId: string; patternId: string }): Promise<{ ok: boolean; reason?: string }>
   /** Confirm a pending experience card so it may enter future prompts. */
