@@ -166,7 +166,7 @@ Every key is optional and is set on the bundle's row in the profile's `cordis.pa
 | `groupProposalTimeoutMs` | `120000` | How long a group proposal waits for an answer |
 | `idleLimit` | `12` | Live Bot sessions kept before the least recently used is disposed — disposing one is what releases its session write lease |
 | `hardLimit` | `24` | Hard ceiling on live Bot sessions |
-| `botReasoningEffort` | `max` | Reasoning effort for Bot turns: `off` `low` `high` `max`, or `''` to take the provider default. A Bot can override it |
+| `botReasoningEffort` | `''` | Default reasoning effort for Bot turns: `''` takes the provider default and is the only value that is safe on every route. Set `off` / `low` / `high` / `max` only when the model publishes that level — a model that publishes none rejects any explicit level and every turn fails. A Bot can override it |
 | `botAgentPreset` | `standard` | Agent preset handed to each Bot session |
 | `botDeniedTools` | `plugin_manager`, `ask_user_question`, `skill` | Tools a Bot must never see |
 | `homeDir` | `$DSH_HOME`, else `~/.dsh` | Where the board is stored |

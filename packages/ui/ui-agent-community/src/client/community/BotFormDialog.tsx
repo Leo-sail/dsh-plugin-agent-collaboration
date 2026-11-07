@@ -21,6 +21,7 @@ import type { Dispatch, FormEvent, SetStateAction } from 'react'
 import type { BotId, BotIdentity } from '@dsh-plugin/agent-community'
 import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import { NativeDialog } from '../conversation/NativeDialog.tsx'
+import { alignEffortId } from './effort-alignment.ts'
 import { DialogTabs } from '../conversation/DialogTabs.tsx'
 import { NativeCheckbox, NativeSegmentedControl } from '../conversation/NativeControls.tsx'
 import { IconFolderOpenRegular } from '../conversation/NativeIcons.tsx'
@@ -110,7 +111,8 @@ export function BotFormDialog({
         if (cancelled) return
         setModelGroups([...catalog.groups])
         setModelFailures(catalog.failures)
-        // Pre-select provider/model/effort only when creating; editing keeps existing values.
+        // Creating: pre-select provider/model/effort. Editing: keep the existing route, but
+        // align the stored level once the catalog is known (see below).
         if (editingBot === undefined) {
           const defaultGroup = catalog.default !== undefined
             ? catalog.groups.find(g => g.id === catalog.default?.provider)
@@ -129,8 +131,25 @@ export function BotFormDialog({
             setBotEffort(publishedDefault)
           } else if (published.length > 0) {
             setBotEffort(published[0]!.id)
-          } else if (catalog.default?.reasoningEffort !== undefined) {
-            setBotEffort(catalog.default.reasoningEffort)
+          } else {
+            // The default model publishes no levels, so it rejects every explicit one: the
+            // only safe value is the provider default, NOT the deployment's configured effort
+            // (which is what the panel used to copy in here and made new Bots unable to answer).
+            setBotEffort('')
+          }
+        } else if (editingBot.provider !== undefined && editingBot.model !== undefined) {
+          // Editing: a Bot stored an explicit level that the model no longer publishes (an old
+          // 'max' default on a route that publishes nothing, a model row edited in Settings…).
+          // Align it as soon as the catalog says what this route accepts, so saving the form
+          // cannot keep a level that is guaranteed to reject the request. Only when the model is
+          // in the catalog: a temporarily unavailable provider must not silently rewrite the
+          // Bot's stored configuration.
+          const group = catalog.groups.find(g => g.id === editingBot.provider)
+          const entry = group?.models.find(m => m.id === editingBot.model)
+          if (entry !== undefined) {
+            const published = entry.reasoning?.efforts ?? []
+            const fallback = entry.reasoning?.defaultEffort ?? ''
+            setBotEffort(prev => alignEffortId(published, fallback, prev))
           }
         }
         setModelError(undefined)
@@ -186,17 +205,16 @@ export function BotFormDialog({
   }
 
   /**
-   * Move to the model's own default level when the current one is not offered.
+   * Move to a level the model actually publishes when the current one is not offered.
    *
-   * A model that publishes nothing falls back to `''` (provider default): keeping the previous
-   * value there would preserve a level the route is guaranteed to reject, so opening the form
-   * and saving would still leave a bot that cannot answer.
+   * A model that publishes nothing resolves to `''` (provider default), which is the only
+   * value it accepts: keeping the previous value there would preserve a level the route is
+   * guaranteed to reject. When the model does publish levels, prefer its own default, else the
+   * first published one — never keep a level the model does not offer.
    */
   function alignEffort(provider: string, model: string, previous: string): string {
     const { options, fallback } = effortsFor(provider, model)
-    if (options.some(option => option.id === previous)) return previous
-    if (fallback !== '') return fallback
-    return options.length === 0 ? '' : previous
+    return alignEffortId(options, fallback, previous)
   }
 
   function handleSelectProvider(next: string) {

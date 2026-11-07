@@ -254,9 +254,13 @@ export interface Config {
    */
   readonly sessionsDir?: string
   /**
-   * Default reasoning effort for bot model calls when a bot sets none. Bot turns
-   * only produce a visible thinking stream when reasoning is requested, so this
-   * is what makes the panel show thinking at all. Set to '' to disable.
+   * Default reasoning effort for bot model calls when a bot sets none.
+   *
+   * `''` (the default) means "whatever the provider/model defaults to", which is the only
+   * value that is safe on every route: a model that publishes NO reasoning levels rejects any
+   * explicit level before the request leaves the process (UNSUPPORTED_REASONING_EFFORT), so a
+   * non-empty default here makes every bot turn fail on such a deployment. A provider that
+   * does publish levels honours what each bot sets for itself (see the bot settings form).
    */
   readonly botReasoningEffort?: string
   /** Agent preset for bot sessions (default `standard`). */
@@ -336,8 +340,9 @@ export const Config: z<Config> = z.object({
   /**
    * Default reasoning effort for bot turns. `''` means "whatever the provider/model defaults
    * to", and it is the only value that is safe on every route: a model that publishes no
-   * reasoning levels — every hand-declared `api: openai-completions` model row — REJECTS any
-   * explicit level with UNSUPPORTED_REASONING_EFFORT before the request leaves the process
+   * reasoning levels (many hand-declared `api: openai-completions` model rows are like this)
+   * REJECTS any explicit level with UNSUPPORTED_REASONING_EFFORT before the request leaves
+   * the process
    * (`resolveCallWithInfo`: `reasoning === undefined && requested !== undefined` throws), so a
    * non-empty default here makes every bot turn fail on such a deployment. A provider that does
    * publish levels still honours what each bot sets for itself (see the bot settings form).

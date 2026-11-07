@@ -136,7 +136,7 @@ ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/
 | `groupProposalTimeoutMs` | `120000` | 建群提议等待回答的时长 |
 | `idleLimit` | `12` | 最多保留多少个活跃 Bot 会话，超出后淘汰最久未用的——淘汰正是释放其会话写租约的时机 |
 | `hardLimit` | `24` | 活跃 Bot 会话的硬上限 |
-| `botReasoningEffort` | `max` | Bot 回合的推理强度：`off` `low` `high` `max`，或 `''` 交给 provider 默认值。单个 Bot 可覆盖 |
+| `botReasoningEffort` | `''` | Bot 回合的默认推理强度：`''` 交给 provider 默认值，也是唯一在所有路由上都安全的值。只有模型公布了该档位时才设 `off` / `low` / `high` / `max`——模型没公布档位时会拒绝任何显式值，每个回合都会失败。单个 Bot 可覆盖 |
 | `botAgentPreset` | `standard` | 传给每个 Bot 会话的 agent preset |
 | `botDeniedTools` | `plugin_manager`、`ask_user_question`、`skill` | Bot 永远看不到的工具 |
 | `homeDir` | `$DSH_HOME`，否则 `~/.dsh` | 看板存放位置 |

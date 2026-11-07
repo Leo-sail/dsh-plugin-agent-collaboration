@@ -50,8 +50,11 @@ export interface BotIdentity {
   readonly model?: string | undefined
   /**
    * Adapter-owned reasoning effort for this bot's model calls (e.g. 'max').
-   * Without it the model is never asked to reason, so no thinking stream is
-   * produced even when the model supports it.
+   *
+   * Absent/`''` asks the provider for its own default. Set an explicit level only when the
+   * model publishes it: a model that publishes no reasoning levels rejects ANY explicit level
+   * (UNSUPPORTED_REASONING_EFFORT), so a stored level the route does not offer makes every
+   * turn fail.
    */
   readonly reasoningEffort?: string | undefined
   readonly workspace?: string | undefined

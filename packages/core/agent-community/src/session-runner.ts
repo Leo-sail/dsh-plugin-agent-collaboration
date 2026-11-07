@@ -836,9 +836,19 @@ export class SessionRunner {
           }
         }
         const text = attempt === 0 ? prompt : this.repairPrompt()
-        // The final attempt disables the reasoning channel for its ONE request via
-        // an `agent/request` override, so the model has only the text channel left.
-        if (attempt >= turns && attempt > 0) this.armTextOnlyRequest(roomId, botId)
+        // WHY THERE IS NO "DISABLE REASONING FOR THE REPAIR REQUEST" OVERRIDE ANY MORE:
+        //
+        // The last attempt used to rewrite the request's `reasoningEffort` through an
+        // `agent/request` waterfall (first to `'off'`, later to "provider default") so the
+        // repair could only write text. Both shapes are rejected by the host BEFORE the
+        // request leaves the process (verified on the current host, @deepseek-ai/dsh-agent-loop
+        // 0.2.2-rc.1; the repo's documented 0.2.1-rc.2 was not re-checked): step preparation
+        // fixes provider/model/reasoningEffort first and the loop throws if the waterfall
+        // changes any of them ("use agent.model.select() before step preparation"). The thrown
+        // message is not a provider failure, so the repair round ended as "reasoning-only after
+        // N attempt(s)" — a model fault invented by our own override. Fixing it properly needs a
+        // model selection change before step preparation (a much larger lifecycle change), so
+        // the repair relies on the instruction alone for now.
 
         // No prompt is queued after a stop: `followup` would start another model request,
         // which is exactly the "I pressed stop and it kept working" bug.
@@ -1029,7 +1039,7 @@ export class SessionRunner {
     return session.deriveMessages().length
   }
 
-  /** The repair instruction. Escalates: the last one is paired with a text-only request. */
+  /** The repair instruction. The model has to put its analysis into the visible text channel. */
   private repairPrompt(): string {
     return '把上面的分析直接写成给用户的最终回答（中文，不要输出你的思考过程本身）。'
   }
@@ -1075,32 +1085,13 @@ export class SessionRunner {
   }
 
   /**
-   * Arm a ONE-SHOT "no reasoning level" override for this agent's next request.
-   *
-   * `agent/request` is a waterfall whose default returns the config proposal, so a
-   * listener can rewrite it. Doing it here — rather than changing the bot's own
-   * reasoning setting — keeps the user's configuration untouched and affects exactly
-   * one request, which is the whole point of the recovery: with the reasoning
-   * channel unavailable the model must write into the text channel. The override
-   * REMOVES the field (provider default) rather than forcing `'off'`, because a model
-   * that publishes no levels rejects every value — including `'off'` — before the
-   * request is sent, which would turn our own repair into a fake model failure.
-   */
-  private armTextOnlyRequest(roomId: string, botId: string): void {
-    const key = SessionRunner.key(roomId, botId)
-    this.textOnlyArmed.add(key)
-  }
-
-  private readonly textOnlyArmed = new Set<string>()
-
-  /**
-   * Register the per-agent `agent/request` override in the agent's own scope.
+   * Keep the bot's tool mask current by re-applying it on every model request.
    *
    * Scoped registration matters: the listener disappears with the agent's scope on
-   * dispose, so no global state accumulates and one bot's repair can never affect
+   * dispose, so no global state accumulates and one bot's mask can never affect
    * another's request.
    */
-  private installRequestOverride(agentCtx: Context, key: string): void {
+  private installRequestMaskRefresh(agentCtx: Context, key: string): void {
     const svc = (agentCtx as unknown as {
       on?(
         event: string,
@@ -1119,20 +1110,12 @@ export class SessionRunner {
       // `botDeniedTools` listed all three. Re-applying here, on every request, closes the ordering
       // hole; already-applied names are skipped so DSH's append-only restriction list cannot grow
       // without bound, and previously-skipped names are retried in case they registered late.
-      this.reapplyToolMask(agentCtx, key)
-      const config = await next() as Record<string, unknown>
-      if (!this.textOnlyArmed.delete(key)) return config
-      // ── ASK FOR THE PROVIDER DEFAULT, NOT FOR `'off'` ─────────────────────────
       //
-      // This one-shot override exists so the repaired request writes into the TEXT channel. It
-      // used to force `reasoningEffort: 'off'`, which is the same trap `ensureAgent` fell into:
-      // a model that publishes no reasoning levels rejects the field *whatever* its value, so
-      // the repair round died with `UNSUPPORTED_REASONING_EFFORT` and the run reported
-      // "reasoning-only after N repair attempt(s)" — a model fault invented by our own override.
-      // Dropping the field asks for the provider default, which at least lets the request run.
-      const repaired = { ...config }
-      delete repaired.reasoningEffort
-      return repaired
+      // The request itself is returned UNCHANGED: the host fixes provider/model/reasoningEffort
+      // at step preparation and rejects a waterfall proposal that changes any of them, so this
+      // listener must never rewrite the config (see the repair loop for the bug that caused).
+      this.reapplyToolMask(agentCtx, key)
+      return next()
     }, { prepend: true })
   }
 
@@ -1204,7 +1187,7 @@ export class SessionRunner {
     const existingPreset = this.sessionOf(roomId, botId)?.header?.agentPreset
     const mountPreset = preset !== undefined && preset !== '' && existingPreset === undefined
     const setup = async (agentCtx: Context): Promise<void> => {
-      this.installRequestOverride(agentCtx, key)
+      this.installRequestMaskRefresh(agentCtx, key)
       if (mountPreset) await this.mountAgentPreset(agentCtx, preset)
       this.installAgentTeamsGuard(agentCtx, key)
       const deny = this.opts.deniedTools
@@ -1701,7 +1684,6 @@ export class SessionRunner {
     this.agents.delete(key)
     this.handles.delete(key)
     this.lastUsed.delete(key)
-    this.textOnlyArmed.delete(key)
     if (handle !== undefined) {
       try {
         await handle.dispose()

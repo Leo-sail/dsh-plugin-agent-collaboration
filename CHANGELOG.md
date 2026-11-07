@@ -1,21 +1,27 @@
 ## Unreleased — 推理档位不被支持时的静默空回复
 
-- **修复：bot 默认推理档位由 `max` 改为 `''`（provider 默认）。** 模型没有公布推理档位时（所有
-  手写 `api: openai-completions` 的模型行 —— 例如本机 `workbuddy` 路由下的
-  `cn:deepseek-v4.1-flash`），DSH 在联网前就以 `UNSUPPORTED_REASONING_EFFORT` 拒绝**任何**显式
-  档位（`resolveCallWithInfo`：`reasoning === undefined && requested !== undefined` 直接抛错）。
+- **修复：bot 默认推理档位由 `max` 改为 `''`（provider 默认）。** 模型没有公布推理档位时（例如许多
+  手写 `api: openai-completions` 的模型行；本机 `workbuddy` 路由下的 `cn:deepseek-v4.1-flash` 即如此），
+  DSH 在联网前就以 `UNSUPPORTED_REASONING_EFFORT` 拒绝**任何**显式档位
+  （`resolveCallWithInfo`：`reasoning === undefined && requested !== undefined` 直接抛错）。
   于是一个用默认配置新建的 bot，每个回合都在 ~20 ms 内「完成」、没有任何正文。
 - **修复：`providerFailure()` 把配置级拒绝也算作请求失败**（`does not support` / `unsupported`）。
   这类消息不携带 HTTP 状态码，过去被读成「模型没说话」：run 以 `completed` +
   `finishPath: 'empty'` 收口，面板只显示一行灰色「模型输出为空」诊断，用户看不到任何错误。
   现在以 `failed` 收口并显示 provider 原文。
-- **修复：纯思考修复请求不再强制 `reasoningEffort: 'off'`**（对同一路由同样是非法值，会把我们
-  自己的修复动作伪装成模型故障），改为删除该字段、走 provider 默认。
-- **UI：思考强度下拉只列出该模型实际公布的档位。** 一个档位都没公布时只提供「默认」，不再让
-  用户建出一个必然无法回复的 bot；切换模型或打开旧 bot 时档位也会自动回落到「默认」。
-- 新增 `tests/provider-rejection.test.ts`。全量测试 **542/545**；7 个失败是
-  `file-handoff.test.ts` 在 Windows 上**改动前即存在**的失败（已在上游 main 同一环境下复现，
-  与本改动无关）。
+- **修复：纯思考修复不再改写 `reasoningEffort`（native runner 路径）。** 之前修复请求会通过
+  `agent/request` 把档位改成 `'off'`；当前宿主（`@deepseek-ai/dsh-agent-loop` 0.2.2-rc.1）在 step
+  preparation 之后禁止该 waterfall 改动 provider/model/reasoningEffort，会直接抛错（错误文案又不属于
+  provider 失败），反而把修复动作伪装成「模型故障」。该 override 已删除、请求原样放行，修复改由提示词
+  完成；要真正实现「只用文本通道」需要 `agent.model.select()` 级别的生命周期改造，留待单独处理。
+  （仓库声明验证过的 0.2.1-rc.2 未复核；若旧宿主允许改档位，旧版本会失去强制文本修复能力——失败仍是
+  显式错误，不是静默空回复。）
+- **UI：思考强度下拉只列出该模型实际公布的档位。** 一个档位都没公布时只提供「默认」，不再让用户建
+  出一个必然无法回复的 bot；切换模型时，已选档位若不在新模型公布的列表里就回落到该模型的默认/第一个
+  档位；打开已有 bot 时会按当前模型公布的档位校正表单里的已存值（保存后才写回；原本就是「默认」的
+  保持默认；模型不在 catalog 里时保持原值不动）。
+- 新增 `tests/provider-rejection.test.ts`。macOS + Node v26 全量测试 **545/545**；作者在 Windows 上另见
+  `tests/file-handoff.test.ts` 的 7 个失败，已在未改动的 main 上复现，属平台差异，与本改动无关。
 
 ## 0.3.5 — 长任务活跃豁免
 
