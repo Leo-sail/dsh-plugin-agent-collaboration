@@ -203,6 +203,14 @@ export interface SessionRunnerOptions {
    * at creation: it must be undone before each turn and re-applied after it settles.
    */
   readonly restoreSession?: ((sessionId: string) => Promise<void>) | undefined
+  /**
+   * Called when a run's turn ACTUALLY starts — mutex held, slot secured, agent ready.
+   *
+   * The executor starts the execution budget from this, not from the claim: a run that waited
+   * behind another turn of the same pair spent its whole deadline in the queue and was then
+   * killed for "已用 180s，预算 180s" before it ever sent a request.
+   */
+  readonly onTurnStart?: ((runId: string) => void) | undefined
 }
 
 /**
@@ -443,6 +451,87 @@ export function looksLikeProviderRejection(message: string): boolean {
     .test(message)
 }
 
+/**
+ * Does a stop aimed at `requestedRunId` reach the turn `ownerRunId` is driving?
+ *
+ * The agent is per `(roomId, botId)`; the turn is per RUN. When a second run of the same pair is
+ * waiting on the pair's mutex, a stop for the WAITER must not touch the OWNER's in-flight model
+ * request — that is how a follow-up message's budget timeout used to abort a running turn (and
+ * came back as a cancelled approval mid-turn) while the run that asked for the stop had produced
+ * nothing at all. A stop with no run id means "whatever this pair is doing" (room deletion,
+ * executor disposal) and keeps the unconditional behaviour.
+ */
+export function stopReachesTurn(
+  ownerRunId: string | undefined,
+  requestedRunId: string | undefined,
+): boolean {
+  if (requestedRunId === undefined) return true
+  return ownerRunId === requestedRunId
+}
+
+/**
+ * When the newest approval request of the CURRENT turn was raised and is STILL unanswered.
+ *
+ * The approval waterfall is only one way a dialog can reach a person, and it is not the one that
+ * failed in the field: a bot session is a hidden `subagent` agent, so when the request is not
+ * claimed by an answerer that CAN render it, the dialog waits on a surface that does not exist.
+ * The session log is the authority on whether one is pending — the host writes `approval/asked`
+ * before dispatching and `approval/decided` once anything resolves it — so a watchdog can bound
+ * the wait without depending on which answerer (if any) took the request.
+ *
+ * TWO PROPERTIES MATTER, and both were bugs in the first version:
+ *
+ *   · ONLY THE CURRENT TURN COUNTS. Scanned backwards, the first `turn/start` ends the search.
+ *     A log can carry an `approval/asked` with no matching `approval/decided` from an EARLIER
+ *     turn (the process was killed while a dialog was open; crash recovery appends synthetic
+ *     tool results and `turn/end`, never the missing audit event). Treating that as a live wait
+ *     would fail every later turn of the pair on its first tick, so an old turn's dangling
+ *     request must be ignored.
+ *   · ASK AND DECIDE ARE PAIRED BY ID, not by position. Parallel tool calls can raise two
+ *     dialogs at once, and the ids in `approval/asked`’s `data.id` and `approval/decided`’s
+ *     `data.id` are what identify which one is still open (asked1, asked2, decided2 ⇒ asked1
+ *     is pending). A decided event with no id falls back to closing the nearest earlier asked.
+ *
+ * @param events - the session's own events, oldest first.
+ * @returns the `time` of the newest unanswered ask in the current turn, or undefined.
+ */
+export function pendingApprovalSince(
+  events: readonly {
+    readonly type?: string | undefined
+    readonly time?: number | undefined
+    readonly data?: { readonly id?: string | undefined } | undefined
+  }[],
+): number | undefined {
+  /** Ids of approval requests this turn already resolved. */
+  const decided = new Set<string>()
+  /** Decided events without a usable id: each closes the nearest earlier asked. */
+  let anonymousDecided = 0
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]
+    // The turn boundary is the scope: nothing from an earlier turn is a live wait for this one.
+    if (event?.type === 'turn/start') return undefined
+    if (event?.type === 'approval/decided') {
+      const id = event.data?.id
+      if (typeof id === 'string' && id !== '') decided.add(id)
+      else anonymousDecided += 1
+      continue
+    }
+    if (event?.type !== 'approval/asked') continue
+    const id = event.data?.id
+    if (typeof id === 'string' && id !== '') {
+      if (decided.has(id)) continue
+    } else if (anonymousDecided > 0) {
+      anonymousDecided -= 1
+      continue
+    }
+    // The newest still-unanswered ask of this turn is the one to report. A log entry without a
+    // usable timestamp cannot bound a wait, so keep scanning rather than answer "pending" with
+    // no clock.
+    if (typeof event.time === 'number' && Number.isFinite(event.time)) return event.time
+  }
+  return undefined
+}
+
 export class SessionRunner {
   private readonly ctx: Context
   private readonly accessor: SessionRunnerAccessor
@@ -463,6 +552,14 @@ export class SessionRunner {
     readonly agentPreset?: string | undefined
     readonly deniedTools?: readonly string[] | undefined
     readonly presetLogDir?: string | undefined
+    /**
+     * Called when a run's turn ACTUALLY starts — mutex held, slot secured, agent ready.
+     *
+     * The executor starts the execution budget from this, not from the claim: a run that waited
+     * behind another turn of the same pair spent its whole deadline in the queue and was then
+     * killed for "已用 180s，预算 180s" before it ever sent a request.
+     */
+    readonly onTurnStart?: ((runId: string) => void) | undefined
   }
   private readonly mutex = new KeyedMutex()
 
@@ -484,6 +581,17 @@ export class SessionRunner {
    * the awaited window, so a compacting agent is always already marked running.
    */
   private readonly running = new Set<string>()
+  /**
+   * Which RUN currently owns each pair's live turn.
+   *
+   * The agent is per `(roomId, botId)`; the turn is per RUN. When a second run of the same pair
+   * is waiting on `mutex`, both runs exist under one key — so `cancel` needs this to tell the
+   * owner from the waiter. Without it, a stop aimed at the waiter (its own budget expiring, for
+   * instance) aborted the owner's in-flight model request: observed as a run that had been
+   * sitting on an approval dialog being cancelled by a follow-up message's timeout, both runs
+   * settling in the same second.
+   */
+  private readonly turnOwner = new Map<string, string>()
   /**
    * In-flight disposals, keyed by session id.
    *
@@ -681,10 +789,18 @@ export class SessionRunner {
    * happens instead of the whole stop silently failing.
    *
    * No-op when there is no live agent — a stop on an already-idle pair is not an error.
+   *
+   * `runId` names the run that is asking. When it is given and another run owns this pair's
+   * turn, the stop is IGNORED: the caller's own run has no turn to cancel yet (it is still
+   * queued behind this pair's mutex), and cancelling the owner would abort work nobody asked
+   * to stop. Callers that mean "stop whatever this pair is doing" (room deletion, executor
+   * disposal) omit it and keep the unconditional behaviour.
    */
-  cancel(roomId: string, botId: string, reason = 'user interrupted'): void {
-    const agent = this.agents.get(SessionRunner.key(roomId, botId))
+  cancel(roomId: string, botId: string, reason = 'user interrupted', runId?: string): void {
+    const key = SessionRunner.key(roomId, botId)
+    const agent = this.agents.get(key)
     if (agent === undefined) return
+    if (!stopReachesTurn(this.turnOwner.get(key), runId)) return
     const request = { kind: 'hook' as const, reason }
     try {
       agent.cancel(request, { keepInbox: true })
@@ -703,6 +819,16 @@ export class SessionRunner {
       const parsed = SessionRunner.split(key)
       if (parsed.roomId === roomId) this.cancel(parsed.roomId, parsed.botId, reason)
     }
+  }
+
+  /**
+   * Whether `runId` currently owns this pair's live turn.
+   *
+   * False while the run is still waiting on the pair's mutex — the state in which its own
+   * deadline must not be enforced as if it were executing (see `RunExecutor`'s budget sweep).
+   */
+  isTurnOwner(roomId: string, botId: string, runId: string): boolean {
+    return this.turnOwner.get(SessionRunner.key(roomId, botId)) === runId
   }
 
   /**
@@ -751,6 +877,15 @@ export class SessionRunner {
      * existing caller keeps working unchanged.
      */
     onProgress?: ((kind: ProgressKind) => void) | undefined,
+    /**
+     * The run this turn belongs to, or undefined for callers that have no run row.
+     *
+     * Used for two things, both about telling the OWNER of the pair's turn from a WAITER:
+     * `cancel` refuses to touch a turn this id does not own, and `onTurnStart` (which restarts
+     * the execution budget) is only meaningful with an id to report. Optional so every existing
+     * caller keeps working.
+     */
+    runId?: string | undefined,
   ): Promise<TurnOutcome> {
     const key = SessionRunner.key(roomId, botId)
     return this.mutex.run(key, async () => {
@@ -763,7 +898,7 @@ export class SessionRunner {
       //     tool round is started after the user pressed stop.
       // The listener is removed in `finally` (a long-lived signal must not accumulate one
       // listener per run), and a signal that is already aborted never registers at all.
-      const onAbort = (): void => { this.cancel(roomId, botId, 'run aborted') }
+      const onAbort = (): void => { this.cancel(roomId, botId, 'run aborted', runId) }
       if (SessionRunner.aborted(signal)) return this.abortedOutcome()
       signal?.addEventListener('abort', onAbort, { once: true })
       try {
@@ -800,6 +935,24 @@ export class SessionRunner {
       }
 
       if (seed === true) await this.seedIfNeeded(roomId, botId)
+
+      // ── THE EXECUTION BUDGET STARTS HERE, NOT AT THE CLAIM ──────────────────────
+      //
+      // Everything above can have waited minutes behind this pair's previous turn. Reporting
+      // the real start lets the executor restart the run's clock instead of charging the queue
+      // wait against the model's allowance — the failure mode was a follow-up message dying at
+      // "已用 180s，预算 180s" without ever having sent a request.
+      if (runId !== undefined) this.opts.onTurnStart?.(runId)
+      // ── THIS RUN OWNS THE PAIR'S TURN FROM HERE ─────────────────────────────────
+      //
+      // Ownership is claimed at the SAME instant the turn really starts, not when the mutex is
+      // taken: slot/hard-limit waits and agent materialisation happen before the first request,
+      // and a run that aborts during them never starts a turn at all. Setting the owner earlier
+      // (while this code was outside the `try`) also leaked the claim on the already-aborted
+      // early return. From now until `finally`, a stop for another run of this pair is ignored —
+      // before this point an abort is handled by the `signal` boundaries, and the sweep treats
+      // the run as queued.
+      if (runId !== undefined) this.turnOwner.set(key, runId)
 
       // Where this turn starts in the derived history. Captured BEFORE the prompt is
       // queued so `readTurn` can ignore every earlier turn, the system prompt and the
@@ -919,6 +1072,9 @@ export class SessionRunner {
         // Cleared even on throw, or a failed turn would leave the agent marked busy
         // forever and eviction would never reclaim it.
         this.running.delete(key)
+        // Ownership is released the same way: a later run of this pair may already have claimed
+        // it (a waiter that took over), so only clear our own claim.
+        if (runId !== undefined && this.turnOwner.get(key) === runId) this.turnOwner.delete(key)
       }
     })
   }
@@ -1082,6 +1238,28 @@ export class SessionRunner {
       return looksLikeRequestFailure ? message : undefined
     }
     return undefined
+  }
+
+  /**
+   * When this pair's turn is waiting on an unanswered approval dialog, or undefined.
+   *
+   * Read from the session's own events (`approval/asked` without a matching `approval/decided`
+   * in the same turn), so it covers BOTH ways a dialog can be raised: claimed by this plugin's
+   * card, or delegated to an answerer that cannot render a hidden bot session. The executor turns
+   * it into a bounded wait. Scoping to the current turn matters: an earlier turn's dangling ask
+   * (a process killed mid-dialog) must not fail this turn — see {@link pendingApprovalSince}.
+   */
+  pendingApprovalSince(roomId: string, botId: string): number | undefined {
+    const withEvents = this.sessionOf(roomId, botId) as unknown as {
+      ownEvents?(): readonly {
+        type?: string | undefined
+        time?: number | undefined
+        data?: { id?: string | undefined } | undefined
+      }[]
+    } | undefined
+    const events = withEvents?.ownEvents?.()
+    if (events === undefined) return undefined
+    return pendingApprovalSince(events)
   }
 
   /**

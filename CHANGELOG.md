@@ -23,6 +23,45 @@
 - 新增 `tests/provider-rejection.test.ts`。macOS + Node v26 全量测试 **545/545**；作者在 Windows 上另见
   `tests/file-handoff.test.ts` 的 7 个失败，已在未改动的 main 上复现，属平台差异，与本改动无关。
 
+## Unreleased — 停止只作用于一个 run；bot 的审批必须真的能到达
+
+- **修复：停止/超时不再误杀同房间同 bot 的另一个回合。** 执行器按 `(roomId, botId)` 取消 live
+  agent，而同一对的第二个 run 只是在等这把互斥锁 —— 它自己的预算超时后取消的是**第一个 run 正在
+  跑的请求**。实测：run A 卡在审批对话框上 19 分 49 秒，run B 排在后面，B 的 180s 预算耗尽时把 A
+  的请求取消了，A 的审批变成 `cancelled`，两条 run 同一秒收口。现在 `cancel` 带上 runId，只对
+  「当前真正持有本回合」的 run 生效（`stopReachesTurn`，已加测试）。
+- **修复：排队等待不再计入执行预算。** `deadlineAt` 原本在认领时就写死，于是排队时间被当成执行
+  时间：B 在一条请求都没发出的情况下以「已用 180s，预算 180s」失败。现在预算在回合**真正开始**
+  时才起算（`SessionRunner.onTurnStart` → `RunExecutor.onTurnStarted`），排队本身另受总上限约束。
+- **修复：bot 的审批对话框不再可能永远挂着。** bot 会话是隐藏的 `subagent` 会话，DSH 原生审批卡
+  没有可渲染的界面；一旦 `memberRoomId()` 没命中（会话表缺失/被重写、旧 generation id），对话框
+  会穿透到原生 UI 而无人可见。现在审批桥回落到解析自己生成的会话 id（`ac:<roomId>:<botId>`），
+  并且无人应答的对话框在 `approvalTimeoutMs`（默认 120s）后**自动拒绝**并在房间里留一行说明。
+- **修复：无人应答的审批不再让回合永久挂起（与谁接单无关）。** 审批桥只对自己接到的对话框
+  计时；如果瀑布请求压根没有被 claim，宿主会等一个渲染不了隐藏会话的 answerer，而回合手里还开着
+  一个工具调用 —— 0.3.5 的「活跃工具豁免」于是把无进展判定也一起停掉，死锁没有上限（实测：先是
+  19 分 49 秒，后来又出现 8 分钟以上）。现在执行器直接读会话日志（`approval/asked` 且随后没有
+  `approval/decided`），超过 `approvalTimeoutMs` 就以「审批等待 Ns 无人处理」终止本轮并给出可操作
+  提示（`pendingApprovalSince`，已加测试）。
+- 新增 `tests/stop-scope.test.ts`。全量测试 **542/549**；7 个失败全部是
+  `tests/file-handoff.test.ts` 在 Windows 上**改动前即存在**的失败（未改动的 main 同样复现）。
+- **修复（评审）：审批 watchdog 只统计当前回合。** 会话日志可能残留上一回合（进程在对话框打开时被杀，
+  崩溃恢复只补 tool/step/turn 的合成收口、不补 `approval/decided`）的 `approval/asked`；原来的倒序扫描
+  会把它当成当前等待，让该 bot 之后每个回合在第一个 tick 就被判「审批等待 N 小时无人处理」。现在倒序
+  扫描遇到 `turn/start` 即停止，并按 `data.id` 配对 asked/decided（并发审批中较新的 decided 不会遮住
+  较早的未决项）。
+- **修复（评审）：被撤销的审批不再误报。** 用户停止/预算取消会 abort 宿主审批请求（宿主记 `cancelled`），
+  但审批桥的 pending Promise 不会被 resolve；新的 120s 定时器会在事后补一条假的「审批超时，已自动拒绝」
+  并把行改成 `rejected`。现在审批桥监听 `req.signal`，abort 时静默清掉 timer 与 pending；插件卸载时对
+  仍在等待的对话框 fail closed（`unavailable`）并清空全部计时器。
+- **修复（评审）：2 小时硬上限锚定认领时刻。** `onTurnStarted` 会把 `startedAtMs` 前移（排队不计入
+  执行预算），但扩展/活跃工具的 cap 也用了它，等于每次重开回合都在给上限续命。新增 `claimedAtMs`
+  作为 cap 的唯一锚点。
+- **修复（评审）：执行器审批 watchdog 晚 15s 兜底。** 审批桥先按 `approvalTimeoutMs` 自动拒绝并写
+  `approval/decided`，让模型继续；执行器 watchdog 只处理「桥从未接单」的请求，晚 15s 避免两套超时
+  同时触发、run 在桥刚放行时被杀并产生两条矛盾通知。`0` 仍表示两套 watchdog 都关闭、永不超时；
+  `Config` 补上 `approvalTimeoutMs` 字段，README 配置表同步。
+
 ## 0.3.5 — 长任务活跃豁免
 
 - 运行中的工具调用（`tool-start`…`tool-end`）现在被识别为**真实进展**：工具在跑时不再触发

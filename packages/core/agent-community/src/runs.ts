@@ -235,7 +235,13 @@ interface RunBudgetState {
   readonly origin: string | undefined
   readonly prompt: string
   readonly taskClass: TaskClass
-  readonly startedAtMs: number
+  /**
+   * When the run was CLAIMED — the anchor of the hard cap. `startedAtMs` moves forward when a
+   * turn really starts (queue time is not execution time); the cap must not move with it.
+   */
+  readonly claimedAtMs: number
+  /** When the CURRENT turn's execution budget started (claim time until `onTurnStarted`). */
+  startedAtMs: number
   deadlineAtMs: number
   readonly baseBudgetMs: number
   readonly derivedSource: string
@@ -465,6 +471,15 @@ export class RunExecutor {
   /** Remembered entries rendered into a turn's prompt; 0 disables the block. */
   private readonly memoryPromptEntries: number
   /**
+   * How long a turn may sit on an unanswered approval dialog before the executor ends it.
+   *
+   * The approval waterfall is not the only path a dialog can take: a bot session is a hidden
+   * `subagent` agent, so a request no answerer claims waits on a surface that cannot exist. In the
+   * field that was 19m49s of「深度求索中」with an open tool call, which the active-tool exemption then
+   * kept alive indefinitely. 0 disables the watchdog.
+   */
+  private readonly approvalTimeoutMs: number
+  /**
    * The newest memory entry each (room, bot) pair has already been shown in this process.
    *
    * In-memory on purpose: a restart re-sends the baseline once, which is the cheap and safe
@@ -490,6 +505,11 @@ export class RunExecutor {
        */
       memoryPromptEntries?: number
       defaultReasoningEffort?: string
+      /**
+       * Bound on one untouched approval dialog (see {@link RunExecutor.approvalTimeoutMs}).
+       * Default 120 s; 0 waits forever.
+       */
+      approvalTimeoutMs?: number
       ledger?: LedgerProjector
       /**
        * Native-session driver. When present, a bot turn runs through a real DSH agent
@@ -527,6 +547,7 @@ export class RunExecutor {
     })
     this.ledger = opts.ledger
     this.sessionRunner = opts.sessionRunner
+    this.approvalTimeoutMs = Math.max(0, Math.round(opts.approvalTimeoutMs ?? 120_000))
   }
 
   /**
@@ -585,7 +606,7 @@ export class RunExecutor {
     const runAbort = this.runAborts.get(run.id)
     let outcome: Awaited<ReturnType<typeof runner.run>>
     try {
-      outcome = await runner.run(run.roomId, bot.id, prompt, delta, true, runAbort?.signal, onProgress)
+      outcome = await runner.run(run.roomId, bot.id, prompt, delta, true, runAbort?.signal, onProgress, run.id)
     } catch (error: unknown) {
       // A failed turn must not leave a row on `streaming: true`, or the panel shows
       // "处理中…" over an answer that will never come and the turn looks live forever.
@@ -893,7 +914,10 @@ export class RunExecutor {
     }
     const target = this.runTargets.get(runId)
     if (target !== undefined) {
-      this.sessionRunner?.cancel(target.roomId, target.botId, reason)
+      // The run id goes with the request: only the run that owns the pair's live turn may
+      // cancel it (see `SessionRunner.cancel`). A queued run of the same pair has a target but
+      // no turn of its own — its stop must not abort the other run's model request.
+      this.sessionRunner?.cancel(target.roomId, target.botId, reason, runId)
       return
     }
     // No registered target: only a run this process is actually driving has an agent to
@@ -902,7 +926,7 @@ export class RunExecutor {
     if (controller === undefined) return
     const run = this.svc.listRuns().find(r => r.id === runId)
     if (run !== undefined && (run.status === 'running' || run.status === 'queued')) {
-      this.sessionRunner?.cancel(run.roomId, run.botId, reason)
+      this.sessionRunner?.cancel(run.roomId, run.botId, reason, runId)
     }
   }
 
@@ -1379,6 +1403,7 @@ export class RunExecutor {
       origin,
       prompt,
       taskClass,
+      claimedAtMs: now,
       startedAtMs: now,
       deadlineAtMs: now + budgetMs,
       baseBudgetMs: budgetMs,
@@ -1391,6 +1416,46 @@ export class RunExecutor {
       activeTools: 0,
       progressGapsMs: [],
     }
+  }
+
+  /**
+   * A run's turn actually began — restart its execution budget clock.
+   *
+   * Called by {@link SessionRunner} once the pair's mutex is held and the agent is ready. The
+   * budget used to start at the CLAIM, which charged the time a run spent queued behind the
+   * previous turn of the same bot against the model's allowance: a follow-up message then failed
+   * with "已用 180s，预算 180s" having produced nothing. Everything before this point is queue
+   * time, not execution, so the deadline is recomputed from now and the run's own derived budget
+   * (not the cap) still applies.
+   */
+  onTurnStarted(runId: string): void {
+    const budget = this.runBudgets.get(runId)
+    if (budget === undefined) return
+    const now = Date.now()
+    const waitedMs = now - budget.startedAtMs
+    if (waitedMs < 1_000) return
+    budget.startedAtMs = now
+    budget.deadlineAtMs = now + budget.baseBudgetMs
+    budget.lastProgressAtMs = now
+    budget.lastProgressSeenMs = now
+    budget.progressEvents = 0
+    budget.lastPersistMs = now
+    this.svc.updateRunBudget(runId, {
+      deadlineAt: new Date(budget.deadlineAtMs).toISOString(),
+      lastProgressAt: new Date(now).toISOString(),
+    })
+    const waitedS = Math.round(waitedMs / 1000)
+    const budgetS = Math.round(budget.baseBudgetMs / 1000)
+    this.ctx.logger?.info?.(
+      `agent-community: run ${runId} waited ${waitedS}s for its pair's turn — `
+      + `execution budget restarted (${budgetS}s)`,
+    )
+    this.ledger?.push({
+      type: 'dispatch',
+      roomId: budget.roomId as BotRoomId,
+      text: `排队等待 ${waitedS}s 后才轮到本回合，执行预算从此刻起重新计时 ${budgetS}s`,
+      at: new Date(now).toISOString(),
+    })
   }
 
   /**
@@ -1451,6 +1516,54 @@ export class RunExecutor {
         this.runBudgets.delete(runId)
         continue
       }
+      // ── A RUN WAITING FOR ITS PAIR'S TURN HAS NOT SPENT ITS BUDGET YET ─────────────
+      //
+      // Two runs of one (room, bot) coexist whenever a second message arrives during the first's
+      // turn: the runner serialises them with a per-pair mutex, so this one sits in the queue
+      // doing nothing while its deadline ticks. Enforcing that deadline killed a follow-up
+      // message at "已用 180s，预算 180s" without it ever sending a request — and the stop it
+      // then issued cancelled the turn the OTHER run was driving (that reached a pending
+      // approval dialog, which came back as `cancelled` mid-turn).
+      //
+      // The wait itself stays bounded by the overall cap, so a pair can never queue forever.
+      if (this.sessionRunner !== undefined
+        && !this.sessionRunner.isTurnOwner(run.roomId, run.botId, runId)) {
+        const waitedMs = now - budget.startedAtMs
+        if (waitedMs > this.timeoutPolicy.capMs) {
+          await this.failRunForBudget(
+            run,
+            budget,
+            'timeout',
+            `等待同一 bot 的上一轮结束超过总上限 ${Math.round(this.timeoutPolicy.capMs / 1000)}s`,
+          )
+        }
+        continue
+      }
+      // ── AN UNANSWERED APPROVAL IS A HUNG TURN, WHOEVER SHOULD HAVE ANSWERED IT ─────
+      //
+      // The bridge claims bot approvals and times its own dialogs out, but that only covers the
+      // dialogs it receives. When the waterfall request is not claimed, the host waits on an
+      // answerer that cannot render a hidden `subagent` session — and because the turn has an OPEN
+      // TOOL CALL, the active-tool exemption below suspends the no-progress rule too. Result: a
+      // turn that is silent forever with no deadline in sight (observed: 19m49s, and once more at
+      // 8m+ on a different run). The session log, not the waterfall, is the authority here.
+      if (this.approvalTimeoutMs > 0 && this.sessionRunner !== undefined) {
+        const askedAtMs = this.sessionRunner.pendingApprovalSince(run.roomId, run.botId)
+        if (askedAtMs !== undefined) {
+          const waitingMs = now - askedAtMs
+          if (waitingMs > this.approvalTimeoutMs) {
+            await this.failRunForBudget(
+              run,
+              budget,
+              'timeout',
+              `审批等待 ${Math.round(waitingMs / 1000)}s 无人处理，已中止本轮`
+              + '（如需让 bot 执行这类操作，请在 Bot 设置里提高权限，或重新发送并留意审批卡）',
+            )
+          }
+          // Either way the model is not expected to produce anything until someone answers.
+          continue
+        }
+      }
       // ── ACTIVE TOOL EXEMPTION ──────────────────────────────────────────────
       // A shell command / long tool may run for hours without emitting frames or the
       // tool/result event. That is genuine work, not a dead provider stream: suspend
@@ -1458,7 +1571,9 @@ export class RunExecutor {
       // tool reports. A truly hung tool is still bounded by the overall cap and by the
       // user's stop button.
       if (activeToolExemptsNoProgress(budget.activeTools)) {
-        const capAtMs = budget.startedAtMs + this.timeoutPolicy.capMs
+        // The cap is measured from the CLAIM: `onTurnStarted` resets the execution clock, and a
+        // moving cap would let a run that starts a fresh turn every time live forever.
+        const capAtMs = budget.claimedAtMs + this.timeoutPolicy.capMs
         if (now >= capAtMs) {
           await this.failRunForBudget(
             run, budget, 'timeout',
@@ -1500,7 +1615,8 @@ export class RunExecutor {
         lastProgressAtMs: budget.lastProgressAtMs,
         policy: this.timeoutPolicy,
         extensions: budget.extensions,
-        startedAtMs: budget.startedAtMs,
+        // `shouldExtend`/`nextExtensionDeadline` use this only as the cap anchor.
+        startedAtMs: budget.claimedAtMs,
         baseBudgetMs: budget.baseBudgetMs,
       }
       const verdict = shouldExtend(extendInput)
@@ -1608,7 +1724,14 @@ export class RunExecutor {
       )
     }
     try { this.runAborts.get(run.id)?.abort(new Error(kind)) } catch { /* best-effort */ }
-    this.sessionRunner?.cancel(budget.roomId, budget.botId, kind === 'no-progress' ? 'no progress' : 'timeout')
+    this.sessionRunner?.cancel(
+      budget.roomId,
+      budget.botId,
+      kind === 'no-progress' ? 'no progress' : 'timeout',
+      // Scoped to THIS run: a budget verdict is a statement about one run, and the pair's live
+      // turn may belong to another run entirely (the queued follow-up case).
+      run.id,
+    )
     if (!settled) return
     this.ledger?.push({
       type: 'error',

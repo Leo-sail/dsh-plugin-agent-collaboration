@@ -248,6 +248,15 @@ export interface Config {
    */
   readonly groupProposalTimeoutMs?: number
   /**
+   * How long one of a Bot's approval dialogs may stay open before it is rejected automatically.
+   *
+   * A Bot session is a hidden `subagent` session, so an unanswered dialog is a hung turn rather
+   * than a waiting one. The executor's own watchdog runs this value plus a grace period later,
+   * so it only catches requests the bridge never claimed. `0` disables BOTH watchdogs and waits
+   * forever (the pre-watchdog behaviour) — the grace period must not turn `0` into "15 s".
+   */
+  readonly approvalTimeoutMs?: number
+  /**
    * Where DSH keeps its session logs. Defaults to `<home>/sessions` — the same
    * `~/.dsh/sessions` the runtime uses. Overridable so a test can exercise the
    * deletion and sweep paths without touching the user's real session store.
@@ -336,6 +345,15 @@ export const Config: z<Config> = z.object({
   // keep parsing. New throttling belongs next to the code that enqueues a2a runs.
   a2aMinIntervalMs: z.number().step(1).min(0).default(3_000),
   groupProposalTimeoutMs: z.number().step(1).min(1000).default(120_000),
+  /**
+   * How long one of a bot's approval dialogs may stay open before it is rejected automatically.
+   *
+   * A bot session is a hidden `subagent` session, so DSH's native approval card has no surface to
+   * appear on: an unanswered dialog is a HUNG TURN, not a waiting one (observed in the field as
+   * 19m49s of「深度求索中」). The panel card is still shown and a real decision always wins; this
+   * only bounds the case where nobody answers. `0` waits forever.
+   */
+  approvalTimeoutMs: z.number().step(1).min(0).default(120_000),
   sessionsDir: z.string().required(false),
   /**
    * Default reasoning effort for bot turns. `''` means "whatever the provider/model defaults
@@ -773,6 +791,7 @@ export class AgentCommunityService extends TypertRemoteService {
       memoryEntriesPerRoom: config.memoryEntriesPerRoom ?? 12,
       memoryPromptEntries: config.memoryPromptEntries ?? 8,
       groupProposalTimeoutMs: config.groupProposalTimeoutMs ?? 120_000,
+      approvalTimeoutMs: config.approvalTimeoutMs ?? 120_000,
       botReasoningEffort: config.botReasoningEffort ?? '',
     }
     this.home = resolveAgentCommunityHome({
@@ -837,7 +856,9 @@ export class AgentCommunityService extends TypertRemoteService {
           return { roomId: entry.roomId, botId: entry.botId }
         },
       }
-      this.approvalBridge = new ApprovalBridge(ctx, this.ledger, accessor)
+      this.approvalBridge = new ApprovalBridge(ctx, this.ledger, accessor, {
+        timeoutMs: this.cfg.approvalTimeoutMs,
+      })
       this.approvalBridgeDispose = this.approvalBridge.install()
       // Bots ask questions through this bridge: the row is the card, the RPC is the answer.
       this.questionBridge = new QuestionBridge(ctx, this.ledger)
@@ -924,6 +945,9 @@ export class AgentCommunityService extends TypertRemoteService {
         deniedTools: config.botDeniedTools ?? DEFAULT_DENIED_TOOLS,
         // Where the preset-mount diagnostic lands (plugin data dir, not the profile).
         presetLogDir: join(this.home, 'agent-community'),
+        // A run's execution budget starts when its turn REALLY starts — the pair's mutex may have
+        // held it in the queue for minutes, and that wait must not be charged to the model.
+        onTurnStart: (runId) => { this.executor?.onTurnStarted(runId) },
         setupAgent: (agentCtx, roomId, botId) => {
           // ⚠️ NATIVE FILE TOOLS ARE USED, NOT A PRIVATE COPY.
           //
@@ -1067,6 +1091,17 @@ export class AgentCommunityService extends TypertRemoteService {
         historyMessages: config.historyMessagesInPrompt ?? 10,
         memoryPromptEntries: config.memoryPromptEntries ?? 8,
         defaultReasoningEffort: config.botReasoningEffort ?? '',
+        // The bridge above is the first line: it claims a bot's dialog and auto-rejects it after
+        // `approvalTimeoutMs`, writing the host's `approval/decided` and letting the model react.
+        // This watchdog only covers requests the bridge never claimed (a waterfall the host waits
+        // on with no renderable answerer), so it runs a grace period LATER — otherwise both
+        // timers can fire around the same instant, the run is killed just as the bridge would
+        // have let it continue, and the room gets two contradictory timeout notices.
+        // `0` means "wait forever" for the operator, so both watchdogs must stay disabled — the
+        // grace period is added only to an actual bound.
+        approvalTimeoutMs: this.cfg.approvalTimeoutMs > 0
+          ? this.cfg.approvalTimeoutMs + 15_000
+          : 0,
         // The executor reserves a live row and writes the final answer for every run;
         // this view drops both for an internal run so its turn never reaches the panel.
         // The one row it may owe the user (a finish report) is pushed by `settleRun`.
