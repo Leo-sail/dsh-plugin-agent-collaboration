@@ -164,6 +164,7 @@ Every key is optional and is set on the bundle's row in the profile's `cordis.pa
 | `historyMessagesInPrompt` | `10` | Messages of context handed to each answer |
 | `a2aMinIntervalMs` | `3000` | Minimum gap between Bot-to-Bot messages |
 | `groupProposalTimeoutMs` | `120000` | How long a group proposal waits for an answer |
+| `approvalTimeoutMs` | `120000` | How long a Bot approval dialog may stay unanswered before it is auto-rejected (the executor watchdog runs 15s later as a backstop for requests the bridge never claimed); `0` disables both watchdogs and waits forever |
 | `idleLimit` | `12` | Live Bot sessions kept before the least recently used is disposed — disposing one is what releases its session write lease |
 | `hardLimit` | `24` | Hard ceiling on live Bot sessions |
 | `botReasoningEffort` | `max` | Reasoning effort for Bot turns: `off` `low` `high` `max`, or `''` to take the provider default. A Bot can override it |

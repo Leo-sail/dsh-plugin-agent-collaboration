@@ -235,7 +235,13 @@ interface RunBudgetState {
   readonly origin: string | undefined
   readonly prompt: string
   readonly taskClass: TaskClass
-  readonly startedAtMs: number
+  /**
+   * When the run was CLAIMED — the anchor of the hard cap. `startedAtMs` moves forward when a
+   * turn really starts (queue time is not execution time); the cap must not move with it.
+   */
+  readonly claimedAtMs: number
+  /** When the CURRENT turn's execution budget started (claim time until `onTurnStarted`). */
+  startedAtMs: number
   deadlineAtMs: number
   readonly baseBudgetMs: number
   readonly derivedSource: string
@@ -1397,6 +1403,7 @@ export class RunExecutor {
       origin,
       prompt,
       taskClass,
+      claimedAtMs: now,
       startedAtMs: now,
       deadlineAtMs: now + budgetMs,
       baseBudgetMs: budgetMs,
@@ -1445,7 +1452,7 @@ export class RunExecutor {
     )
     this.ledger?.push({
       type: 'dispatch',
-      roomId: budget.roomId,
+      roomId: budget.roomId as BotRoomId,
       text: `排队等待 ${waitedS}s 后才轮到本回合，执行预算从此刻起重新计时 ${budgetS}s`,
       at: new Date(now).toISOString(),
     })
@@ -1564,7 +1571,9 @@ export class RunExecutor {
       // tool reports. A truly hung tool is still bounded by the overall cap and by the
       // user's stop button.
       if (activeToolExemptsNoProgress(budget.activeTools)) {
-        const capAtMs = budget.startedAtMs + this.timeoutPolicy.capMs
+        // The cap is measured from the CLAIM: `onTurnStarted` resets the execution clock, and a
+        // moving cap would let a run that starts a fresh turn every time live forever.
+        const capAtMs = budget.claimedAtMs + this.timeoutPolicy.capMs
         if (now >= capAtMs) {
           await this.failRunForBudget(
             run, budget, 'timeout',
@@ -1606,7 +1615,8 @@ export class RunExecutor {
         lastProgressAtMs: budget.lastProgressAtMs,
         policy: this.timeoutPolicy,
         extensions: budget.extensions,
-        startedAtMs: budget.startedAtMs,
+        // `shouldExtend`/`nextExtensionDeadline` use this only as the cap anchor.
+        startedAtMs: budget.claimedAtMs,
         baseBudgetMs: budget.baseBudgetMs,
       }
       const verdict = shouldExtend(extendInput)

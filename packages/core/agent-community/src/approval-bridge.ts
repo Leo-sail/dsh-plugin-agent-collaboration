@@ -76,7 +76,10 @@ interface PendingApproval {
   readonly roomId: BotRoomId
   /** The binding this decision will grant, built while the dialog is open. */
   readonly binding: ApprovalBinding
-  resolve(outcome: ApprovalOutcome): void
+  /** `unavailable` is used only when the plugin is disposed while the dialog is open (fail closed). */
+  resolve(outcome: ApprovalOutcome | 'unavailable'): void
+  /** Remove the abort listener that was attached while this dialog was open. */
+  detach(): void
 }
 
 /** Accessor used by the bridge to look up which room a session belongs to. */
@@ -155,10 +158,32 @@ export class ApprovalBridge {
     this.installApprovalListener(disposers)
     this.installApprovalGuard(disposers)
     return () => {
+      // A dialog still open when the plugin goes away must not outlive it: resolve it `unavailable`
+      // (the host's fail-closed outcome) so a turn waiting on the waterfall is released, and drop
+      // the timers so no late callback can write a refusal row into a disposed ledger.
+      this.clearPendingApprovals('unavailable')
       for (const dispose of disposers.reverse()) {
         try { dispose() } catch { /* teardown is best-effort */ }
       }
     }
+  }
+
+  /**
+   * Drop every pending dialog, cancelling its timer and releasing whoever waits on the waterfall.
+   *
+   * Used on dispose (fail closed, `unavailable`). A real decision or an abort never reaches here:
+   * `resolveApproval` and the abort listener remove their own entry first.
+   */
+  private clearPendingApprovals(outcome: ApprovalOutcome | 'unavailable'): void {
+    for (const [callId, timer] of [...this.approvalTimers]) {
+      clearTimeout(timer)
+      this.approvalTimers.delete(callId)
+    }
+    for (const pending of [...this.pending.values()]) {
+      try { pending.detach() } catch { /* best-effort */ }
+      try { pending.resolve(outcome) } catch { /* best-effort */ }
+    }
+    this.pending.clear()
   }
 
   /** Capture member tool-call arguments before the approval decision (see `executions`). */
@@ -331,8 +356,37 @@ export class ApprovalBridge {
       at: new Date().toISOString(),
     })
 
+    // The host races this request against the requesting tool call's signal (dsh-user-approval
+    // `decide()`; the pipeline passes `exec.signal`). An abort means the question was WITHDRAWN
+    // (the user stopped the turn, the run was cancelled): the host logs `approval/decided
+    // cancelled` itself and does NOT wait for this promise any more. Without this listener the
+    // entry outlived the withdrawn dialog and the timeout timer below would later push a false
+    // "auto-rejected" notice and patch the ledger to `rejected` — contradicting the host's
+    // `cancelled`. So an abort drops the entry silently: no row, no notice, no resolve.
+    const signal = (req as unknown as { signal?: AbortSignal }).signal
+    const onAbort = (): void => {
+      const timer = this.approvalTimers.get(callId)
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        this.approvalTimers.delete(callId)
+      }
+      this.pending.delete(callId)
+    }
+
     return new Promise<ApprovalOutcome | 'unavailable'>(resolve => {
-      this.pending.set(callId, { entryId: entry.id, roomId, binding, resolve })
+      const pending: PendingApproval = {
+        entryId: entry.id,
+        roomId,
+        binding,
+        resolve,
+        detach: () => {
+          try { signal?.removeEventListener('abort', onAbort) } catch { /* best-effort */ }
+        },
+      }
+      this.pending.set(callId, pending)
+      if (signal !== undefined) {
+        try { signal.addEventListener('abort', onAbort, { once: true }) } catch { /* no signal support */ }
+      }
       // ── AN UNANSWERED DIALOG IS A HUNG TURN, NOT A WAITING ONE ──────────────────
       //
       // Nothing renders a native approval card for a hidden bot session, and the panel card is
@@ -359,6 +413,9 @@ export class ApprovalBridge {
         timer.unref?.()
         this.approvalTimers.set(callId, timer)
       }
+      // A signal that fired between the host's own check and this registration is not delivered
+      // to the listener; drop the dialog the same way an abort would.
+      if (signal?.aborted === true) onAbort()
     })
   }
 
@@ -379,6 +436,7 @@ export class ApprovalBridge {
     const pending = this.pending.get(callId)
     if (pending === undefined) return
     this.pending.delete(callId)
+    try { pending.detach() } catch { /* best-effort */ }
     this.ledger.patch(pending.entryId, pending.roomId, { outcome } as never)
     if (outcome === 'allowed-once') {
       pruneExpiredApprovals(this.approved)
@@ -425,8 +483,14 @@ export class ApprovalBridge {
     const callId = typeof view.callId === 'string' && view.callId !== '' ? view.callId : undefined
     if (callId === undefined) return
     const sessionId = typeof view.agent?.session?.id === 'string' ? view.agent.session.id : undefined
-    // Only MEMBER sessions are bridged; the user's own tools must not enter this map at all.
-    if (sessionId === undefined || this.accessor.memberRoomId(sessionId) === undefined) return
+    // Only BOT-OWNED sessions are bridged; the user's own tools must not enter this map at all.
+    // The parse fallback matches the approval listener: when the persisted membership table is
+    // missing the entry, the id itself still names the pair — without it the dialog could be
+    // claimed but the binding would degrade to `args-unavailable`.
+    const membership = sessionId === undefined
+      ? undefined
+      : this.accessor.memberRoomId(sessionId) ?? ApprovalBridge.parseBotSession(sessionId)
+    if (sessionId === undefined || membership === undefined) return
     const toolName = typeof view.name === 'string' && view.name !== '' ? view.name : 'unknown'
     let argsHash: string | undefined
     try {

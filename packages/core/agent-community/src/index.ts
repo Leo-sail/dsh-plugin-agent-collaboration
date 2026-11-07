@@ -248,6 +248,15 @@ export interface Config {
    */
   readonly groupProposalTimeoutMs?: number
   /**
+   * How long one of a Bot's approval dialogs may stay open before it is rejected automatically.
+   *
+   * A Bot session is a hidden `subagent` session, so an unanswered dialog is a hung turn rather
+   * than a waiting one. The executor's own watchdog runs this value plus a grace period later,
+   * so it only catches requests the bridge never claimed. `0` disables BOTH watchdogs and waits
+   * forever (the pre-watchdog behaviour) — the grace period must not turn `0` into "15 s".
+   */
+  readonly approvalTimeoutMs?: number
+  /**
    * Where DSH keeps its session logs. Defaults to `<home>/sessions` — the same
    * `~/.dsh/sessions` the runtime uses. Overridable so a test can exercise the
    * deletion and sweep paths without touching the user's real session store.
@@ -1074,9 +1083,17 @@ export class AgentCommunityService extends TypertRemoteService {
         historyMessages: config.historyMessagesInPrompt ?? 10,
         memoryPromptEntries: config.memoryPromptEntries ?? 8,
         defaultReasoningEffort: config.botReasoningEffort ?? 'max',
-        // Same bound the approval bridge uses for its own dialogs: whichever answerer receives the
-        // request, a bot turn may not sit on it forever.
-        approvalTimeoutMs: this.cfg.approvalTimeoutMs,
+        // The bridge above is the first line: it claims a bot's dialog and auto-rejects it after
+        // `approvalTimeoutMs`, writing the host's `approval/decided` and letting the model react.
+        // This watchdog only covers requests the bridge never claimed (a waterfall the host waits
+        // on with no renderable answerer), so it runs a grace period LATER — otherwise both
+        // timers can fire around the same instant, the run is killed just as the bridge would
+        // have let it continue, and the room gets two contradictory timeout notices.
+        // `0` means "wait forever" for the operator, so both watchdogs must stay disabled — the
+        // grace period is added only to an actual bound.
+        approvalTimeoutMs: this.cfg.approvalTimeoutMs > 0
+          ? this.cfg.approvalTimeoutMs + 15_000
+          : 0,
         // The executor reserves a live row and writes the final answer for every run;
         // this view drops both for an internal run so its turn never reaches the panel.
         // The one row it may owe the user (a finish report) is pushed by `settleRun`.

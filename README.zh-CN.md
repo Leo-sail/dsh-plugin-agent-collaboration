@@ -134,6 +134,7 @@ ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/
 | `historyMessagesInPrompt` | `10` | 每次回答附带的历史消息条数 |
 | `a2aMinIntervalMs` | `3000` | Bot 之间消息的最小间隔 |
 | `groupProposalTimeoutMs` | `120000` | 建群提议等待回答的时长 |
+| `approvalTimeoutMs` | `120000` | Bot 审批对话框无人应答后自动拒绝的时长（执行器 watchdog 晚 15s 兜底未被审批桥接单的请求）；`0` 表示两套 watchdog 都关闭、永不超时 |
 | `idleLimit` | `12` | 最多保留多少个活跃 Bot 会话，超出后淘汰最久未用的——淘汰正是释放其会话写租约的时机 |
 | `hardLimit` | `24` | 活跃 Bot 会话的硬上限 |
 | `botReasoningEffort` | `max` | Bot 回合的推理强度：`off` `low` `high` `max`，或 `''` 交给 provider 默认值。单个 Bot 可覆盖 |

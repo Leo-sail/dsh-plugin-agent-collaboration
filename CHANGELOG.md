@@ -20,6 +20,22 @@
   提示（`pendingApprovalSince`，已加测试）。
 - 新增 `tests/stop-scope.test.ts`。全量测试 **542/549**；7 个失败全部是
   `tests/file-handoff.test.ts` 在 Windows 上**改动前即存在**的失败（未改动的 main 同样复现）。
+- **修复（评审）：审批 watchdog 只统计当前回合。** 会话日志可能残留上一回合（进程在对话框打开时被杀，
+  崩溃恢复只补 tool/step/turn 的合成收口、不补 `approval/decided`）的 `approval/asked`；原来的倒序扫描
+  会把它当成当前等待，让该 bot 之后每个回合在第一个 tick 就被判「审批等待 N 小时无人处理」。现在倒序
+  扫描遇到 `turn/start` 即停止，并按 `data.id` 配对 asked/decided（并发审批中较新的 decided 不会遮住
+  较早的未决项）。
+- **修复（评审）：被撤销的审批不再误报。** 用户停止/预算取消会 abort 宿主审批请求（宿主记 `cancelled`），
+  但审批桥的 pending Promise 不会被 resolve；新的 120s 定时器会在事后补一条假的「审批超时，已自动拒绝」
+  并把行改成 `rejected`。现在审批桥监听 `req.signal`，abort 时静默清掉 timer 与 pending；插件卸载时对
+  仍在等待的对话框 fail closed（`unavailable`）并清空全部计时器。
+- **修复（评审）：2 小时硬上限锚定认领时刻。** `onTurnStarted` 会把 `startedAtMs` 前移（排队不计入
+  执行预算），但扩展/活跃工具的 cap 也用了它，等于每次重开回合都在给上限续命。新增 `claimedAtMs`
+  作为 cap 的唯一锚点。
+- **修复（评审）：执行器审批 watchdog 晚 15s 兜底。** 审批桥先按 `approvalTimeoutMs` 自动拒绝并写
+  `approval/decided`，让模型继续；执行器 watchdog 只处理「桥从未接单」的请求，晚 15s 避免两套超时
+  同时触发、run 在桥刚放行时被杀并产生两条矛盾通知。`0` 仍表示两套 watchdog 都关闭、永不超时；
+  `Config` 补上 `approvalTimeoutMs` 字段，README 配置表同步。
 
 ## 0.3.5 — 长任务活跃豁免
 

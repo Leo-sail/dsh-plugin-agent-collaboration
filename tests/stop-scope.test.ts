@@ -70,17 +70,19 @@ test('an approval the host never resolved is detected from the session log', () 
 
 test('a resolved, cancelled or absent approval is not pending', () => {
   const resolved = [
-    { type: 'approval/asked', time: 2_000 },
-    { type: 'approval/decided', time: 2_900 },
+    { type: 'turn/start', time: 1_000 },
+    { type: 'approval/asked', time: 2_000, data: { id: 'a1' } },
+    { type: 'approval/decided', time: 2_900, data: { id: 'a1' } },
     { type: 'tool/result', time: 2_901 },
   ]
   assert.equal(pendingApprovalSince(resolved), undefined)
 
-  // Two dialogs in one turn: only the NEWEST one counts.
+  // Two dialogs in one turn: only the NEWEST unanswered one counts.
   const second = [
-    { type: 'approval/asked', time: 2_000 },
-    { type: 'approval/decided', time: 2_100 },
-    { type: 'approval/asked', time: 5_000 },
+    { type: 'turn/start', time: 1_000 },
+    { type: 'approval/asked', time: 2_000, data: { id: 'a1' } },
+    { type: 'approval/decided', time: 2_100, data: { id: 'a1' } },
+    { type: 'approval/asked', time: 5_000, data: { id: 'a2' } },
   ]
   assert.equal(pendingApprovalSince(second), 5_000)
 
@@ -88,3 +90,52 @@ test('a resolved, cancelled or absent approval is not pending', () => {
   assert.equal(pendingApprovalSince([{ type: 'turn/end', time: 9 }]), undefined)
 })
 
+test('an earlier turn\'s dangling approval cannot poison the current turn', () => {
+  // Process killed with a dialog open: crash recovery appends synthetic tool results and
+  // `turn/end` but never the missing `approval/decided`. The next user turn starts after it.
+  const events = [
+    { type: 'turn/start', time: 1_000 },
+    { type: 'tool/call', time: 1_100 },
+    { type: 'approval/asked', time: 1_200, data: { id: 'old' } }, // never decided: crash here
+    { type: 'tool/result', time: 9_000 },                          // synthetic closer (recovery)
+    { type: 'turn/end', time: 9_001 },
+    { type: 'turn/start', time: 9_500 },                           // the CURRENT turn
+    { type: 'tool/call', time: 9_600 },
+  ]
+  assert.equal(pendingApprovalSince(events), undefined)
+
+  // The same turn does report it: an old dangling ask is not a live wait, this turn's is.
+  const live = [
+    ...events,
+    { type: 'approval/asked', time: 9_700, data: { id: 'new' } },
+  ]
+  assert.equal(pendingApprovalSince(live), 9_700)
+})
+
+test('concurrent approvals are paired by id, not by position', () => {
+  // Parallel tool calls raise two dialogs: the newer one is answered, the older one is not.
+  // A positional scan would stop at the newer `approval/decided` and report "nothing pending".
+  const events = [
+    { type: 'turn/start', time: 1_000 },
+    { type: 'approval/asked', time: 2_000, data: { id: 'a1' } },
+    { type: 'approval/asked', time: 2_100, data: { id: 'a2' } },
+    { type: 'approval/decided', time: 2_500, data: { id: 'a2' } },
+  ]
+  assert.equal(pendingApprovalSince(events), 2_000)
+
+  // Both answered: none pending.
+  const both = [
+    ...events,
+    { type: 'approval/decided', time: 2_600, data: { id: 'a1' } },
+  ]
+  assert.equal(pendingApprovalSince(both), undefined)
+})
+
+test('a timestamp-less ask is skipped instead of clearing the pending flag', () => {
+  const events = [
+    { type: 'turn/start', time: 1_000 },
+    { type: 'approval/asked', time: 2_000, data: { id: 'a1' } },
+    { type: 'approval/asked', data: { id: 'a2' } }, // no usable time: cannot bound a wait
+  ]
+  assert.equal(pendingApprovalSince(events), 2_000)
+})
