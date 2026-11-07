@@ -1,3 +1,21 @@
+## 0.3.6 — 评审修复：推理档位与 run 作用域/审批
+
+- **推理档位（PR #1）**：bot 默认推理强度由 `max` 改为 `''`（provider 默认）。模型没有公布档位时
+  会拒绝任何显式值，旧默认让每个回合静默「空回复」；现在配置级拒绝以 `failed` 收口并显示 provider
+  原文。设置页只列出该模型公布的档位，打开已有 bot 时按 catalog 校正表单；纯思考修复不再改写
+  `reasoningEffort`（当前宿主禁止 `agent/request` 改档位）。
+- **run 作用域与审批（PR #2）**：停止/超时只作用于持有本回合的 run，排队时间不再计入执行预算，2 小时
+  硬上限锚定认领时刻；bot 审批回落到 `ac:<room>:<bot>`，无人应答的对话框自动拒绝，被撤销的审批不再误报。
+- **评审修复（维护者）**：审批 watchdog 只统计当前 turn（崩溃残留的 `approval/asked` 不再毒化后续
+  run）；并发审批按 `data.id` 配对；插件卸载时 fail-closed 清理 timer/pending；`approvalTimeoutMs`
+  补进 `Config` 接口（`0` = 两套 watchdog 都关闭）；类型层修正使 `pnpm typecheck` 不新增错误。
+- 来源：[@oooah](https://github.com/oooah) 的 PR [#1](https://github.com/Leo-sail/dsh-plugin-agent-collaboration/pull/1)
+  / [#2](https://github.com/Leo-sail/dsh-plugin-agent-collaboration/pull/2)，维护者补齐类型、文档与边界修复
+  （`8e78e65`、`8c025fd`）。
+- 包版本：bundle **0.3.6**、core **0.3.5**、ui **0.3.10**；tools 无代码变化，保持 0.3.2。
+- 全量测试 **559/559**；`pnpm typecheck` 与 main 既有 8 个错误持平（无新增）；`pnpm run bundle` 通过
+  `check-build`；构建产物已在隔离 profile 完成 `install-profile` + `verify-install`。
+
 ## Unreleased — 推理档位不被支持时的静默空回复
 
 - **修复：bot 默认推理档位由 `max` 改为 `''`（provider 默认）。** 模型没有公布推理档位时（例如许多
