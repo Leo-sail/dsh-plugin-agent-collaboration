@@ -1,0 +1,529 @@
+/**
+ * History compaction — turning a room's older messages into one short summary.
+ *
+ * The room's stored messages ARE the bot's memory: `SessionRunner` seeds every fresh
+ * session from them (`historyFor`) and `RunExecutor.buildPrompt` hands the newest
+ * `historyMessagesInPrompt` to each turn.
+ *
+ * CORRECTION (P5-1 feasibility, 2026-11-08): the host DOES expose a compaction service
+ * (`ctx.compaction.compactIfNeeded/compactNow/compactRegion`, see the Inspect Provider's
+ * `compaction` contract); an earlier version of this comment said no such API existed.
+ * The plugin still keeps its OWN room-level compaction for a different reason: the room's
+ * messages are the shared record ALL bots seed from, so the plugin needs a durable,
+ * user-visible summary of what it replaced, on a schedule it controls — host compaction
+ * only rewrites one bot session's surface. The two can coexist; the P5-1 "conservative
+ * context guard" can additionally ask the host to compact a bot session when the context
+ * pressure is high (see the context-segment policy in this file).
+ *
+ * Pure except for {@link summariseHistory}, which drives the plugin's one sanctioned
+ * session-less LLM path (`ctx.llm.stream`, the same one the group-proposal judgement and
+ * the skill profiler use) rather than inventing a second client.
+ *
+ * TWO COMPACTIONS, ONE JOB EACH (kept separate on purpose):
+ *
+ *   · The HOST compacts a bot's own session (`dsh-compaction-basic`, at ~80% of the
+ *     window, keeping the newest ~16%). The plugin does not influence that and must not:
+ *     the session is DSH's business.
+ *   · The PLUGIN's compaction (this module + `compactRoom`) folds the ROOM's message
+ *     window that `buildPrompt` would otherwise replay every turn, and records one
+ *     durable summary message so the panel can show what happened. The original messages
+ *     are never deleted (the user's rule: 压缩必须可找回) — folding only tells the prompt
+ *     window to skip them, which is why the fold set is exactly the ids the summary
+ *     replaced ({@link foldedMessageIds}).
+ *
+ * @module
+ */
+
+import type { SeedRoomItem } from './ledger.ts'
+
+/** The sender name the summary row carries in the transcript and in the prompt history. */
+export const COMPACT_SENDER_NAME = '压缩摘要'
+
+/** Newest messages kept verbatim by default. */
+export const DEFAULT_KEEP_LAST = 6
+
+/** Floor for `keepLast`: below two messages "keep the recent tail" is not a promise worth making. */
+export const MIN_KEEP_LAST = 2
+
+/**
+ * How long the summariser may take.
+ *
+ * Bounded because the caller is a UI command: a provider that never answers must surface as
+ * an error the user can read, not as a spinner. The client's own RPC deadline is larger
+ * (see `COMPACT_CALL_DEADLINE_MS`), so this fires first and the failure is reportable.
+ */
+export const COMPACT_MODEL_TIMEOUT_MS = 45_000
+
+/** Characters of one message handed to the summariser. */
+const PER_MESSAGE_CHARS = 1_200
+
+/**
+ * Characters of transcript handed to the summariser.
+ *
+ * A room can hold thousands of messages; the summariser prompt must not grow without
+ * bound. When the older segment does not fit, the NEWEST of it wins (see
+ * {@link buildSummaryPrompt}) — the decisions the conversation arrived at matter more
+ * than its opening pleasantries.
+ */
+const TRANSCRIPT_BUDGET_CHARS = 24_000
+
+/** One message as the summariser sees it. */
+export interface CompactSourceMessage {
+  readonly senderName: string
+  readonly text: string
+}
+
+/** `keepLast` as the caller asked for it, clamped into the range the service supports. */
+export function clampKeepLast(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_KEEP_LAST
+  return Math.max(MIN_KEEP_LAST, Math.floor(value))
+}
+
+/**
+ * Split a room's messages into the part that becomes a summary and the tail kept verbatim.
+ *
+ * `keepLast` is clamped here as well as at the RPC boundary, so every caller — including
+ * a future one that forgot to clamp — keeps at least {@link MIN_KEEP_LAST} messages.
+ */
+export function splitForCompaction<T>(
+  messages: readonly T[],
+  keepLast: number,
+): { older: T[]; tail: T[] } {
+  const keep = Math.max(MIN_KEEP_LAST, Math.floor(keepLast))
+  const cut = Math.max(0, messages.length - keep)
+  return { older: messages.slice(0, cut), tail: messages.slice(cut) }
+}
+
+/**
+ * The ids the prompt window must skip after a compaction, oldest first.
+ *
+ * `older` is EXACTLY the segment the summary replaced — `splitForCompaction` already made
+ * that decision, so its ids ARE the fold set; asking the split is the only way the two can
+ * never disagree. This used to be recomputed from timestamps
+ * (`createdAt < summaryMessage.createdAt`) while the summary was deliberately stamped with
+ * the OLDEST replaced message's time (so the panel sorts the checkpoint where the replaced
+ * messages were). Those two conditions cannot both hold, so `foldedIds` came out EMPTY:
+ * `compactRoom` reported success while the prompt kept replaying every old message.
+ *
+ * Kept pure and generic so the rule is asserted without a service or a host.
+ */
+export function foldedMessageIds(older: readonly { readonly id: string }[]): string[] {
+  return older.map(message => message.id)
+}
+
+/** What a persisted summary message exposes to the panel rebuild. */
+export interface SummarySeedSource {
+  readonly id: string
+  readonly createdAt: string
+  readonly text: string
+  readonly senderName: string
+}
+
+/**
+ * The `SeedRoomItem` for one persisted summary message.
+ *
+ * THE PANEL RENDERS THE LEDGER, and a summary has no runId — the generic rebuild would hand
+ * it to `seedRoom` as a bot answer and the "a message without a runId is a coordination
+ * post, never render it" rule would drop it, so a compressed room looked untouched (and the
+ * checkpoint vanished on reload). Marking it `actor: 'summary'` makes `seedRoom` rebuild it
+ * as the same grey `dispatch` divider a durable notice uses. It lives here, pure and beside
+ * the fold rules, so the panel half of compaction is testable without a Maintenance host.
+ */
+export function summarySeedItem(message: SummarySeedSource): SeedRoomItem {
+  return {
+    id: message.id,
+    at: message.createdAt,
+    kind: 'notice',
+    senderName: message.senderName,
+    text: message.text,
+    actor: 'summary',
+  }
+}
+
+export interface SummaryPrompt {
+  readonly system: string
+  readonly user: string
+}
+
+/**
+ * The prompt that asks for the summary.
+ *
+ * Deliberately specific about what to keep: a generic "summarise this" produced polite
+ * prose that dropped exactly the facts (names, numbers, decisions, open questions) the next
+ * turn needs. The length cap is stated so the summary stays a compaction rather than a
+ * copy of the transcript.
+ */
+export function buildSummaryPrompt(
+  roomName: string,
+  older: readonly CompactSourceMessage[],
+): SummaryPrompt {
+  const system = [
+    '你是一个对话压缩助手。把这段历史对话压缩成一份摘要，供之后的对话继续使用。',
+    '必须保留：已经确认的结论和决定、关键事实与数字（名称、代号、路径、端口、金额、时间等）、未解决的问题、各方的分工与承诺、接下来要做的事。',
+    '可以省略：寒暄、重复内容、逐步的工具调用与思考过程。',
+    '用中文，条目式，400 字以内；宁可写满也不要漏掉事实。',
+    '直接输出摘要正文，不要任何前言、标题或 Markdown 代码块。',
+  ].join('\n')
+
+  const lines: string[] = []
+  let omitted = 0
+  let used = 0
+  // Newest-first under the budget, then reversed: when the segment does not fit, the most
+  // recent of it survives, because that is where the current state of the work lives.
+  for (let i = older.length - 1; i >= 0; i--) {
+    const m = older[i]!
+    const text = m.text.replace(/\s+/gu, ' ').trim().slice(0, PER_MESSAGE_CHARS)
+    const line = `${m.senderName}: ${text}`
+    if (used + line.length + 1 > TRANSCRIPT_BUDGET_CHARS) {
+      omitted = i + 1
+      break
+    }
+    lines.push(line)
+    used += line.length + 1
+  }
+  lines.reverse()
+
+  const user = [
+    `[房间] ${roomName.trim() === '' ? '（未命名）' : roomName.trim()}`,
+    `[需要压缩的历史消息：${older.length} 条${omitted > 0 ? `，其中最早的 ${omitted} 条因长度限制未提供` : ''}]`,
+    ...lines,
+  ].join('\n')
+  return { system, user }
+}
+
+/**
+ * The stream shape this module needs: the plugin's `LlmStream` with the request envelope
+ * the host actually accepts.
+ *
+ * `@deepseek-ai/dsh-llm`'s `GenerateOptions` takes `RequestMessage[]`, whose `content` is a
+ * `readonly ContentBlock[]` — `[{ type: 'text', text }]`, never a bare string. The plugin's
+ * own `LlmStreamRequest` still declares `content: string`, and a string here is not a
+ * cosmetic mismatch: the adapter throws while projecting the message, the stream
+ * normalizes that to a bare `TRANSPORT` failure, and the user is told the model call
+ * failed with no reason. Verified against the host's own summariser
+ * (`dsh-compaction-basic`), which builds exactly these fields:
+ * `messages` (blocks), `maxTokens`, `sessionId`, `purpose: 'compaction'`, `signal`.
+ */
+export interface CompactStreamRequest {
+  readonly provider: string
+  readonly model: string
+  /** Exact model-facing blocks — `ContentBlock[]`, NOT a bare string. */
+  readonly messages: readonly {
+    readonly role: 'user'
+    readonly content: readonly { readonly type: 'text'; readonly text: string }[]
+  }[]
+  readonly system?: string | undefined
+  readonly signal?: AbortSignal | undefined
+  /**
+   * Session identity for request routing; the host documents this as the field the agent
+   * loop stamps so adapters can map it to model-hidden transport metadata. The summary
+   * belongs to the room's own bot session, so that is the id passed.
+   */
+  readonly sessionId?: string | undefined
+  /** What the call IS. The host names `compaction` for exactly this. */
+  readonly purpose?: 'compaction' | undefined
+  /**
+   * Upper bound on the summary, so a chatty model cannot turn "compress" into a second
+   * copy of the conversation.
+   */
+  readonly maxTokens?: number | undefined
+}
+
+/** The summary is asked for in ≤400 Chinese characters; this is a ceiling, not a target. */
+export const COMPACT_MAX_TOKENS = 1024
+
+/** One streamed chunk; `LlmChunk` plus the failure facts worth reporting. */
+export interface CompactChunk {
+  readonly type: string
+  readonly text?: string | undefined
+  readonly reason?: {
+    readonly kind?: string | undefined
+    readonly failure?: {
+      readonly code?: string | undefined
+      readonly message?: string | undefined
+      readonly status?: number | undefined
+    } | undefined
+  } | undefined
+}
+
+export type CompactStream = (request: CompactStreamRequest) => AsyncIterable<CompactChunk>
+
+export interface SummariseHistoryOptions {
+  readonly stream: CompactStream
+  readonly provider: string
+  readonly model: string
+  readonly roomName: string
+  readonly older: readonly CompactSourceMessage[]
+  /** The room-bot session the request is routed under, when the caller has one. */
+  readonly sessionId?: string | undefined
+  readonly timeoutMs?: number | undefined
+}
+
+/**
+ * Ask the model for the summary. Rejects — and mutates nothing — on timeout or provider error.
+ *
+ * The caller runs this BEFORE its first write, so a failure leaves the room byte-for-byte
+ * as it was; that ordering is what makes "压缩失败" a safe outcome.
+ */
+export async function summariseHistory(options: SummariseHistoryOptions): Promise<string> {
+  const timeoutMs = options.timeoutMs ?? COMPACT_MODEL_TIMEOUT_MS
+  const { system, user } = buildSummaryPrompt(options.roomName, options.older)
+
+  const controller = new AbortController()
+  const consume = async (): Promise<string> => {
+    let answer = ''
+    for await (const chunk of options.stream({
+      provider: options.provider,
+      model: options.model,
+      system,
+      messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
+      signal: controller.signal,
+      ...(options.sessionId !== undefined && options.sessionId !== ''
+        ? { sessionId: options.sessionId }
+        : {}),
+      purpose: 'compaction',
+      maxTokens: COMPACT_MAX_TOKENS,
+    })) {
+      if (chunk.type === 'text-delta') answer += chunk.text ?? ''
+      if (chunk.type === 'finish') {
+        if (chunk.reason?.kind === 'error') {
+          // The code and status are the diagnostic part: "transport failed" alone cannot
+          // tell a rejected route from an expired credential, and the user-facing notice
+          // is the only place this ever surfaces.
+          const failure = chunk.reason.failure
+          const code = failure?.code !== undefined && failure.code !== ''
+            ? `［${failure.code}${failure.status !== undefined ? ` ${failure.status}` : ''}］`
+            : ''
+          throw new Error(`摘要模型调用失败${code}：${failure?.message ?? '未知错误'}`)
+        }
+        if (chunk.reason?.kind === 'aborted') {
+          throw new Error(`摘要生成在 ${Math.round(timeoutMs / 1000)} 秒内没有完成`)
+        }
+      }
+    }
+    const summary = answer.trim()
+    if (summary === '') throw new Error('摘要模型没有返回任何正文')
+    return summary
+  }
+
+  // The race is not redundant with `controller.abort()`: a stream that ignores the signal
+  // would otherwise leave the RPC pending for ever. `consume()` is also detached with a
+  // catch so its later rejection cannot surface as an unhandled rejection.
+  let failDeadline: (error: Error) => void = () => undefined
+  const deadline = new Promise<never>((_resolve, reject) => { failDeadline = reject })
+  const timer = setTimeout(() => {
+    controller.abort()
+    failDeadline(new Error(`摘要生成超过 ${Math.round(timeoutMs / 1000)} 秒，已放弃`))
+  }, timeoutMs)
+
+  const work = consume()
+  work.catch(() => undefined)
+  try {
+    return await Promise.race([work, deadline])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * The text of the one message that replaces the compacted segment.
+ *
+ * The first line stays in the bubble AND in every later prompt: the model has to know that
+ * what follows is a summary of a longer conversation, not something a participant said.
+ *
+ * OP-03: when hard constraints were pinned out of the replaced segment, they are appended
+ * verbatim. A summary model may paraphrase or drop a "不要/必须" rule, and the folded messages
+ * are no longer sent — so the constraint list is the ONLY thing standing between the user's
+ * explicit rule and it disappearing from the prompt. Omitting `pinned` (or passing an empty
+ * list) returns exactly the pre-OP-03 string, which keeps old fixtures and battle-tested text
+ * byte-identical.
+ */
+export function summaryMessageText(removed: number, summary: string, pinned?: readonly string[]): string {
+  const base = `以下是此前 ${removed} 条消息的压缩摘要（原文已不再保留）：\n\n${summary}`
+  if (pinned === undefined || pinned.length === 0) return base
+  return [
+    base,
+    '',
+    '[必须保留的硬约束]',
+    ...pinned.map(constraint => `- ${constraint}`),
+  ].join('\n')
+}
+
+/**
+ * A hard-rule marker: the words a user uses when stating something must/must-not happen.
+ *
+ * Matching is deliberately lexical, not a model call: pinning runs inside `compactRoom`, whose
+ * failure mode must stay "the summary is worse", never "compaction failed because a classifier
+ * did". A missed marker means one rule relies on the summary; a false positive means one
+ * harmless line is pinned. Both are cheap.
+ */
+const CONSTRAINT_MARKERS: readonly string[] = [
+  '必须', '务必', '不要', '禁止', '不得', '只能', '不许', '绝不能', '一定要', '切记', '不可', '不能',
+]
+
+/** Pinned constraints kept per room. Hard cap, because the block is injected into every turn. */
+export const MAX_PINNED_CONSTRAINTS = 20
+
+/** Shortest fragment worth pinning (a rule needs words to carry a condition). */
+export const MIN_PINNED_CONSTRAINT_CHARS = 8
+
+/** Longest fragment kept — one line, not a paragraph. */
+export const MAX_PINNED_CONSTRAINT_CHARS = 300
+
+/** Split one message into candidate rule fragments: by line and by sentence punctuation. */
+function constraintFragments(text: string): string[] {
+  return text
+    .split(/[\n\r]+|(?<=[。；;！!？?])/u)
+    .map(fragment => fragment.replace(/\s+/gu, ' ').trim())
+    .filter(fragment => fragment !== '')
+}
+
+/**
+ * Extract the hard constraints the USER stated in a segment of room history.
+ *
+ * ONLY `sender.kind === 'user'` messages are considered: a bot's own reply (or a routine/summary
+ * row) often repeats "不要…" while describing what it did, and pinning that would turn a report
+ * into a standing rule. The user's own words are the only trustworthy source of an instruction.
+ *
+ * Fragments are literal slices of the message (whitespace collapsed, never rewritten), so a
+ * pinned rule can be traced back to what was actually typed. Deduped oldest-first and capped at
+ * {@link MAX_PINNED_CONSTRAINTS}; the caller merges with the room's existing list.
+ */
+export function extractPinnedConstraints(
+  messages: ReadonlyArray<{
+    readonly sender: { readonly kind: string }
+    readonly text?: string | undefined
+    readonly modelText?: string | undefined
+  }>,
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const message of messages) {
+    if (message.sender.kind !== 'user') continue
+    // The visible text is what the user typed; `modelText` can carry an attachment reference.
+    const text = message.text ?? ''
+    for (const fragment of constraintFragments(text)) {
+      if (fragment.length < MIN_PINNED_CONSTRAINT_CHARS) continue
+      if (fragment.length > MAX_PINNED_CONSTRAINT_CHARS) continue
+      if (!CONSTRAINT_MARKERS.some(marker => fragment.includes(marker))) continue
+      if (seen.has(fragment)) continue
+      seen.add(fragment)
+      out.push(fragment)
+      if (out.length >= MAX_PINNED_CONSTRAINTS) return out
+    }
+  }
+  return out
+}
+
+/**
+ * Merge the room's existing pinned constraints with newly extracted ones.
+ *
+ * Existing first (their order is what the user already agreed to), then new fragments that are
+ * not already present, oldest-first, capped at {@link MAX_PINNED_CONSTRAINTS}. Merging must be
+ * idempotent: compacting twice with the same messages yields the same list.
+ */
+export function mergePinnedConstraints(
+  existing: readonly string[] | undefined,
+  incoming: readonly string[],
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const constraint of [...(existing ?? []), ...incoming]) {
+    const text = constraint.trim()
+    if (text === '') continue
+    if (seen.has(text)) continue
+    seen.add(text)
+    out.push(text)
+    if (out.length >= MAX_PINNED_CONSTRAINTS) break
+  }
+  return out
+}
+
+/** Header of the per-turn hard-constraints block. */
+export const ROOM_CONSTRAINTS_HEADER = '[本房间必须遵守的硬性约束]'
+
+/**
+ * Render the per-turn `[本房间必须遵守的硬性约束]` block, or undefined when there is none.
+ *
+ * This is the prompt-side half of the pin: constraints pinned at compaction time must be read
+ * EVERY turn, not only inside the summary message (the summary is one row in the transcript and
+ * would age out of the window; the pinned list lives on the room until it is cleared).
+ */
+export function roomConstraintsText(pinned: readonly string[] | undefined): string | undefined {
+  if (pinned === undefined || pinned.length === 0) return undefined
+  return [
+    ROOM_CONSTRAINTS_HEADER,
+    '这些是用户在本房间明确提出的硬性约束；它们优先于记忆与历史消息，冲突时以这里为准。',
+    ...pinned.map(constraint => `- ${constraint}`),
+  ].join('\n')
+}
+
+/**
+ * When the checkpoint row should sit, so the user can actually see it.
+ *
+ * It marks the fold boundary — just before the first KEPT message. Stamping it with the
+ * OLDEST replaced message (the old behaviour) put the row at the very start of the rebuilt
+ * room; the panel loads the newest page (last 50 rows), so the summary only appeared after
+ * 「加载更早」, which is not "the panel shows the summary". One millisecond earlier than the
+ * first kept message keeps it ordered before the tail while still landing in the newest page
+ * for any normal compaction.
+ *
+ * Falls back to the oldest replaced message only when the tail has no parseable timestamp.
+ */
+export function checkpointCreatedAt(
+  older: readonly { readonly createdAt: string }[],
+  tail: readonly { readonly createdAt: string }[],
+): string {
+  const anchor = tail[0]?.createdAt ?? older[0]?.createdAt
+  if (anchor === undefined) return new Date(0).toISOString()
+  const ms = Date.parse(anchor)
+  return Number.isFinite(ms) ? new Date(Math.max(0, ms - 1)).toISOString() : anchor
+}
+
+
+/** `compactRoom`'s request, as the RPC carries it. */
+export interface CompactRoomRequest {
+  readonly roomId: string
+  /** Newest messages to keep verbatim. Defaults to {@link DEFAULT_KEEP_LAST}, clamped to ≥ {@link MIN_KEEP_LAST}. */
+  readonly keepLast?: number | undefined
+}
+
+/** `compactRoom`'s result. A refusal is a normal answer, not an exception. */
+export interface CompactRoomResult {
+  /** True only when the room was actually rewritten. */
+  readonly compacted: boolean
+  /** Why nothing happened, when `compacted` is false. Safe to show verbatim. */
+  readonly reason?: string | undefined
+  /** How many older messages were replaced by the summary. */
+  readonly removed: number
+  /** How many newest messages were kept verbatim. */
+  readonly kept: number
+  /** The summary text, for the caller's notice. Absent on a refusal. */
+  readonly summary?: string | undefined
+  /**
+   * How many stale session ids were retired with the messages.
+   *
+   * A summary only compresses what the bot carries forward if it can no longer replay
+   * the full transcript from its session log, so a successful compaction retires the
+   * room's previous session generation (`clearCount`-style) and purges those logs.
+   */
+  readonly sessionsRetired: number
+}
+
+/**
+ * The messages a turn should see, given what has been folded.
+ *
+ * Folding is a WINDOW operation, not a delete: the folded rows stay in the transcript (the
+ * panel still shows them, unread arithmetic still counts them) while the prompt gets the
+ * checkpoint plus everything that came after it. Without this the room would "compact" and then
+ * keep sending the same history to the model.
+ */
+export function windowForPrompt<T extends { readonly id: string }>(
+  messages: readonly T[],
+  foldedIds: readonly string[] | undefined,
+  historyMessages: number,
+): T[] {
+  const folded = new Set(foldedIds ?? [])
+  const visible = folded.size === 0 ? [...messages] : messages.filter(m => !folded.has(m.id))
+  return historyMessages <= 0 ? [] : visible.slice(-historyMessages)
+}

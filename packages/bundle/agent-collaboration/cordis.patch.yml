@@ -1,0 +1,218 @@
+# Agent Collaboration bundle — Community only (route A).
+#
+# Route A: DSH's built-in Agent Teams bundle stays enabled and owns teammates,
+# the shared task board, and peer messaging. This bundle mounts only the Bot
+# Community, which has no in-box equivalent.
+#
+# The three Agent Team rows below are deliberately commented out. This plugin's
+# team packages are a same-origin fork of an older built-in generation: they
+# share the persisted session event vocabulary (`team/member`, `team/task`,
+# `team/message/queued`, `team/message/delivered`, all `version: 2`) and the
+# projection `stateVersion` with the built-in. Mounting both makes two
+# projections replay one session log. They also call the 0.1.x subagent API,
+# which no longer matches the 0.2.0 signatures.
+#
+# To take over instead, uncomment those rows AND disable the built-in bundle
+# (`@deepseek-ai/dsh-experimental-agent-team-profile`) in the profile patch.
+
+- insert:
+    - id: plugin-agent-community
+      name: "@dsh-plugin-agent-community/agent-community"
+      config:
+        maxBots: 32
+        maxRooms: 64
+        maxMessages: 10000
+        maxRuns: 1000
+        # Executor tunables — adjust here, no code change needed
+        #
+        # The slot count is GLOBAL, not per room: `slots = maxConcurrent - active.size`
+        # in RunExecutor.tick(). At 2, a four-bot group ran two bots and parked the
+        # other two behind the 排队 banner, which is the opposite of the product
+        # expectation — a group exists so its members work AT THE SAME TIME. 8 is the
+        # packaged ceiling on runaway fan-out (each run is a live Agent making its own
+        # provider call); raise it here if a room should hold more concurrent bots.
+        maxConcurrentRuns: 8
+        runTimeoutMs: 600000
+        runLeaseMs: 60000
+        historyMessagesInPrompt: 10
+        a2aMinIntervalMs: 3000
+
+    # ── THE MAIN SESSION DOES NOT DRIVE THE TEAM ────────────────────────────────
+    #
+    # These tools (`agent_community_post_message`, `task_decompose`, `submit_final`,
+    # `create_bot`, `task_assign`, …) let the USER'S OWN chat session command Bots from the main
+    # transcript. The requirement is the opposite: the main session stays out of it, and a room is
+    # run by its LEADER — who decides whether the request is complex, splits it, hands pieces to
+    # the members that fit, collects their reports, and delivers the final result. Keeping both
+    # entry points meant two coordinators for one room, with the leader's dispatch invisible to a
+    # user who asked the main session instead.
+    #
+    # The Bot-side tools are unaffected: the plugin registers those (`agent_community_dispatch`,
+    # `assign_task`, `task_report`, `finish_task`, `invite_bot`, `remove_bot`, `propose_group`, …)
+    # into each Bot's own scope from the core package.
+    # To restore the main-session tools, re-add this row.
+    # - id: plugin-tool-agent-community
+    #   name: "@dsh-plugin-agent-community/tool-agent-community"
+
+    - id: plugin-ui-agent-community
+      name: "@dsh-plugin-agent-community/ui-agent-community"
+
+    # NOTE: a fourth row used to mount a second @deepseek-ai/dsh-permission-presets
+    # instance here to add a read-only preset. It can never activate: this DSH's own
+    # dsh-base layer already mounts that package as row id `permission`, and
+    # cordis.provide() refuses a duplicate service name, so every reload failed with
+    #   service "permissionPresets" has been registered at <PermissionPresetService>
+    # The built-in row already ships read-only / workspace-write / danger-full-access
+    # presets (sandbox + approval), so nothing is lost. To restyle them, patch the
+    # existing row by id instead of inserting a new one — and remember that an
+    # id-targeted `config` REPLACES the whole config rather than deep-merging:
+    #
+    #   - id: permission
+    #     name: "@deepseek-ai/dsh-permission-presets"
+    #     config:
+    #       presets: { read-only: {...}, workspace-write: {...}, danger-full-access: {...} }
+    #
+    # resolvePresetName() in runs.ts matches by sandbox value, so preset key
+    # renaming in a future DSH version will not break the executor.
+
+    # The legacy `agent-team` fork's rows used to live here. Its three packages were removed on
+    #  (never mounted, never built — see pnpm-workspace.yaml), so there is nothing left to
+    # enable: this bundle mounts the Community packages only.
+
+# ── THE BOT AGENT PRESET ─────────────────────────────────────────────────────
+#
+# This deployment declares agent presets as PLUGIN ROWS (`@deepseek-ai/dsh-agent-preset` with
+# `config.plugins`), not as directories under <DSH_HOME>/.agent-presets — that directory belongs
+# to `dsh-agent-presets`, which this deployment does not mount. Observed: with the directory in
+# place the mount still failed with `RemoteError: Unknown agent preset: bot`, because the roster
+# never looked there.
+#
+# Why a bot needs its OWN preset at all: under the deployment's `standard` preset a bot's catalog
+# carries `workflow`, `subagent`/`subagent_fork`, `create_goal`/`update_goal`, `present`,
+# `exit_plan_mode`, `list_agents`, `send_message` and `interrupt_agent`. The plugin tried to hide
+# them with `ctx.tools.restrict({deny})` and could not — DSH keeps a scope-local registration
+# visible through a global deny, and a preset mounts these per agent. Observed: 11 of them
+# survived; only `plugin_manager` (a host tool) went away.
+#
+# What a bot keeps: files, shell, search, skills, todos, web, session compaction. What is
+# deliberately absent: every goal row, plan mode, the whole delegation group, `tool-ralph`, and
+# `tool-ask-user` — the plugin registers its OWN `ask_user_question` that draws the in-panel
+# question card, and two registrations of one name is the collision that silently dropped tools
+# earlier in this project. Collaboration reaches the model through the plugin's own tools
+# (`agent_community_*`, `assign_task`, `task_report`, `finish_task`, `invite_bot`, `remove_bot`,
+# `propose_group`), which it registers into the agent's scope and which need no row here.
+- insert:
+    - id: preset-bot
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: bot
+        order: 5
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a member of the user's bot team, powered by the {{model}} model.
+              # DSH 0.2.1-rc.2 dropped the built-in `{{cwd}}` prompt variable, and an unknown
+              # reference now aborts prompt assembly BEFORE the model call — with this suffix in
+              # place every Bot turn died with
+              #   unknown prompt variable "{{cwd}}" in section "deployment:persona-suffix"
+              # The working-directory service supplies the current directory as literal context,
+              # so the suffix stays empty (host guidance: omit or clear an otherwise empty one).
+              suffix: '' 
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+
+    # S2-1: the COORDINATOR role's preset. Same host packages the deployment already ships, minus
+    # every execution tool: no bash, no fs (read/write/edit), no web, no subagents. A coordinator routes,
+    # briefs, collects and reports; the plugin registers its collaboration tools into the agent's
+    # own scope, so dispatch/assign/finish/message_member still work without a row here.
+    - id: preset-coordinator
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: coordinator
+        order: 6
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are the coordinator of the user's bot team, powered by the {{model}} model.
+              suffix: ''
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true

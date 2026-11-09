@@ -1,0 +1,1216 @@
+/**
+ * LedgerProjector — projects Bot member-session events into a typed 8-entry ledger.
+ *
+ * Architecture (v5 §5):
+ *  - Subscribes to session events for all known member sessions.
+ *  - Flushes entries in batches (Config.ledgerFlushMs, default 150ms) to avoid
+ *    RPC storm when a fast streaming turn produces hundreds of tokens/events.
+ *  - The ledger is the single source of truth for what the group-chat UI shows.
+ *    The native session transcript of member sessions is NEVER sent to the client
+ *    (red-line 1: RPC responses must not expose roomAgentSessions sessionIds).
+ *
+ * Entry types:
+ *  user         — human message arriving in the room
+ *  bot-text     — assistant reply from a member bot (streaming-aware)
+ *  bot-reasoning — <thinking> block from a reasoning model (collapsible)
+ *  tool-call    — model requested a tool
+ *  tool-result  — tool execution finished (raw output, not summarised)
+ *  approval     — member session triggered an approval prompt; awaiting user decision
+ *  error        — run failed with a specific error
+ *  dispatch     — host agent scheduling action (system row, non-bubble)
+ *  deliverable  — files the turn declared for the user (rendered as file cards)
+ *  round        — group round lifecycle rows (P2-1: started / PASS / settled / interrupted)
+ */
+
+import { randomUUID } from 'node:crypto'
+import type { BotId, BotMessageAttachment, BotRoomId, BotRunId, DeliveredFile } from './types.ts'
+
+export type LedgerEntryType =
+  | 'user'
+  | 'bot-text'
+  | 'bot-reasoning'
+  | 'tool-call'
+  | 'tool-result'
+  | 'approval'
+  | 'question'
+  | 'error'
+  | 'dispatch'
+  | 'deliverable'
+  | 'round'
+
+interface LedgerEntryBase {
+  readonly id: string
+  readonly roomId: BotRoomId
+  readonly at: string
+  readonly sequence: number
+  /**
+   * Bumped on every in-place update. `sequence` stays put for an entry's whole
+   * life, so a client that already fetched an entry cannot detect later edits
+   * (streaming text, `streaming: false`) from the sequence alone.
+   */
+  readonly rev: number
+  /**
+   * Global change counter — bumped by EVERY `push` and EVERY `patch` in this projector.
+   *
+   * `rev` says "this ROW changed"; it cannot say "something changed SINCE you polled".
+   * The incremental poll used to be keyed on `sequence`, and a patched row keeps its
+   * sequence: a reply whose row was reserved at the start of the turn (small sequence)
+   * and settled at the end (large change) sat BELOW the client's cursor for ever, so the
+   * panel showed the turn's work but never its answer. This is the cursor that moves for
+   * the whole room: `changedAfterChangeSeq` compares against it.
+   */
+  readonly changeSeq: number
+}
+
+export interface LedgerUserEntry extends LedgerEntryBase {
+  readonly type: 'user'
+  readonly text: string
+  readonly senderName: string
+  /**
+   * Files the user attached, for the bubble to draw. Passed through from the persisted
+   * message on both paths — the live push in `sendMessage` and the rebuild in
+   * `seedLedgerRoom` — because the panel renders ONLY the ledger: metadata that lives
+   * only on `state.messages` would vanish on the next reload.
+   */
+  readonly attachments?: readonly BotMessageAttachment[] | undefined
+  /**
+   * OP-14 threading/task linkage, passed through from the persisted message on both paths (live
+   * push and restart rebuild). Optional and additive: a reader that does not render threads
+   * ignores it, and older rows simply lack it.
+   */
+  readonly replyTo?: string | undefined
+  readonly threadId?: string | undefined
+  readonly taskId?: string | undefined
+  /**
+   * The persisted message id this row draws, when the host knows it.
+   *
+   * The panel and `copyBot` live in two different id spaces: a live user row gets a random
+   * ledger id while the message it represents has its own id, so passing the ledger id to
+   * the fork RPC was answered with `Message "…" not found`. The host stamps this on every
+   * user row (seed rows already use the message id as their row id) and
+   * `resolveForkCutId` accepts either form. Optional and additive: old rows simply lack it
+   * and the resolver falls back to the room's newest user message.
+   */
+  readonly messageId?: string | undefined
+}
+
+export interface LedgerBotTextEntry extends LedgerEntryBase {
+  readonly type: 'bot-text'
+  readonly botId: BotId
+  readonly botName: string
+  readonly runId?: BotRunId | undefined
+  readonly text: string
+  /**
+   * Wall-clock duration of the run that produced this row, so the panel can render
+   * the native "已完成，用时 …" footer without a reload. Only the persisted message
+   * carried it before, which is why a freshly finished turn showed no duration
+   * until DSH restarted and re-seeded the ledger from state.
+   */
+  readonly durationMs?: number | undefined
+  readonly usage?: {
+    readonly inputTokens?: number | undefined
+    readonly uncachedInputTokens?: number | undefined
+    readonly outputTokens?: number | undefined
+    readonly totalTokens?: number | undefined
+    readonly cacheReadTokens?: number | undefined
+    readonly cacheWriteTokens?: number | undefined
+  } | undefined
+  /** true while the turn is still streaming */
+  readonly streaming: boolean
+  /** OP-14 threading/task linkage carried by the reply (absent when it had none). */
+  readonly replyTo?: string | undefined
+  readonly threadId?: string | undefined
+  readonly taskId?: string | undefined
+  /**
+   * The persisted BotMessage id this row draws, when the host knows it.
+   *
+   * Same reason as the user row's field: a live `bot-text` row's ledger id is
+   * `run:<runId>:bot-text`, which names no message, so a reply aimed at that row was answered
+   * with silence (the host validates `replyTo` against real message ids and drops what it cannot
+   * find). The host stamps this when the delivered message exists; the panel prefers it over
+   * the row id, and the restart rebuild keeps using the message id as the row id anyway.
+   */
+  readonly messageId?: string | undefined
+}
+
+export interface LedgerBotReasoningEntry extends LedgerEntryBase {
+  readonly type: 'bot-reasoning'
+  readonly botId: BotId
+  readonly botName: string
+  /** Turn identity: keeps reasoning in the same rendered turn as its answer. */
+  readonly runId?: BotRunId | undefined
+  readonly text: string
+}
+
+export interface LedgerToolCallEntry extends LedgerEntryBase {
+  readonly type: 'tool-call'
+  readonly botId: BotId
+  readonly botName: string
+  /** Turn identity: keeps tool cards inside the turn that issued them. */
+  readonly runId?: BotRunId | undefined
+  readonly callId: string
+  readonly name: string
+  readonly args: string
+}
+
+export interface LedgerToolResultEntry extends LedgerEntryBase {
+  readonly type: 'tool-result'
+  readonly botId: BotId
+  readonly botName: string
+  readonly runId?: BotRunId | undefined
+  readonly callId: string
+  readonly ok: boolean
+  readonly output: string
+}
+
+/**
+ * Files a turn declared as deliverables for the user.
+ *
+ * One row per turn, not one per file: the card group renders after the reply, so a
+ * second row for the same turn would render as a second, disconnected card stack.
+ * Repeated declarations in one turn merge into this row's `files`.
+ */
+export interface LedgerDeliverableEntry extends LedgerEntryBase {
+  readonly type: 'deliverable'
+  readonly botId: BotId
+  readonly botName: string
+  /** Turn identity: the card group belongs to this reply. */
+  readonly runId: BotRunId
+  readonly files: readonly DeliveredFile[]
+}
+
+export interface LedgerApprovalEntry extends LedgerEntryBase {
+  readonly type: 'approval'
+  readonly botId: BotId
+  readonly botName: string
+  readonly callId: string
+  readonly toolName: string
+  readonly args: string
+  readonly outcome?: 'allowed-once' | 'rejected' | undefined
+  /**
+   * OP-06 (approval–execution binding) — optional and additive.
+   *
+   * The host's approval request carries no arguments; the bridge captures them at
+   * `tools/pre-execute` and records this fingerprint so a reader can tell that the grant described
+   * a concrete call rather than only a tool name. Rows written before the binding existed, and
+   * rows whose arguments the host never exposed, simply omit these fields.
+   */
+  readonly argsHash?: string | undefined
+  /** `verified-args` when the grant was bound to captured arguments; `args-unavailable` otherwise. */
+  readonly binding?: 'verified-args' | 'args-unavailable' | undefined
+  /** When the binding stops being executable (ISO 8601). */
+  readonly expiresAt?: string | undefined
+}
+
+/**
+ * A question a bot asked the user, and the answer once it arrives.
+ *
+ * Its own row type rather than an `approval`: an approval is a yes/no about a tool call,
+ * while a question is a prompt with options the user picks from. Both block the bot's turn
+ * until the user acts, which is why both live in the transcript next to the turn that asked.
+ */
+export interface LedgerQuestionEntry extends LedgerEntryBase {
+  readonly type: 'question'
+  readonly botId: BotId
+  readonly botName: string
+  readonly questionId: string
+  readonly runId?: BotRunId | undefined
+  readonly question: string
+  /** Selectable answers; empty means free text only. */
+  readonly options: readonly string[]
+  readonly allowFreeText: boolean
+  readonly status: 'pending' | 'answered' | 'skipped' | 'expired'
+  readonly answer?: string | undefined
+  readonly answeredAt?: string | undefined
+}
+
+export interface LedgerErrorEntry extends LedgerEntryBase {
+  readonly type: 'error'
+  readonly botId: BotId
+  readonly botName: string
+  readonly message: string
+  readonly code?: string | undefined
+}
+
+export interface LedgerDispatchEntry extends LedgerEntryBase {
+  readonly type: 'dispatch'
+  readonly text: string
+}
+
+/**
+ * One row of a group round's lifecycle (P2-1): started / a member PASSed / settled /
+ * interrupted by a newer instruction.
+ *
+ * Kept as its own non-bubble row so the transcript can show "本轮开始：…", "X 跳过本轮",
+ * "本轮收口" without pretending a bot said them. `phase` is what the panel keys its styling on;
+ * `text` is already the human-readable Chinese line.
+ */
+export interface LedgerRoundEntry extends LedgerEntryBase {
+  readonly type: 'round'
+  readonly text: string
+  readonly roundId: string
+  readonly phase: 'started' | 'pass' | 'settled' | 'interrupted'
+}
+
+export type LedgerEntry =
+  | LedgerUserEntry
+  | LedgerBotTextEntry
+  | LedgerBotReasoningEntry
+  | LedgerToolCallEntry
+  | LedgerToolResultEntry
+  | LedgerApprovalEntry
+  | LedgerQuestionEntry
+  | LedgerErrorEntry
+  | LedgerDispatchEntry
+  | LedgerDeliverableEntry
+  | LedgerRoundEntry
+
+/**
+ * A ledger entry before the projector assigns its identity. Distributing over the
+ * union keeps each variant's own fields (e.g. `botId`) checkable at the call site.
+ */
+/**
+ * A ledger entry as callers supply it.
+ *
+ * `id`, `sequence`, `rev` and `changeSeq` are assigned by {@link LedgerProjector.push}.
+ * `at` is optional there too: `push` stamps it when absent, so every entry carries a time
+ * whether or not the caller remembered. Leaving `at` REQUIRED here did not prevent
+ * omissions — callers bypassed it with `as never` casts — it only stopped the
+ * compiler from noticing that the streaming path never passed one, which left live
+ * entries with no timestamp and made the UI's clock and run timer blank.
+ */
+export type LedgerEntryInput = LedgerEntry extends infer T
+  ? T extends LedgerEntry
+    ? Omit<T, 'id' | 'sequence' | 'rev' | 'changeSeq' | 'at'> & { readonly at?: string | undefined }
+    : never
+  : never
+
+/**
+ * One record in a room's durable `ledger.jsonl` journal (P4).
+ *
+ * The journal mirrors the projection's two mutations plus the clear that ends a room's
+ * history: `push` carries the finished row, `patch` carries the field-level change so an
+ * in-place update (streaming text, approval outcome) stays small on disk, and `clear`
+ * wipes the room's replay. A replay applies them in file order and yields the same rows
+ * the panel shows.
+ */
+export type LedgerJournalRecord =
+  | { readonly v: 1; readonly op: 'push'; readonly roomId: string; readonly entry: LedgerEntry }
+  | {
+    readonly v: 1
+    readonly op: 'patch'
+    readonly roomId: string
+    readonly id: string
+    readonly patch: Record<string, unknown>
+  }
+  | { readonly v: 1; readonly op: 'clear'; readonly roomId: string }
+
+/** Minimal bot info needed to annotate ledger entries. */
+interface BotInfo {
+  readonly id: BotId
+  readonly name: string
+}
+
+// ── LedgerProjector ───────────────────────────────────────────────────────────
+
+export interface LedgerStateAccessor {
+  getBot(id: string): { name: string } | undefined
+}
+
+/**
+ * LedgerProjector — in-memory store + pub/sub for 8-type ledger entries.
+ *
+ * Consumers (RunExecutor, sendMessage, ApprovalBridge) call push() to append
+ * entries. Clients call listLedger() for pagination and follow() for real-time
+ * delivery. Batches subscriber notifications at flushMs (default 150) to avoid
+ * per-token RPC storms during streaming turns.
+ */
+export interface SeedRoomItem {
+      readonly id: string
+      readonly at: string
+      readonly kind: 'user' | 'bot' | 'notice'
+      readonly senderName: string
+      readonly botId?: string | undefined
+      readonly text: string
+      /** Attachment metadata for a user row; see {@link LedgerUserEntry.attachments}. */
+      readonly attachments?: readonly BotMessageAttachment[] | undefined
+      readonly runId?: string | undefined
+      readonly reasoning?: string | undefined
+      readonly usage?: {
+        inputTokens?: number | undefined
+        uncachedInputTokens?: number | undefined
+        outputTokens?: number | undefined
+        totalTokens?: number | undefined
+        cacheReadTokens?: number | undefined
+        cacheWriteTokens?: number | undefined
+      } | undefined
+      /**
+       * Which row to rebuild. Defaults to the answer (`bot-text`); the reasoning
+       * and tool rows are reconstructed from the message that carried them so a
+       * restart does not erase the thinking and tool sections.
+       *
+       * `summary` rebuilds a compaction checkpoint as a `dispatch` divider row (the same
+       * renderer a durable notice uses): the message has no runId, so without this actor
+       * it would be skipped as a coordination post and the panel could not show that the
+       * room had been compressed.
+       */
+      readonly actor?: 'bot-text' | 'bot-reasoning' | 'tool-call' | 'tool-result' | 'deliverable' | 'summary' | undefined
+      readonly callId?: string | undefined
+      /** Deliverable file metadata for a {@link LedgerDeliverableEntry} rebuild. */
+      readonly files?: readonly DeliveredFile[] | undefined
+      readonly name?: string | undefined
+      readonly args?: string | undefined
+      readonly ok?: boolean | undefined
+      readonly output?: string | undefined
+      /** Wall-clock duration of the run that produced this entry. */
+      readonly durationMs?: number | undefined
+}
+
+export class LedgerProjector {
+  private readonly svc: LedgerStateAccessor
+  private readonly byRoom = new Map<string, LedgerEntry[]>()
+  /** Creation counter: a row's `sequence`, assigned once and never moved. */
+  private seq = 0
+  /** Change counter: every `push`/`patch`/settle write bumps it (see `changeSeq`). */
+  private change = 0
+  private readonly subscribers = new Map<string, Set<(batch: LedgerEntry[]) => void>>()
+  private pendingBatch = new Map<string, LedgerEntry[]>()
+  private flushTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly flushMs: number
+
+  constructor(svc: LedgerStateAccessor, opts: {
+    flushMs?: number
+    onEntry?: ((entry: LedgerEntry) => void) | undefined
+    /**
+     * P4 durable journal sink: every successful mutation is appended here.
+     *
+     * BEST-EFFORT BY CONTRACT — a journal failure must never break a conversation, so the
+     * sink is called after the in-memory change and inside try/catch. The projection stays
+     * the source of truth; the journal only makes it survive a crash between saves.
+     */
+    journal?: ((record: LedgerJournalRecord) => void) | undefined
+  } = {}) {
+    this.svc = svc
+    this.flushMs = opts.flushMs ?? 150
+    this.onEntry = opts.onEntry
+    this.journal = opts.journal
+  }
+
+  /** Emit one journal record without ever letting a sink failure reach the caller. */
+  private noteJournal(record: LedgerJournalRecord): void {
+    try {
+      this.journal?.(record)
+    } catch {
+      // Durability is advisory for the live projection (see the constructor JSDoc).
+    }
+  }
+
+  /**
+   * Called for every appended entry, after it is stored.
+   *
+   * The unread badge hangs off this: what the user SEES in a room is its ledger, and a native run's
+   * answer is pushed here as `bot-text` without necessarily becoming a room message. Counting only
+   * room messages left the badge empty for the most ordinary case (ask a bot something, it answers);
+   * measured live: the run completed and the unread map was still empty.
+   */
+  private readonly onEntry: ((entry: LedgerEntry) => void) | undefined
+  /** P4 durable journal sink (see constructor). */
+  private readonly journal: ((record: LedgerJournalRecord) => void) | undefined
+
+  /**
+   * Seed a room's history from persisted messages.
+   *
+   * The projector itself is in-memory (it exists to batch live session events),
+   * but the conversation is durable in the community state file. Without this
+   * seed, restarting DSH left every room's panel empty even though the bots could
+   * still read the same history through the state — the UI simply had nothing to
+   * render.
+   *
+   * Only called once per process, before any live entry is pushed, so it cannot
+   * duplicate a message that sendMessage() also pushed to the ledger.
+   */
+  seedRoom(
+    roomId: BotRoomId,
+    items: ReadonlyArray<SeedRoomItem>,
+  ): number {
+    if (items.length === 0) return 0
+    // Built as full entries: a seeded row needs the same `rev`/`changeSeq` a live push
+    // gets, or a client that already holds the row cannot tell it was rebuilt/updated.
+    const list: LedgerEntry[] = []
+    // One row per message id. A rebuild must never produce two rows for the same
+    // message — that rendered as the same chat message appearing twice in the panel.
+    const seenIds = new Set<string>()
+    for (const item of items) {
+      if (seenIds.has(item.id)) continue
+      seenIds.add(item.id)
+      const base = {
+        id: item.id,
+        roomId,
+        at: item.at,
+        sequence: ++this.seq,
+        rev: 1,
+        changeSeq: ++this.change,
+      }
+      if (item.kind === 'user') {
+        list.push({
+          ...base,
+          type: 'user',
+          text: item.text,
+          // The row id already equals the message id for seeded rows, but the field is
+          // explicit so the fork resolver has one shape to read on both paths.
+          messageId: item.id,
+          senderName: item.senderName,
+          ...(item.attachments !== undefined ? { attachments: item.attachments } : {}),
+        })
+      } else if (item.actor === 'summary') {
+        // A compaction checkpoint. Rendered exactly like a durable notice — a grey
+        // `dispatch` divider — because that is the truth: the plugin wrote it, no participant
+        // said it, and it is a marker in the transcript rather than a reply. Its id is the
+        // summary MESSAGE id, so a repeated seed rebuilds the same row instead of adding a
+        // second one (the `seenIds` guard above does the de-duplication).
+        list.push({ ...base, type: 'dispatch', text: item.text })
+      } else if (item.kind === 'notice') {
+        // A durable system row (room.notices). Same `dispatch` type the live path pushes, so a
+        // rebuilt notice is byte-for-byte the row the user already saw — one renderer, one style.
+        list.push({ ...base, type: 'dispatch', text: item.text })
+      } else if (item.actor === 'bot-reasoning') {
+        list.push({
+          ...base,
+          type: 'bot-reasoning',
+          botId: (item.botId ?? item.senderName) as BotId,
+          botName: item.senderName,
+          ...(item.runId !== undefined ? { runId: item.runId as BotRunId } : {}),
+          text: item.reasoning ?? item.text,
+        })
+      } else if (item.actor === 'deliverable') {
+        if (item.files === undefined || item.files.length === 0) continue
+        list.push({
+          ...base,
+          type: 'deliverable',
+          botId: (item.botId ?? item.senderName) as BotId,
+          botName: item.senderName,
+          runId: (item.runId ?? item.id) as BotRunId,
+          files: item.files,
+        })
+      } else if (item.actor === 'tool-call') {
+        list.push({
+          ...base,
+          type: 'tool-call',
+          botId: (item.botId ?? item.senderName) as BotId,
+          botName: item.senderName,
+          ...(item.runId !== undefined ? { runId: item.runId as BotRunId } : {}),
+          callId: item.callId ?? item.id,
+          name: item.name ?? '',
+          args: item.args ?? '',
+        })
+      } else if (item.actor === 'tool-result') {
+        list.push({
+          ...base,
+          type: 'tool-result',
+          botId: (item.botId ?? item.senderName) as BotId,
+          botName: item.senderName,
+          ...(item.runId !== undefined ? { runId: item.runId as BotRunId } : {}),
+          callId: item.callId ?? item.id,
+          ok: item.ok ?? true,
+          output: item.output ?? '',
+        })
+      } else if (item.runId === undefined) {
+        // ── A COORDINATION POST IS NOT A REPLY ─────────────────────────────────────
+        //
+        // Every real answer is persisted by `settleRun`, which always records the run it came
+        // from. A bot message without one is a `message_member` post — coordination between
+        // bots that the room should never have shown. Those written before the fix are still in
+        // the state, so they are skipped here rather than displayed: the user's data is left
+        // untouched, and the transcript shows one reply per turn.
+        continue
+      } else {
+        list.push({
+          ...base,
+          type: 'bot-text',
+          botId: (item.botId ?? item.senderName) as BotId,
+          botName: item.senderName,
+          ...(item.runId !== undefined ? { runId: item.runId as BotRunId } : {}),
+          text: item.text,
+          streaming: false,
+          ...(item.usage !== undefined ? { usage: item.usage } : {}),
+          ...(item.durationMs !== undefined ? { durationMs: item.durationMs } : {}),
+        })
+      }
+    }
+    // ── A SEEDED MESSAGE REUSES ITS RUN'S ROW ───────────────────────────────────
+    //
+    // Seeding rebuilds the room from the persisted messages, but the row a run already owns
+    // carries what a message does not: its reasoning and its tool activity. Replacing the room
+    // wholesale therefore showed every answer twice once the panel refetched — one row with
+    // 思考过程 and one without (measured: four leader replies where one was expected). A seeded
+    // bot-text row whose run already has a row takes that row's place instead of adding a copy.
+    const live = this.byRoom.get(roomId) ?? []
+    if (live.length > 0) {
+      const byRun = new Map<string, LedgerEntry>()
+      for (const e of live) {
+        const rid = (e as { runId?: string }).runId
+        if (rid !== undefined && e.type === 'bot-text') byRun.set(rid, e)
+      }
+      // A live streaming row can carry NO runId: it is created on the attempt's first frame,
+      // sometimes before `runIdFor` can name the run. Keying the merge on runId alone therefore
+      // missed exactly those rows, and the seeded copy (which HAS a runId but no reasoning)
+      // survived beside it — the user's 'one reply with 思考过程 and one without'. Rows without a
+      // runId are matched by their bot instead, so the live row wins and the copy is dropped.
+      // A live streaming row can carry NO runId: it is created on the attempt's first frame,
+      // sometimes before `runIdFor` can name the run. Keying the merge on runId alone therefore
+      // missed exactly those rows, and the seeded copy (which HAS a runId but no reasoning)
+      // survived beside it — the user's 'one reply with 思考过程 and one without'.
+      //
+      // Matched by (bot, identical text), NOT by bot alone: dropping every seeded row of a bot
+      // that happens to own a runId-less row would erase that bot's earlier messages from the
+      // view. Only the very copy being duplicated is removed, and the live row (which carries the
+      // reasoning) is kept.
+      const keyOf = (bid: unknown, text: unknown): string => `${String(bid)}\u0000${String(text)}`
+      const liveNoRun = new Set<string>()
+      for (const e of live) {
+        const rid = (e as { runId?: string }).runId
+        const bid = (e as { botId?: string }).botId
+        if (e.type === 'bot-text' && rid === undefined && bid !== undefined)
+          liveNoRun.add(keyOf(bid, (e as { text?: string }).text))
+      }
+      const merged = list.filter((e) => {
+        const rid = (e as { runId?: string }).runId
+        const bid = (e as { botId?: string }).botId
+        if (e.type !== 'bot-text') return true
+        if (rid !== undefined && byRun.has(rid)) return false
+        if (bid !== undefined && liveNoRun.has(keyOf(bid, (e as { text?: string }).text))) return false
+        return true
+      })
+      for (const e of byRun.values()) merged.push(e)
+      // ── ONE ORDER, EVEN AFTER A MERGE ─────────────────────────────────────────
+      //
+      // Seeded rows get FRESH sequence numbers (the counter only moves forward), while a
+      // live row keeps the sequence it was pushed with — so appending the live rows at
+      // the end left the array ordered by neither `at` nor `sequence`. `listLedger` pages
+      // by array position (`slice(-limit)`) and the client sorts by time, so the two
+      // disagreed and a merge could hand the first screen the wrong page. Sort by time
+      // (the transcript's order), sequence as the tiebreaker for rows of one timestamp.
+      merged.sort((a, b) => {
+        const atA = Date.parse(a.at)
+        const atB = Date.parse(b.at)
+        if (Number.isFinite(atA) && Number.isFinite(atB) && atA !== atB) return atA - atB
+        return a.sequence - b.sequence
+      })
+      this.byRoom.set(roomId, merged)
+      return merged.length
+    }
+    this.byRoom.set(roomId, list)
+    return list.length
+  }
+
+  /**
+   * Append an entry; returns the persisted entry with id and sequence filled.
+   *
+   * The parameter is the pre-identity discriminated union of LedgerEntry rather
+   * than `Omit<LedgerEntry, 'id'|'sequence'>`: TypeScript distributes Omit poorly
+   * over a union, so every caller's object literal was checked against all eight
+   * variants at once and legitimate fields like `botId` were rejected.
+   */
+  push(entry: LedgerEntryInput): LedgerEntry {
+    // `randomUUID` comes from the module-level import. A per-call `require('node:crypto')` used
+    // to sit here; it works when loaded through the plugin's CJS build but throws
+    // `ReferenceError: require is not defined` under ESM (the `node --test` runner, and any
+    // ESM consumer of this package) the first time a row needed a random id.
+    // ── A ROW BELONGING TO A RUN HAS A DERIVED ID ─────────────────────────────
+    //
+    // Random ids let one answer become two rows: the streaming row is created on the attempt's
+    // first frame, sometimes before `runIdFor` can name the run, so it carries no runId — and
+    // `patchRunText` looks rows up BY runId, finds nothing, and opens a second row for the same
+    // text. Measured: one reply rendered twice, one copy with its reasoning and one without,
+    // which is exactly that pair. Deriving the id from (run, type, call) makes the projection's
+    // row and the settling write the same row by construction.
+    const rowRunId = (entry as { runId?: string }).runId
+    const rowCallId = (entry as { callId?: string }).callId
+    const rowType = (entry as { type?: string }).type
+    const full = {
+      ...entry,
+      // Stamped here, not by callers. Required by LedgerEntryBase, and every consumer
+      // that sorts, groups or formats by time depends on it; making callers supply it
+      // is what let the streaming path emit timeless entries.
+      at: entry.at ?? new Date().toISOString(),
+      id: rowRunId !== undefined && rowType !== undefined
+        ? `run:${rowRunId}:${rowType}${rowCallId !== undefined ? `:${rowCallId}` : ''}`
+        : randomUUID(),
+      sequence: ++this.seq,
+      rev: 1,
+      changeSeq: ++this.change,
+    } as LedgerEntry
+    const list = this.byRoom.get(full.roomId) ?? []
+    list.push(full)
+    this.byRoom.set(full.roomId, list)
+    const pending = this.pendingBatch.get(full.roomId) ?? []
+    pending.push(full)
+    this.pendingBatch.set(full.roomId, pending)
+    if (this.flushTimer === undefined) {
+      this.flushTimer = setTimeout(() => this.flushSubscribers(), this.flushMs)
+    }
+    try {
+      this.onEntry?.(full)
+    } catch {
+      // Never let a badge counter break the conversation.
+    }
+    this.noteJournal({ v: 1, op: 'push', roomId: String(full.roomId), entry: full })
+    return full
+  }
+
+  /**
+   * Patch an existing entry in-place (e.g. resolve an approval outcome or
+   * finalise a streaming bot-text entry). Notifies subscribers immediately.
+   *
+   * `rev` marks THIS row's version; `changeSeq` is the room-wide "something changed"
+   * counter, and it is what the panel's incremental poll keys on — a settled answer keeps
+   * its (older) sequence but must still be delivered.
+   */
+  patch(id: string, roomId: string, patch: Partial<LedgerEntry>): void {
+    const list = this.byRoom.get(roomId)
+    if (list === undefined) return
+    const idx = list.findIndex(e => e.id === id)
+    if (idx < 0) return
+    const prev = list[idx]!
+    ;(list as LedgerEntry[])[idx] = {
+      ...prev,
+      ...patch,
+      rev: prev.rev + 1,
+      changeSeq: ++this.change,
+    } as LedgerEntry
+    const subs = this.subscribers.get(roomId)
+    if (subs !== undefined) for (const cb of subs) cb([list[idx]!])
+    this.noteJournal({
+      v: 1,
+      op: 'patch',
+      roomId,
+      id,
+      patch: patch as Record<string, unknown>,
+    })
+  }
+
+  /**
+   * Merge replayed journal rows into a room (P4 startup recovery).
+   *
+   * NEVER OVERWRITES an existing row: the state file's message rebuild is the fresher
+   * authority for messages, and this only restores rows the rebuild cannot produce
+   * (reasoning/tool/round/deliverable/approval history, or rows from a turn that died
+   * before the save). Counters are advanced past the hydrated rows so later pushes keep
+   * increasing. Deliberately does NOT emit journal/onEntry records — a replay must not
+   * write itself back into the journal.
+   *
+   * @returns how many rows were added.
+   */
+  hydrate(roomId: string, rows: readonly LedgerEntry[]): number {
+    const list = this.byRoom.get(roomId) ?? []
+    const known = new Set(list.map(entry => entry.id))
+    let added = 0
+    for (const row of rows) {
+      if (known.has(row.id)) continue
+      list.push(row)
+      known.add(row.id)
+      if (row.sequence > this.seq) this.seq = row.sequence
+      if (row.changeSeq > this.change) this.change = row.changeSeq
+      added += 1
+    }
+    if (added > 0) {
+      list.sort((left, right) => left.sequence - right.sequence)
+      this.byRoom.set(roomId, list)
+    }
+    return added
+  }
+
+  /** Live rows reserved by a run, keyed by `(roomId, botId)`. */
+  private readonly reservedLiveRows = new Map<string, string>()
+
+  private static pairKey(roomId: string, botId: string): string {
+    return `${roomId}\u0000${botId}`
+  }
+
+  /**
+   * Open the run's live row BEFORE the turn starts, and hand back its id.
+   *
+   * The run owns the row from the beginning, which is what makes the transcript
+   * deterministic: the streaming projection takes this row over instead of creating one
+   * of its own, and the final answer is written to it as well. When both sides created
+   * rows independently the same answer could render twice — and the copy the projection
+   * made while the run was still queued carried no `runId`, so it looked like a message
+   * from nobody.
+   */
+  reserveLiveRow(roomId: string, botId: string, botName: string, runId: string): string {
+    const row = this.push({
+      type: 'bot-text',
+      roomId: roomId as never,
+      botId: botId as never,
+      botName,
+      runId: runId as never,
+      text: '',
+      streaming: true,
+      at: new Date().toISOString(),
+    } as never)
+    this.reservedLiveRows.set(LedgerProjector.pairKey(roomId, botId), row.id)
+    return row.id
+  }
+
+  /**
+   * The live row for this pair, for the WHOLE run.
+   *
+   * Deliberately NOT consumed on read. A turn can make several model attempts — the
+   * runner retries when the model answers with reasoning but no text — and each attempt
+   * emits its own `start` frame. A one-shot reservation was already spent by the second
+   * attempt, so the projection opened ANOTHER row and the same turn rendered twice, once
+   * under a row that carried no name. Holding the row for the run's duration is what
+   * makes "one turn, one row" true no matter how many attempts it takes.
+   */
+  liveRowFor(roomId: string, botId: string): string | undefined {
+    return this.reservedLiveRows.get(LedgerProjector.pairKey(roomId, botId))
+  }
+
+  /**
+   * A bot-text row already carrying this run id, if one exists.
+   *
+   * The LAST line of defence against a duplicated turn. Every row-creating path asks
+   * this first, so a row that was created under any circumstance — reserved by the run,
+   * opened by the streaming projection, written by the final answer — is reused rather
+   * than joined by a second row for the same turn.
+   */
+  botTextRowForRun(roomId: string, runId: string): string | undefined {
+    const list = this.byRoom.get(roomId)
+    if (list === undefined) return undefined
+    let found: string | undefined
+    for (const e of list) {
+      if (e.type !== 'bot-text') continue
+      if ((e as { runId?: string }).runId === runId) found = e.id
+    }
+    return found
+  }
+
+  /** Release the pair's live row once the run has settled. */
+  releaseLiveRow(roomId: string, botId: string): void {
+    this.reservedLiveRows.delete(LedgerProjector.pairKey(roomId, botId))
+  }
+
+  /**
+   * Write a run's FINAL answer onto its rows, creating one if none exists.
+   *
+   * Streaming is best-effort: `LedgerProjection` paints text as it arrives, but if a
+   * delta is missed, dropped, or arrives for an attempt whose row was never created,
+   * the turn ends with an empty row stuck on `streaming: true` — which the panel shows
+   * as "处理中…" forever even though the model answered. The runner's own return value
+   * is authoritative, so it is applied here as a guarantee rather than left to the
+   * stream.
+   *
+   * Patching by `runId` (not by a remembered row id) also means this works no matter
+   * which component created the row, and it clears `streaming` in the same write so
+   * the turn can never be left looking live.
+   */
+  patchRunText(
+    roomId: string,
+    runId: string,
+    text: string,
+    identity?: { botId: string; botName: string },
+  ): void {
+    const list = this.byRoom.get(roomId)
+    if (list === undefined) {
+      // No ledger for the room yet. The answer still has to land, so open one — the
+      // alternative is a bot that answered and whose reply is nowhere.
+      if (identity === undefined) return
+      this.push({
+        type: 'bot-text',
+        roomId: roomId as never,
+        botId: identity.botId as never,
+        botName: identity.botName,
+        runId: runId as never,
+        text,
+        streaming: false,
+        at: new Date().toISOString(),
+      } as never)
+      return
+    }
+    const rows = list.filter(
+      (e): e is Extract<LedgerEntry, { type: 'bot-text' }> =>
+        e.type === 'bot-text' && (e as { runId?: string }).runId === runId,
+    )
+    if (rows.length === 0) {
+      // ── ADOPT, DO NOT DUPLICATE ──────────────────────────────────────────────
+      //
+      // A run can already own a row that carries NO `runId`: the streaming projection
+      // creates one on the attempt's first frame using whatever `runIdFor` returned at
+      // that instant, and for a run still queued that was `undefined`. Creating a
+      // second row here therefore rendered the SAME answer twice — once from the
+      // adopted stream and once from this write — and the nameless one looked like a
+      // message from nobody.
+      //
+      // So the newest streaming text row for this bot is taken over instead. Only when
+      // there is genuinely no row does one get created, which keeps the original fix
+      // (an answer is never dropped) without ever duplicating it.
+      // The adopted row must carry the runId from now on, or the next write for this
+      // run will fail to find it and open yet another row.
+      const stampAdopted = (rowId: string): void => {
+        const current = (this.byRoom.get(roomId) ?? []).find(e => e.id === rowId)
+        if (current !== undefined) (current as { runId?: string }).runId = runId
+      }
+      void stampAdopted
+      const orphan = identity !== undefined
+        ? [...list].reverse().find(e =>
+            e.type === 'bot-text'
+            && (e as { botId?: string }).botId === identity.botId
+            && (e as { runId?: string }).runId === undefined
+            && (e as { streaming?: boolean }).streaming === true)
+        : undefined
+      if (orphan !== undefined) {
+        this.patch(orphan.id, roomId, {
+          text,
+          streaming: false,
+          runId: runId as never,
+        } as Partial<LedgerEntry>)
+        return
+      }
+      // Genuinely nothing to adopt: the answer still has to land, so open a row.
+      if (identity === undefined) return
+      this.push({
+        type: 'bot-text',
+        roomId: roomId as never,
+        botId: identity.botId as never,
+        botName: identity.botName,
+        runId: runId as never,
+        text,
+        streaming: false,
+        at: new Date().toISOString(),
+      } as never)
+      return
+    }
+    // The LAST text row of the run is its answer; earlier ones were superseded.
+    const target = rows[rows.length - 1]!
+    this.patch(target.id, roomId, { text, streaming: false } as Partial<LedgerEntry>)
+    // Every OTHER row of this run stops looking live too. A row left on
+    // `streaming: true` renders as a bot that is permanently 运行中 — which is exactly
+    // how a stray row from a non-run stream (the session-title call) appeared, and why
+    // a four-bot group showed ten avatars. This is the belt to that braces.
+    for (const row of rows) {
+      if (row.id === target.id) continue
+      if ((row as { streaming?: boolean }).streaming !== true) continue
+      this.patch(row.id, roomId, { streaming: false } as Partial<LedgerEntry>)
+    }
+  }
+
+  /**
+   * Write a run's REASONING onto its row, creating one when the stream did not.
+   *
+   * Same contract as {@link patchRunText} and for the same reason: the reasoning shown
+   * to the user must come from the run's own result, not only from stream frames. Frames
+   * are the live path; this is the guarantee. It also survives a turn whose stream was
+   * intentionally not recorded — the whole attempt stream is skipped when no run is live,
+   * which is what stops DSH's session-title call from appearing as a second answer, and
+   * that same gate would otherwise take the reasoning with it.
+   */
+  patchRunReasoning(
+    roomId: string,
+    runId: string,
+    text: string,
+    identity: { botId: string; botName: string },
+  ): void {
+    if (text === '') return
+    const list = this.byRoom.get(roomId)
+    const existing = list?.find(e =>
+      e.type === 'bot-reasoning' && (e as { runId?: string }).runId === runId)
+    if (existing !== undefined) {
+      this.patch(existing.id, roomId, { text } as Partial<LedgerEntry>)
+      return
+    }
+    this.push({
+      type: 'bot-reasoning',
+      roomId: roomId as never,
+      botId: identity.botId as never,
+      botName: identity.botName,
+      runId: runId as never,
+      text,
+      at: new Date().toISOString(),
+    } as never)
+  }
+
+  /** Stop a run's rows looking live, without touching their text. */
+  settleRunText(roomId: string, runId: string): void {
+    const list = this.byRoom.get(roomId)
+    if (list === undefined) return
+    for (const e of list) {
+      if (e.type !== 'bot-text') continue
+      if ((e as { runId?: string }).runId !== runId) continue
+      if ((e as { streaming?: boolean }).streaming !== true) continue
+      this.patch(e.id, roomId, { streaming: false } as Partial<LedgerEntry>)
+    }
+  }
+
+  private flushSubscribers(): void {
+    this.flushTimer = undefined
+    for (const [roomId, batch] of this.pendingBatch) {
+      const subs = this.subscribers.get(roomId)
+      if (subs !== undefined && batch.length > 0) {
+        for (const cb of subs) cb([...batch])
+      }
+    }
+    this.pendingBatch.clear()
+  }
+
+  /**
+   * Paginated read in one of four modes:
+   *  • `changedAfterChangeSeq` — the forward poll the panel uses. Returns the NEWEST
+   *    `limit` rows whose `changeSeq` is at or after the cursor, so a row that was
+   *    PATCHED since the last poll is delivered even though its `sequence` never moved.
+   *  • `afterSequence` / `changedAfterSequence` — the old sequence-based forward poll,
+   *    kept for compatibility. It cannot re-deliver a patched row below the cursor.
+   *  • `beforeSequence` — backwards paging for "load earlier".
+   *  • neither — the newest `limit` entries (initial load).
+   */
+  listLedger(
+    roomId: string,
+    opts: {
+      beforeSequence?: number
+      afterSequence?: number
+      changedAfterSequence?: number
+      /**
+       * Inclusive change cursor: rows with `changeSeq >= this` are candidates.
+       *
+       * This is the cursor that survives an in-place patch: `sequence` is assigned once
+       * and never moves, so `changedAfterSequence` could only ever answer "new rows",
+       * never "rows that changed" — a settled reply reserved early in the turn stayed
+       * below the client's sequence cursor and never reached the panel.
+       */
+      changedAfterChangeSeq?: number
+      limit?: number
+      /**
+       * Ignore every cursor and return the room's rows as they are now.
+       *
+       * A re-seed assigns fresh sequence numbers, which can land BELOW a cursor the
+       * client already holds; a cursor query then returns rows all older than the
+       * cursor and the settled reply is never delivered. A forced read has no such
+       * assumption — it is bounded by the room's own size.
+       */
+      force?: boolean
+    } = {},
+  ): LedgerEntry[] {
+    const all = this.byRoom.get(roomId) ?? []
+    const {
+      beforeSequence,
+      afterSequence,
+      changedAfterSequence,
+      changedAfterChangeSeq,
+      limit = 50,
+      force = false,
+    } = opts
+    if (force) return all.slice(-limit)
+    if (changedAfterChangeSeq !== undefined) {
+      // A cursor above this projector's own counter cannot be satisfied (a reload resets
+      // the counters while the client keeps its cursor). Same recovery as the sequence
+      // branch below: answer with the newest page, which the client re-merges by id.
+      if (changedAfterChangeSeq > this.change) return all.slice(-limit)
+      // Inclusive on the boundary: the row AT the cursor may be the very one that was
+      // patched last poll, and re-sending it is how its edit reaches the client.
+      return all.filter(e => e.changeSeq >= changedAfterChangeSeq).slice(-limit)
+    }
+    if (changedAfterSequence !== undefined) {
+      // ── A CURSOR ABOVE THIS LEDGER'S OWN COUNTER CANNOT BE SATISFIED ─────────
+      //
+      // Sequences come from an in-memory counter, so a plugin reload starts them
+      // again from 1 while the panel keeps the cursor it already held. Every row the
+      // room then has is BELOW that cursor, `sequence >= cursor` matched nothing, and
+      // the client was answered with an empty page forever: the transcript froze on
+      // the pre-reload rows and the user's own messages never appeared — exactly the
+      // "I sent a greeting and it never showed up" report. Re-seeding a room does the
+      // same thing to a lesser degree.
+      //
+      // The counter is the authority on what this ledger can possibly hold, so a
+      // cursor beyond it proves the client is stale rather than idle. Answer with the
+      // newest rows; the client re-merges by id, so a needless re-send is harmless.
+      if (changedAfterSequence > this.seq) return all.slice(-limit)
+      // Inclusive on the boundary: the entry at the cursor may itself have been
+      // patched (streaming text grows, then `streaming` flips to false), and the
+      // client re-merges by id, so re-sending it is how edits arrive at all.
+      //
+      // NEWEST page (`slice(-limit)`), not the oldest: a replay/re-seed can put more
+      // than `limit` rows at or above the cursor, and the older window would then keep
+      // re-delivering the head of that range while the settled reply — the rows that
+      // matter — never reached the panel.
+      return all.filter(e => e.sequence >= changedAfterSequence).slice(-limit)
+    }
+    if (afterSequence !== undefined) {
+      // Same rule as the cursor branch: the newest page at/after the cursor.
+      return all.filter(e => e.sequence > afterSequence).slice(-limit)
+    }
+    const filtered = beforeSequence !== undefined ? all.filter(e => e.sequence < beforeSequence) : all
+    return filtered.slice(-limit)
+  }
+
+  /**
+   * Subscribe to new entries for a room starting from `cursor` (exclusive).
+   * Immediately delivers any buffered entries after cursor. Returns a disposer.
+   */
+  follow(roomId: string, cursor: number, cb: (entries: LedgerEntry[]) => void): () => void {
+    let subs = this.subscribers.get(roomId)
+    if (subs === undefined) { subs = new Set(); this.subscribers.set(roomId, subs) }
+    subs.add(cb)
+    const since = (this.byRoom.get(roomId) ?? []).filter(e => e.sequence > cursor)
+    if (since.length > 0) cb(since)
+    return () => {
+      const s = this.subscribers.get(roomId)
+      if (s !== undefined) { s.delete(cb); if (s.size === 0) this.subscribers.delete(roomId) }
+    }
+  }
+
+  /** Resolve a bot name from the state accessor (used by ApprovalBridge). */
+  botName(botId: string): string {
+    return this.svc.getBot(botId)?.name ?? botId
+  }
+
+  /**
+   * Force every streaming entry of one run to settled.
+   *
+   * A run can end through several paths (completion, throw, silent early
+   * return, retry, cancellation). Rather than rely on each of them remembering
+   * to finalise, this is called whenever a run settles, so no entry can be left
+   * flagged `streaming: true` — which is what pinned the panel on「深度求索中」
+   * until the room was reloaded.
+   */
+  settleRunEntries(runId: string, roomId: BotRoomId, durationMs?: number): number {
+    const list = this.byRoom.get(roomId)
+    if (list === undefined) return 0
+    let settled = 0
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i]!
+      // Only bot-text rows carry both `runId` and `streaming`.
+      if (e.type !== 'bot-text' || e.runId !== runId) continue
+      // Stamp the duration on every row of the run, not just the streaming one: the
+      // panel reads it from the turn's first bot-text row, and a run that produced
+      // no streamed text still needs the footer.
+      const next = {
+        ...e,
+        ...(durationMs !== undefined ? { durationMs } : {}),
+        ...(e.streaming === true ? { streaming: false } : {}),
+        rev: e.rev + 1,
+        // This row keeps its sequence, so the sequence cursor would never re-deliver it;
+        // the change cursor must (the duration/streaming flip is exactly what the panel
+        // needs to stop showing the turn as live).
+        changeSeq: ++this.change,
+      } as LedgerEntry
+      ;(list as LedgerEntry[])[i] = next
+      if (e.streaming === true || durationMs !== undefined) settled++
+    }
+    if (settled > 0) {
+      const subs = this.subscribers.get(roomId)
+      if (subs !== undefined) {
+        for (const cb of subs) cb(list.filter(e => e.type === 'bot-text' && e.runId === runId))
+      }
+    }
+    return settled
+  }
+
+  /** Whether any bot-text row for this run already carries a duration. */
+  roomHasRunDuration(roomId: BotRoomId, runId: string): boolean {
+    const list = this.byRoom.get(roomId)
+    if (list === undefined) return false
+    return list.some(e => e.type === 'bot-text' && e.runId === runId && e.durationMs !== undefined)
+  }
+
+  /**
+   * A run's tool calls, in call order, for persistence onto the settled message.
+   *
+   * The tool cards are projected FROM SESSION EVENTS, which are process-local: the
+   * ledger is in-memory and is only rebuilt from `state.messages` at startup, so without
+   * this the tool section of a turn disappeared on the next reload while the answer and
+   * the reasoning survived. `seedLedgerRoom` already knows how to rebuild those rows from
+   * `toolActivity` — nothing had ever filled it in for the native-agent path.
+   *
+   * `detail` is the tool's own output, truncated: it is a display summary, and a tool
+   * result can be hundreds of kilobytes.
+   */
+  toolActivityFromRun(
+    roomId: string,
+    runId: string,
+  ): Array<{ name: string; status: string; detail?: string }> {
+    const list = this.byRoom.get(roomId)
+    if (list === undefined) return []
+    const out: Array<{ name: string; status: string; detail?: string }> = []
+    for (const call of list) {
+      if (call.type !== 'tool-call' || call.runId !== runId) continue
+      const result = list.find(
+        (e): e is Extract<LedgerEntry, { type: 'tool-result' }> =>
+          e.type === 'tool-result' && e.runId === runId && e.callId === call.callId,
+      )
+      const detail = result?.output ?? ''
+      out.push({
+        name: call.name,
+        // No result yet means the call was still in flight when the run closed (a stop,
+        // or a failed run) — reported as such rather than silently successful.
+        status: result === undefined ? 'running' : result.ok ? 'ok' : 'error',
+        ...(detail === '' ? {} : { detail: detail.length > 1000 ? `${detail.slice(0, 1000)}…` : detail }),
+      })
+    }
+    return out
+  }
+
+  // ── deliverables waiting for their turn to settle ──────────────────────────
+
+  /**
+   * Files a bot declared during the current turn, keyed by `(room, run)`.
+   *
+   * Kept off the ledger until the turn ends: the card group renders after the reply,
+   * and the settled `BotMessage` is what rebuilds it after a restart. Held here so a
+   * second declaration in the same turn merges into one card group instead of two.
+   */
+  private readonly pendingDeliverables = new Map<string, DeliveredFile[]>()
+
+  private static deliverKey(roomId: string, runId: string): string {
+    return `${roomId}\u0000${runId}`
+  }
+
+  recordDeliverables(roomId: string, runId: string, files: readonly DeliveredFile[]): void {
+    if (files.length === 0) return
+    const key = LedgerProjector.deliverKey(roomId, runId)
+    const merged = new Map((this.pendingDeliverables.get(key) ?? []).map(f => [f.path, f] as const))
+    for (const file of files) merged.set(file.path, file)
+    this.pendingDeliverables.set(key, [...merged.values()])
+  }
+
+  /** Drop a failed run's pending deliverables (the turn never reached the user). */
+  discardDeliverables(roomId: string, runId: string): void {
+    this.pendingDeliverables.delete(LedgerProjector.deliverKey(roomId, runId))
+  }
+
+  /** Take (and clear) the deliverables recorded for one run. */
+  deliverablesFromRun(roomId: string, runId: string): DeliveredFile[] {
+    const key = LedgerProjector.deliverKey(roomId, runId)
+    const files = this.pendingDeliverables.get(key) ?? []
+    this.pendingDeliverables.delete(key)
+    return files
+  }
+
+  /**
+   * The files a run declared, read back from its published `deliverable` row.
+   *
+   * NON-DESTRUCTIVE, unlike {@link deliverablesFromRun}: by the time the room bookkeeping
+   * runs (the leader's integrate prompt, the adherence score), the executor has already
+   * taken the pending list and stamped the row the panel renders. A second "take" would
+   * return empty and the leader would be told a member delivered nothing.
+   */
+  deliverablesDeclaredInRun(roomId: string, runId: string): DeliveredFile[] {
+    const rows = this.byRoom.get(roomId) ?? []
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i]!
+      if (row.type !== 'deliverable') continue
+      if (String(row.runId) !== runId) continue
+      return [...row.files]
+    }
+    return []
+  }
+
+  /** Remove all entries for a room (called by clearMessages). */
+  clearRoom(roomId: string): void {
+    for (const key of [...this.pendingDeliverables.keys()]) {
+      if (key.startsWith(`${roomId}\u0000`)) this.pendingDeliverables.delete(key)
+    }
+    this.byRoom.delete(roomId)
+    this.pendingBatch.delete(roomId)
+    this.subscribers.delete(roomId)
+    this.noteJournal({ v: 1, op: 'clear', roomId })
+  }
+}

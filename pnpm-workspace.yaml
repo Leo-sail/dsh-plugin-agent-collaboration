@@ -1,0 +1,13 @@
+packages:
+  # Route A (see packages/bundle/agent-collaboration/cordis.patch.yml): the Community packages are
+  # the only ones this workspace builds. The legacy `agent-team` fork (core/tools/ui) was removed on
+  # 2026-10-14 — it was never mounted, `pnpm -r` never touched it, and no live package imported it.
+  - packages/*/*
+
+autoInstallPeers: false
+
+# pnpm 10+ keeps settings here rather than in .npmrc. Running a script must not trigger an install:
+# this tree's node_modules is already materialised, and `pnpm install` is blocked in this environment
+# by the registry's supply-chain policy (documented in README "Toolchain").
+verifyDepsBeforeRun: false
+
