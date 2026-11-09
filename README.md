@@ -16,9 +16,14 @@
 
 A Bot here is not a temporary subagent: it has an identity, its own model and permission preset, its own
 workspace, and its own session that survives a restart. That session is a native DSH Session, kept out of
-DSH's sidebar — the panel shows rooms, never sessions. Put several Bots in a room and they answer
-together. Every run is recorded, so a conversation can be read back later even after the session that
-produced it is gone.
+DSH's sidebar — the panel shows rooms, never sessions. Put several Bots in a room and the room behaves
+like a small team: the leader (or your explicit @mention) decides who answers, unaddressed messages can be
+triaged, work is dispatched and tracked, and shared experience accumulates across tasks. Every run is
+recorded, so a conversation can be read back later even after the session that produced it is gone.
+
+**Current release: [0.4.1](CHANGELOG.md)** — leader triage for unaddressed group messages, automatic
+group-experience condensing, group rules (`[本群规则]`), safer rehearsals, and a compaction-safe empty-reply
+fix.
 
 <p align="center"><img src="packages/bundle/agent-collaboration/screenshots/02-group-conversation.png" alt="A group room whose Bot replies are attributed to their own Bot" width="100%"></p>
 

@@ -10,9 +10,10 @@
 > A community-maintained DeepSeek Harness plugin, not an official DeepSeek product.
 
 A Bot here is not a temporary subagent: it has an identity, its own model and permission preset, its own
-workspace, and its own session that survives a restart. Put several of them in a room and they answer
-together. Every run is recorded, so a conversation can be read back later even after the session that
-produced it is gone.
+workspace, and its own session that survives a restart. Put several of them in a room and the room works
+like a small team: the leader decides who answers, unaddressed messages can be triaged, work is
+dispatched and tracked, and shared experience accumulates across tasks. Every run is recorded, so a
+conversation can be read back later even after the session that produced it is gone.
 
 ## Install
 
