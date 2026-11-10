@@ -111,8 +111,8 @@ export function LocalAgentsDialog({ open, onClose, remote }: {
     <NativeDialog
       open={open}
       onClose={onClose}
-      title="本机 Agent"
-      description="这些 agent 使用它们自己的登录、模型与规则。Bot 选择本机 Agent 后不需要 API Key，也不会注入人设提示词。"
+      title="管理自定义 CLI"
+      description="把支持 ACP 协议的 CLI 添加进来，它会出现在新建 Bot 时的「选择已安装的 CLI」下拉里。已自动检测到的 CLI 不需要在这里添加。"
     >
       <div className={css.dialogBody}>
         {snapshot === undefined ? (
