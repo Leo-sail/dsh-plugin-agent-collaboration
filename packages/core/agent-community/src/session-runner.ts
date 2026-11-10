@@ -1565,7 +1565,21 @@ export class SessionRunner {
   private async ensureAgent(roomId: string, botId: string): Promise<Agent> {
     const key = SessionRunner.key(roomId, botId)
     const live = this.agents.get(key)
-    if (live !== undefined) return live
+    if (live !== undefined) {
+      // THE CACHED AGENT STILL CARRIES THE OLD ROUTE.
+      //
+      // The fast path used to return the live agent untouched, so a Bot whose provider/model
+      // the user changed in Settings kept requesting the OLD model until the app restarted
+      // (measured 2026-11-11: gpt was switched back to gpt-6-astra, but its live agent kept
+      // asking for gpt-5.6-sol because the resume/adopt paths — the only ones that called
+      // applyBotModel — were never reached). Re-select the Bot's CURRENT route before every
+      // turn; syncAgentModelSelection is a no-op when the agent already matches.
+      const cachedBot = this.accessor.botById(botId)
+      if (cachedBot !== undefined) {
+        this.applyBotModel(roomId, botId, live, cachedBot)
+      }
+      return live
+    }
 
     const bot = this.accessor.botById(botId)
     if (bot === undefined) throw new Error(`agent-community: bot "${botId}" no longer exists`)
