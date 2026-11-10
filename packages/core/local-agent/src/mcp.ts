@@ -37,6 +37,8 @@ export interface McpCall {
 
 export class LoopbackMcp {
   readonly token = randomBytes(32).toString('hex')
+  /** Resolved after `listen()`; undefined before. */
+  url: string | undefined
   private readonly server: Server
   private readonly tools: McpToolSpec[] = []
   private readonly pending = new Map<string, (result: McpToolResult) => void>()
@@ -69,9 +71,10 @@ export class LoopbackMcp {
         const address = this.server.address()
         if (address === null || typeof address === 'string') { reject(new Error('no port')); return }
         this.port = address.port
+        this.url = `http://127.0.0.1:${address.port}/mcp`
         // A finished host run must be able to exit even while the conversation is idle.
         this.server.unref()
-        resolve(`http://127.0.0.1:${address.port}/mcp`)
+        resolve(this.url)
       }).once('error', reject)
     })
     return this.listening
