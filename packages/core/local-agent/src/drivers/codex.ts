@@ -14,6 +14,7 @@
  *
  * @module
  */
+import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import { cleanEnv } from '../discover.ts'
@@ -117,6 +118,11 @@ export class CodexDriver implements LocalAgentDriver {
         this.delegatedCalls.delete(result.callId)
         resolve({ text: result.text, isError: result.isError })
       }
+      const approval = this.pendingApprovals.get(result.callId)
+      if (approval !== undefined) {
+        this.pendingApprovals.delete(result.callId)
+        approval(approvalDecisionOf(result))
+      }
     }
     const continuing = (input.toolResults?.length ?? 0) > 0
 
@@ -152,6 +158,8 @@ export class CodexDriver implements LocalAgentDriver {
   private readonly threadPeer = new Map<string, JsonRpcPeer>()
   /** Delegated dynamic tool calls (`item/tool/call`) parked until the host answers. */
   private readonly delegatedCalls = new Map<string, (result: { text: string; isError: boolean }) => void>()
+  /** Parked CLI permission prompts, keyed by the synthetic DSH tool-call id. */
+  private readonly pendingApprovals = new Map<string, (decision: { allow: boolean }) => void>()
 
   private sessionFor(sessionId: string): SessionState {
     let session = this.sessions.get(sessionId)
@@ -373,6 +381,7 @@ export class CodexDriver implements LocalAgentDriver {
     const record = params !== null && typeof params === 'object' ? params as Record<string, unknown> : {}
     const threadId = typeof record['threadId'] === 'string' ? record['threadId'] : undefined
     const session = threadId === undefined ? undefined : this.byThread(threadId)
+
     if (method === 'item/tool/call') {
       // Codex delegates a client-declared tool's execution back to us. Park the JSON-RPC
       // response, hand the call to DSH as an ordinary tool call, and answer with the result
@@ -389,31 +398,68 @@ export class CodexDriver implements LocalAgentDriver {
       })
       return { contentItems: [{ type: 'inputText', text: result.text }], success: !result.isError }
     }
-    switch (method) {
-      case 'item/commandExecution/requestApproval':
-      case 'item/fileChange/requestApproval':
-        this.push(session, { type: 'activity', text: 'Approval requested — declined (approval bridge lands in A4)' })
-        return { decision: 'decline' }
-      case 'execCommandApproval':
-      case 'applyPatchApproval':
-        this.push(session, { type: 'activity', text: 'Approval requested — declined (approval bridge lands in A4)' })
-        return { decision: 'denied' }
-      case 'item/permissions/requestApproval':
-        return { permissions: null }
-      case 'mcpServer/elicitation/request': {
-        const meta = record['_meta']
-        const metaRecord = meta !== null && typeof meta === 'object' ? meta as Record<string, unknown> : {}
-        // Codex asks the client to authorise each MCP tool call through the elicitation
-        // channel (`codex_approval_kind: mcp_tool_call`). A3 accepts the bridged team tools
-        // here; A4 replaces this branch with the DSH approval bridge so a user can deny.
-        if (metaRecord['codex_approval_kind'] === 'mcp_tool_call') {
-          return { action: 'accept', content: {} }
+
+    // CLI permission prompts. Each becomes one DSH `approve_agent_action` call: the user
+    // decides through the ordinary approval service, and only an explicit allow proceeds.
+    const approvalAction = (): { action: string; detail: string } | undefined => {
+      switch (method) {
+        case 'mcpServer/elicitation/request': {
+          const meta = record['_meta'] !== null && typeof record['_meta'] === 'object' ? record['_meta'] as Record<string, unknown> : {}
+          if (meta['codex_approval_kind'] !== 'mcp_tool_call') return undefined
+          const message = typeof record['message'] === 'string' ? record['message'] : 'The agent asks to call an MCP tool'
+          const tool = typeof meta['tool_description'] === 'string' ? meta['tool_description'] : ''
+          const params = meta['tool_params'] !== null && typeof meta['tool_params'] === 'object' ? JSON.stringify(meta['tool_params']) : ''
+          return { action: message, detail: [tool, params].filter(Boolean).join('\n').slice(0, 4_000) }
         }
-        return { action: 'decline' }
+        case 'item/commandExecution/requestApproval':
+          return {
+            action: 'The agent asks to run a command',
+            detail: [record['command'], record['reason']].filter(part => typeof part === 'string').join('\n').slice(0, 4_000),
+          }
+        case 'item/fileChange/requestApproval':
+          return {
+            action: 'The agent asks to change files',
+            detail: [record['reason'], record['grantRoot']].filter(part => typeof part === 'string').join('\n').slice(0, 4_000),
+          }
+        case 'execCommandApproval':
+        case 'applyPatchApproval':
+          return {
+            action: method === 'execCommandApproval' ? 'The agent asks to run a command' : 'The agent asks to apply a patch',
+            detail: [record['command'], record['reason']].filter(part => typeof part === 'string').join('\n').slice(0, 4_000),
+          }
+        default:
+          return undefined
       }
-      default:
-        throw new Error(`unsupported app-server request: ${method}`)
     }
+    const approval = approvalAction()
+    if (approval !== undefined) {
+      const callId = `approval-${randomUUID()}`
+      const decision = await new Promise<{ allow: boolean }>(resolve => {
+        this.pendingApprovals.set(callId, resolve)
+        this.push(session, {
+          type: 'tool-call',
+          callId,
+          name: 'approve_agent_action',
+          arguments: { action: approval.action, ...(approval.detail === '' ? {} : { detail: approval.detail }) },
+        })
+      })
+      switch (method) {
+        case 'mcpServer/elicitation/request':
+          return decision.allow ? { action: 'accept', content: {} } : { action: 'decline' }
+        case 'item/commandExecution/requestApproval':
+        case 'item/fileChange/requestApproval':
+          return { decision: decision.allow ? 'accept' : 'decline' }
+        default:
+          return { decision: decision.allow ? 'approved' : 'denied' }
+      }
+    }
+    if (method === 'item/permissions/requestApproval') {
+      // Additional sandbox permissions are never granted through this bridge (fail closed).
+      this.push(session, { type: 'activity', text: 'The agent asked for extra sandbox permissions — denied (not bridged in v1)' })
+      return { permissions: null }
+    }
+    if (method === 'mcpServer/elicitation/request') return { action: 'decline' }
+    throw new Error(`unsupported app-server request: ${method}`)
   }
 
   private byThread(threadId: string): SessionState | undefined {
@@ -450,6 +496,17 @@ function normalizeToolName(tool: string): string {
   if (trimmed === '') return ''
   const parts = trimmed.split(/__|\./)
   return parts[parts.length - 1] ?? trimmed
+}
+
+/** Fail-closed: only a well-formed {"decision":"allow"} from the DSH tool counts. */
+function approvalDecisionOf(result: { text: string; isError: boolean }): { allow: boolean } {
+  if (result.isError) return { allow: false }
+  try {
+    const parsed = JSON.parse(result.text) as { decision?: unknown }
+    return { allow: parsed !== null && typeof parsed === 'object' && parsed.decision === 'allow' }
+  } catch {
+    return { allow: false }
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

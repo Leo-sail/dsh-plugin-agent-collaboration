@@ -23,6 +23,7 @@ import { LocalAgentAdapter } from './adapter.ts'
 import { CodexDriver } from './drivers/codex.ts'
 import type { LocalAgentDriver } from './drivers/types.ts'
 import { ENGINES, customRoute, engineOf, validateCustomAgent } from './engines.ts'
+import { approveAgentActionTool, type ApprovalPort } from './tools.ts'
 import { findExecutable, probeVersion, refreshSearchDirs } from './discover.ts'
 import { emptyState, loadState, newCustomAgentId, saveState, type PersistedLocalAgentState } from './state.ts'
 import type {
@@ -139,6 +140,9 @@ export class LocalAgentService extends TypertRemoteService {
   private driverPaths = new Map<string, string>()
   private adapter: LocalAgentAdapter | undefined
   private registration: AdapterRegistrationHandle | undefined
+  /** Host approval service, captured when present; absent means every agent approval is denied. */
+  private approvalService: ApprovalPort | undefined
+  private toolsDisposer: (() => void) | undefined
   /** Resolved when Cordis injects the host's LLM registry (absent on hosts that cannot route). */
   private llmService: { registerAdapter(providers: string[], adapter: LocalAgentAdapter): AdapterRegistrationHandle } | undefined
 
@@ -169,6 +173,16 @@ export class LocalAgentService extends TypertRemoteService {
       // No cleanup here on purpose: returning a disposer makes Cordis tear the child scope
       // down again (measured: supported flipped back to false before the first scan finished).
       // This service's own fiber disposal releases the adapter registration.
+    })
+    // Approval + tool surface: both optional, so discovery still works on a bare host.
+    ctx.inject(['approval'], (child) => {
+      const approval = (child as unknown as { approval?: ApprovalPort }).approval
+      if (approval !== undefined && typeof approval.request === 'function') this.approvalService = approval
+    })
+    ctx.inject(['tools'], (child) => {
+      const tools = (child as unknown as { tools?: { register(definition: unknown): () => void } }).tools
+      if (tools === undefined || typeof tools.register !== 'function') return
+      this.toolsDisposer = tools.register(approveAgentActionTool(() => this.approvalService))
     })
     ctx.effect(() => () => { void this.dispose() }, 'local-agent: runtime')
     // DEFERRED ON PURPOSE: a Cordis plugin's own fiber is not active while its constructor is
@@ -403,6 +417,8 @@ export class LocalAgentService extends TypertRemoteService {
   }
 
   async dispose(): Promise<void> {
+    this.toolsDisposer?.()
+    this.toolsDisposer = undefined
     this.registration?.()
     this.registration = undefined
     await this.adapter?.dispose()
