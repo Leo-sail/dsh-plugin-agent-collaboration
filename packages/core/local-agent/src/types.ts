@@ -108,4 +108,6 @@ export interface Config {
   readonly extraSearchDirs?: readonly string[]
   /** Timeout for one `--version` probe (default 10s). */
   readonly versionProbeTimeoutMs?: number
+  /** Expose the collaboration tools to local agents over loopback MCP (default true). */
+  readonly toolsBridge?: boolean
 }

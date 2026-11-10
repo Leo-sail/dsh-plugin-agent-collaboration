@@ -23,7 +23,7 @@ import {
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
-import type { LocalAgentDriver } from './drivers/types.ts'
+import type { DriverMcpTool, DriverToolResult, LocalAgentDriver } from './drivers/types.ts'
 import type { LocalAgentEngineSpec, LocalAgentSessionRecord } from './types.ts'
 
 /** Replay window when the CLI-side session is new or its id was lost. */
@@ -32,6 +32,22 @@ const REPLAY_BYTES = 24 * 1024
 const REPLAY_MESSAGE_CHARS = 2_000
 const DEFAULT_CONTEXT_WINDOW = 200_000
 const ACTIVITY_PREFIX = '▸ '
+/**
+ * DSH tools bridged to the agent over loopback MCP. Deliberately a whitelist: shell/file tools
+ * stay the agent's own (its sandbox governs them), and nothing outside the collaboration
+ * surface can be called through this bridge.
+ */
+const BRIDGED_TOOL_NAMES = new Set([
+  'message_member', 'assign_task', 'finish_task', 'agent_community_deliver',
+  'agent_community_dispatch', 'agent_community_remember', 'agent_community_recall',
+  'agent_community_goal', 'agent_community_abstain', 'agent_community_list_bots',
+  'agent_community_handoff_file', 'ask_user_question', 'propose_group', 'invite_bot', 'remove_bot',
+  'approve_agent_action', 'agent_switch_model',
+])
+
+function isBridgedTool(name: string): boolean {
+  return BRIDGED_TOOL_NAMES.has(name) || name.startsWith('agent_community_')
+}
 
 /** Everything the adapter needs from the host service. */
 export interface LocalAgentAdapterDeps {
@@ -40,6 +56,8 @@ export interface LocalAgentAdapterDeps {
   readonly recordFor: (sessionId: string) => LocalAgentSessionRecord | undefined
   readonly saveRecord: (sessionId: string, record: LocalAgentSessionRecord) => void
   readonly cwdFor: (sessionId: string) => string
+  /** Config switch: expose the collaboration tools to the agent over loopback MCP. */
+  readonly toolsBridge: boolean
 }
 
 /** One promptable message after filtering out the injected, non-conversation kinds. */
@@ -108,6 +126,20 @@ function failureChunks(code: string, message: string, signal?: AbortSignal): Str
     : [{ type: 'finish', reason: { kind: 'error', failure: { code, message } } }]
 }
 
+function bridgedToolsOf(tools: GenerateOptions['tools']): DriverMcpTool[] {
+  return (tools ?? [])
+    .filter(tool => isBridgedTool(tool.name))
+    .map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters }))
+}
+
+function lastMessageIdOf(messages: GenerateOptions['messages']): string | undefined {
+  for (let at = (messages ?? []).length - 1; at >= 0; at -= 1) {
+    const message = messages[at]
+    if (message !== undefined && 'id' in message && typeof message.id === 'string') return message.id
+  }
+  return undefined
+}
+
 /** Render the replay window for a fresh CLI session: conversation content only. */
 function renderReplay(messages: readonly PromptMessage[]): string {
   if (messages.length === 0) return ''
@@ -131,6 +163,8 @@ export class LocalAgentAdapter extends LlmAdapter {
   /** Test-visible counters: assertions about "no persona" read this instead of trusting prose. */
   readonly stats = { systemDropped: 0, turns: 0 }
   private disposed = false
+  /** Bridged calls parked by a previous stream, awaiting their DSH tool results. */
+  private readonly pendingCalls = new Set<string>()
 
   constructor(deps: LocalAgentAdapterDeps) {
     super()
@@ -186,6 +220,23 @@ export class LocalAgentAdapter extends LlmAdapter {
 
   async dispose(): Promise<void> {
     this.disposed = true
+  }
+
+  /** Results for bridged calls parked by a previous stream (consumed once). */
+  private takeToolResults(messages: GenerateOptions['messages']): DriverToolResult[] {
+    const results: DriverToolResult[] = []
+    for (const message of messages ?? []) {
+      if (message.role !== 'tool') continue
+      const callId = 'toolCallId' in message && typeof message.toolCallId === 'string' ? message.toolCallId : undefined
+      if (callId === undefined || !this.pendingCalls.has(callId)) continue
+      this.pendingCalls.delete(callId)
+      results.push({
+        callId,
+        text: textOf(message.content) || ('isError' in message && message.isError === true ? 'the call failed' : ''),
+        isError: 'isError' in message && message.isError === true,
+      })
+    }
+    return results
   }
 
   /** Build prompt text from the request, dropping every injected, non-conversation kind. */
@@ -268,6 +319,10 @@ export class LocalAgentAdapter extends LlmAdapter {
     if (built.systemDropped) this.stats.systemDropped += 1
     this.stats.turns += 1
 
+    const toolResults = this.takeToolResults(options.messages)
+    const bridgedTools = this.deps.toolsBridge ? bridgedToolsOf(options.tools) : []
+    const lastMessageId = lastMessageIdOf(options.messages)
+
     let nextIndex = 0
     let textIndex = -1
     let textBuf = ''
@@ -297,12 +352,41 @@ export class LocalAgentAdapter extends LlmAdapter {
         cwd: this.deps.cwdFor(sessionId),
         model: options.model,
         resumeId: record?.resumeId,
+        ...(bridgedTools.length === 0 ? {} : { mcp: { tools: bridgedTools } }),
+        ...(toolResults.length === 0 ? {} : { toolResults }),
         signal: options.signal,
       })) {
         switch (event.type) {
           case 'thread': threadId = event.threadId; break
           case 'usage': usage = event.usage; break
           case 'done': sawDone = true; break
+          case 'tool-call': {
+            // The agent called a bridged team tool. Stop this LLM stream with `tool-calls`;
+            // DSH executes the tool (approvals included) and re-enters with the result.
+            yield* closeText()
+            yield* closeThinking()
+            const index = nextIndex++
+            this.pendingCalls.add(event.callId)
+            yield { type: 'block-start', index, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index, id: event.callId as never, name: event.name, argumentsDelta: JSON.stringify(event.arguments) }
+            yield {
+              type: 'block-end',
+              index,
+              block: { type: 'tool-call', id: event.callId as never, name: event.name, arguments: JSON.stringify(event.arguments) },
+            }
+            if (threadId !== undefined || lastMessageId !== undefined) {
+              this.deps.saveRecord(sessionId, {
+                route,
+                ...(threadId === undefined ? {} : { resumeId: threadId }),
+                cwd: this.deps.cwdFor(sessionId),
+                ...(lastMessageId === undefined ? {} : { handedId: lastMessageId }),
+                model: options.model,
+                updatedAt: new Date().toISOString(),
+              })
+            }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }
+            return
+          }
           case 'error': throw event.error
           case 'permission': {
             yield* closeText()
@@ -359,7 +443,7 @@ export class LocalAgentAdapter extends LlmAdapter {
         route,
         ...(threadId === undefined ? {} : { resumeId: threadId }),
         cwd: this.deps.cwdFor(sessionId),
-        ...(built.lastMessageId === undefined ? {} : { handedId: built.lastMessageId }),
+        ...(lastMessageId === undefined ? {} : { handedId: lastMessageId }),
         model: options.model,
         updatedAt: new Date().toISOString(),
       }

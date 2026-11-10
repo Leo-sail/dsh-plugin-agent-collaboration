@@ -46,6 +46,7 @@ export const Config: z<LocalAgentConfig> = z.object({
   homeDir: z.string().required(false),
   extraSearchDirs: z.array(z.string()).default([]),
   versionProbeTimeoutMs: z.number().step(1).min(1000).default(10_000),
+  toolsBridge: z.boolean().default(true),
 })
 
 /** The methods the browser may call through the Remote gateway. */
@@ -124,6 +125,7 @@ export class LocalAgentService extends TypertRemoteService {
     readonly enabled: boolean
     readonly extraSearchDirs: readonly string[]
     readonly versionProbeTimeoutMs: number
+    readonly toolsBridge: boolean
   }
   private readonly home: string
   private readonly statePath: string
@@ -133,6 +135,8 @@ export class LocalAgentService extends TypertRemoteService {
   private writeQueue: Promise<void> = Promise.resolve()
   /** Driver per registered route (currently Codex only; ACP/Claude add entries later). */
   private drivers = new Map<string, LocalAgentDriver>()
+  /** Executable each driver was created for, so a rescan can tell "unchanged" from "moved". */
+  private driverPaths = new Map<string, string>()
   private adapter: LocalAgentAdapter | undefined
   private registration: AdapterRegistrationHandle | undefined
   /** Resolved when Cordis injects the host's LLM registry (absent on hosts that cannot route). */
@@ -144,6 +148,7 @@ export class LocalAgentService extends TypertRemoteService {
       enabled: config.enabled ?? true,
       extraSearchDirs: config.extraSearchDirs ?? [],
       versionProbeTimeoutMs: config.versionProbeTimeoutMs ?? 10_000,
+      toolsBridge: config.toolsBridge !== false,
     }
     this.home = resolveLocalAgentHome(config.homeDir)
     this.statePath = join(this.home, 'local-agent', 'state.json')
@@ -311,10 +316,19 @@ export class LocalAgentService extends TypertRemoteService {
     return this.snapshot()
   }
 
-  /** Build the route→driver table for everything discovery found and A2 can drive. */
+  /**
+   * Build the route→driver table for everything discovery found, then register or refresh the
+   * adapter's routes.
+   *
+   * IDEMPOTENCE IS LOAD-BEARING. This runs twice at boot (LLM injection, then the deferred
+   * scan) and on every settings refresh. Rebuilding the drivers unconditionally replaced the
+   * live Codex process mid-turn: the continuation stream then saw a driver with no session,
+   * started a SECOND thread/MCP server, and the parked tool call was never resolved
+   * (measured 2026-11-10). Drivers are therefore reused unless the executable moved.
+   */
   private rebuildRoutes(): void {
     if (!this.cfg.enabled || !this.supported()) return
-    const next = new Map<string, LocalAgentDriver>()
+    const wanted = new Map<string, { executable: string; name: string; args: readonly string[] }>()
     for (const entry of this.detected) {
       if (!entry.available || entry.path === undefined) continue
       const spec = engineOf(entry.route, this.state.custom)
@@ -322,32 +336,52 @@ export class LocalAgentService extends TypertRemoteService {
       // A2 drives Codex natively; ACP drivers land in A2b, Claude in A6. Registering a route
       // without a driver would put an unusable model in the Bot picker.
       if (spec.kind === 'codex') {
-        next.set(entry.route, new CodexDriver({ route: entry.route, name: spec.name, executable: entry.path }))
+        wanted.set(entry.route, { executable: entry.path, name: spec.name, args: spec.args })
       }
+    }
+
+    const unchanged = wanted.size === this.drivers.size
+      && [...wanted].every(([route, spec]) => this.driverPaths.get(route) === spec.executable)
+    if (unchanged) {
+      // Boot called us once before the async scan finished (routes empty then); if the scan
+      // now found routes, the first registration never happened.
+      this.ensureRegistration([...this.drivers.keys()])
+      return
+    }
+
+    const next = new Map<string, LocalAgentDriver>()
+    for (const [route, spec] of wanted) {
+      const existing = this.drivers.get(route)
+      if (existing !== undefined && this.driverPaths.get(route) === spec.executable) {
+        next.set(route, existing)
+        continue
+      }
+      if (existing !== undefined) void existing.dispose()
+      next.set(route, new CodexDriver({ route, name: spec.name, executable: spec.executable, args: spec.args }))
     }
     for (const [route, driver] of this.drivers) {
       if (!next.has(route)) void driver.dispose()
     }
     this.drivers = next
-    const routes = [...next.keys()]
+    this.driverPaths = new Map([...wanted].map(([route, spec]) => [route, spec.executable]))
+    this.ensureRegistration([...next.keys()])
+    this.ctx.logger?.info?.(`[local-agent] routes registered: ${[...next.keys()].join(', ') || '(none)'}`)
+  }
+
+  /** Register the adapter once; afterwards only replace its route list. */
+  private ensureRegistration(routes: string[]): void {
     const llm = this.llm()
     if (llm === undefined) {
       this.ctx.logger?.warn?.('[local-agent] this host cannot register model routes; discovery only')
       return
     }
-    try {
     if (this.registration === undefined) {
       if (routes.length === 0) return
       this.adapter = new LocalAgentAdapter(this.adapterDeps())
       this.registration = llm.registerAdapter(routes, this.adapter)
-    } else {
-      this.registration.replace(routes)
-    }
-    } catch (error) {
-      this.ctx.logger?.warn?.(`[local-agent] route registration failed: ${String(error)}`)
       return
     }
-    this.ctx.logger?.info?.(`[local-agent] routes registered: ${routes.length === 0 ? '(none)' : routes.join(', ')}`)
+    this.registration.replace(routes)
   }
 
   private adapterDeps(): ConstructorParameters<typeof LocalAgentAdapter>[0] {
@@ -362,8 +396,9 @@ export class LocalAgentService extends TypertRemoteService {
         }
         void this.persist()
       },
-      // A6 resolves the Bot/session workspace; A2 runs from the host's working directory.
+      // A6 resolves the Bot/session workspace; A2/A3 run from the host's working directory.
       cwdFor: () => process.cwd(),
+      toolsBridge: this.cfg.toolsBridge,
     }
   }
 

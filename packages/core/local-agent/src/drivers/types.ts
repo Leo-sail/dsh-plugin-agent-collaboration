@@ -2,8 +2,8 @@
  * The small, stable driver interface every engine family implements.
  *
  * The point of this boundary is to keep protocol churn out of the adapter: ACP's SDK major
- * versions, Codex's JSONL shape and Claude's stream-json are all this interface's problem,
- * while `adapter.ts` only sees normalized events.
+ * versions, Codex's app-server notifications and Claude's stream-json are all this interface's
+ * problem, while `adapter.ts` only sees normalized events.
  *
  * @module
  */
@@ -13,6 +13,20 @@ import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 export interface DriverModel {
   readonly id: string
   readonly name: string
+}
+
+/** One bridged DSH tool, in the shape an MCP `tools/list` returns. */
+export interface DriverMcpTool {
+  readonly name: string
+  readonly description: string
+  readonly parameters: Record<string, unknown>
+}
+
+/** A resolved DSH tool call handed back to the waiting agent. */
+export interface DriverToolResult {
+  readonly callId: string
+  readonly text: string
+  readonly isError: boolean
 }
 
 /** What one turn needs from the driver. */
@@ -27,6 +41,10 @@ export interface DriverStreamInput {
   readonly model?: string | undefined
   /** CLI-side session/thread to resume, when a previous turn established one. */
   readonly resumeId?: string | undefined
+  /** Tools to expose over loopback MCP for this turn (empty/absent disables the bridge). */
+  readonly mcp?: { readonly tools: readonly DriverMcpTool[] } | undefined
+  /** Results for bridged calls the previous stream parked; this continues the same turn. */
+  readonly toolResults?: readonly DriverToolResult[] | undefined
   readonly signal?: AbortSignal | undefined
 }
 
@@ -37,10 +55,17 @@ export type AgentEvent =
   | { readonly type: 'thought'; readonly text: string }
   | { readonly type: 'activity'; readonly text: string }
   | { readonly type: 'usage'; readonly usage: TokenUsage }
+  /** The agent invoked a bridged DSH tool; the stream stops here until the host resolves it. */
+  | {
+    readonly type: 'tool-call'
+    readonly callId: string
+    readonly name: string
+    readonly arguments: Record<string, unknown>
+  }
   | { readonly type: 'done'; readonly reason?: string }
   | { readonly type: 'error'; readonly error: Error }
   /**
-   * A permission prompt (ACP/Claude). A2 has no approval bridge yet; the adapter renders it
+   * A permission prompt (ACP/Claude). A3 has no approval bridge yet; the adapter renders it
    * as an activity line so the turn never hangs waiting for a UI that is not mounted.
    */
   | { readonly type: 'permission'; readonly action: string; readonly detail?: string | undefined }
