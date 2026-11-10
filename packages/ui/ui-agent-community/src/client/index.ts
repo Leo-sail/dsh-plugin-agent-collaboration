@@ -24,7 +24,6 @@ import type {
   CommunityRemote, CommunityPageProps, CommunityDiagnostics, ModelCatalog, ModelCatalogFailure, ModelGroup,
 } from './CommunityPage.tsx'
 import { CommunityPage } from './CommunityPage.tsx'
-import { LocalAgentsPage } from './community/LocalAgentsPage.tsx'
 import { installNavBadge } from './navBadge.ts'
 // The native-conversation surface is deliberately NOT embedded: the plugin draws its own
 // transcript and composer from its own ledger. The two components that used to do that
@@ -290,16 +289,6 @@ function CommunityPagePanel() {
 // label — and once the entry got a real name ("Bots团队") that lookup silently stopped
 // matching, taking the unread count with it. The icon is the one node this plugin owns
 // inside that button, so the marker lives here and `navBadge` walks up to the button.
-function LocalAgentPanelIcon({ size, active }: { size: number; active: boolean }) {
-  return createElement(
-    'svg',
-    { width: size, height: size, viewBox: '0 0 20 20', fill: 'none', 'aria-hidden': true, 'data-local-agent-panel': 'local-agent' },
-    createElement('rect', { x: 2.5, y: 3.5, width: 15, height: 5, rx: 2, stroke: 'currentColor', strokeWidth: 1.4, opacity: active ? 1 : 0.85 }),
-    createElement('rect', { x: 2.5, y: 11.5, width: 15, height: 5, rx: 2, stroke: 'currentColor', strokeWidth: 1.4, opacity: active ? 1 : 0.85 }),
-    createElement('circle', { cx: 6, cy: 6, r: 1, fill: 'currentColor' }),
-    createElement('circle', { cx: 6, cy: 14, r: 1, fill: 'currentColor' }),
-  )
-}
 
 function CommunityPanelIcon({ size, active }: { size: number; active: boolean }) {
 
@@ -718,13 +707,6 @@ export function apply(ctx: ClientContext): void {
 
   // Self-contained panel: the entry declares no child slot, so it consumes no
   // renderSlot. remote and diagnostics arrive through React Context below.
-  function LocalAgentsPanelWithRemote(_props: Record<string, unknown>) {
-    // This main slot is NOT rendered inside CommunityPage's RemoteContext.Provider, so it
-    // takes the remote face from this apply() scope directly instead of useContext — the
-    // first version showed "初始化中…" forever in the real browser (measured 2026-11-10).
-    return createElement(LocalAgentsPage, { remote })
-  }
-
   function CommunityPageWithRemote(_props: Record<string, unknown>) {
     const slotProps: CommunityPageProps = { remote, diagnostics }
     return createElement(
@@ -815,23 +797,6 @@ export function apply(ctx: ClientContext): void {
       name: 'main',
       key: PANEL_ID,
     }, CommunityPageWithRemote),
-  ))
-
-  // ── A6: 本机 Agent panel (discovery + custom ACP agents) ─────────────────────
-  registerSlot('sidebar.panellist', () => ctx.slots.inject('sidebar.panellist', () =>
-    ctx.slots.register(
-      {
-        name: 'sidebar.panellist',
-        id: 'local-agent',
-        order: 23,
-        locale: NS,
-        label: () => t('localAgentPanel'),
-      },
-      LocalAgentPanelIcon,
-    ),
-  ))
-  registerSlot('main', () => ctx.slots.inject('main', () =>
-    ctx.slots.register({ name: 'main', key: 'local-agent' }, LocalAgentsPanelWithRemote),
   ))
 
   // NOTE: 'agent-community.conversation' and 'conversation.view' are deliberately

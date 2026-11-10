@@ -14,6 +14,7 @@ import { useRoomActions } from './community/useRoomActions.ts'
 import { ConversationArea } from './community/ConversationArea.tsx'
 import { RoomList } from './community/RoomList.tsx'
 import { BotFormDialog } from './community/BotFormDialog.tsx'
+import { LocalAgentsDialog } from './community/LocalAgentsDialog.tsx'
 import { ConfirmDeleteDialog } from './community/ConfirmDeleteDialog.tsx'
 import { RoomSettingsDialog } from './community/RoomSettingsDialog.tsx'
 import { css } from './styles.ts'
@@ -35,6 +36,7 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
   const [tab, setTab] = useState<ActiveTab>('bots')
   // A6b: providers served by a local agent CLI (badge; the Bot form hides persona for them).
   const [localRoutes, setLocalRoutes] = useState<ReadonlySet<string>>(new Set())
+  const [localAgentsOpen, setLocalAgentsOpen] = useState(false)
   useEffect(() => {
     let cancelled = false
     void remote.localAgentSnapshot().then(
@@ -551,6 +553,7 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
         <RoomList
           tab={tab}
           localRoutes={localRoutes}
+          onOpenLocalAgentSettings={() => setLocalAgentsOpen(true)}
           // `noteUserSelection()` BEFORE each pick: a snapshot fetch that started earlier
           // must lose to this click when it lands, which is the whole point of the timestamp.
           onSelectTab={(next) => { noteUserSelection(); setTab(next); setSelectedId(undefined) }}
@@ -623,6 +626,9 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
           onSaved={() => { closeForm(); void load() }}
         />
       )}
+
+      {/* A6: 本机 Agent settings, opened from the Bots section header — no separate sidebar panel. */}
+      <LocalAgentsDialog open={localAgentsOpen} onClose={() => setLocalAgentsOpen(false)} remote={remote} />
 
       {/* Room settings dialog */}
       {roomSettingsOpen && editingRoom !== undefined && (

@@ -84,12 +84,14 @@ export interface RoomListProps {
   onOpenRoomSettings: (room: BotRoom) => void
   onDeleteBot: (bot: BotIdentity) => void
   onDeleteRoom: (room: BotRoom) => void
+  /** A6: opens the 本机 Agent settings dialog from the Bots section header. */
+  onOpenLocalAgentSettings: () => void
 }
 
 export function RoomList({
   tab, onSelectTab, bots, rooms, selectedId, unread, attention,
   directTabUnread, groupTabUnread, localRoutes,
-  onSelectRoom, onCreate, onEditBot, onOpenRoomSettings, onDeleteBot, onDeleteRoom,
+  onSelectRoom, onCreate, onEditBot, onOpenRoomSettings, onDeleteBot, onDeleteRoom, onOpenLocalAgentSettings,
 }: RoomListProps) {
   const isBotMode = tab === 'bots'
 
@@ -108,6 +110,9 @@ export function RoomList({
         <div className={css.sectionHeading}>
           <h3 className={css.sectionTitle}>{isBotMode ? 'Bots' : '群聊'}</h3>
           <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            {isBotMode && (
+              <button className={css.addButton} onClick={onOpenLocalAgentSettings} title="本机 Agent 设置">⚙</button>
+            )}
             <button className={css.addButton} onClick={onCreate} title={isBotMode ? '新建 Bot' : '新建群聊'}>＋</button>
           </div>
         </div>

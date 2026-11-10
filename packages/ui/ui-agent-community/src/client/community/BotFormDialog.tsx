@@ -79,6 +79,10 @@ export function BotFormDialog({
    * system prompt to a local agent (decision D5), and showing the field would promise otherwise.
    */
   const [localRoutes, setLocalRoutes] = useState<ReadonlySet<string>>(new Set())
+  /** A6: 云模型 (API provider) vs 本机 Agent — the product's Bot mode switch. */
+  const [botMode, setBotMode] = useState<'cloud' | 'local'>('cloud')
+  /** Once the user flips the switch, stop auto-aligning it with the selected provider. */
+  const modeTouched = useRef(false)
   /**
    * Which tab of the bot dialog is showing. Identity first: that is what a new bot needs,
    * and the model route is prefilled from the deployment defaults.
@@ -192,7 +196,12 @@ export function BotFormDialog({
   useEffect(() => {
     let cancelled = false
     void remote.localAgentSnapshot().then(
-      snapshot => { if (!cancelled) setLocalRoutes(new Set(snapshot.registeredRoutes)) },
+      snapshot => {
+        if (cancelled) return
+        const routes = new Set(snapshot.registeredRoutes)
+        setLocalRoutes(routes)
+        void routes
+      },
       () => undefined,
     )
     return () => { cancelled = true }
@@ -204,6 +213,15 @@ export function BotFormDialog({
       setBotWorkspace(defaultWorkspace)
     }
   }, [isBotMode, editingBot, botWorkspace, defaultWorkspace])
+
+  // A6: keep the Bot mode switch aligned with the selected provider until the user flips it
+  // by hand (a prefilled local route must open the form in 本机 Agent mode).
+  useEffect(() => {
+    if (modeTouched.current) return
+    const route = editingBot?.provider ?? botProvider
+    if (route === '') return
+    setBotMode(localRoutes.has(route) ? 'local' : 'cloud')
+  }, [botProvider, editingBot, localRoutes])
 
   async function handlePickWorkspace() {
     try {
@@ -336,6 +354,27 @@ export function BotFormDialog({
   /** A6: this Bot's route is served by a local agent, not by an API provider. */
   const isLocalRoute = localRoutes.has(botProvider.trim())
 
+  /** Which providers the current mode offers. Cloud hides local routes and vice versa. */
+  const selectableGroups = modelGroups.filter(group => (botMode === 'local') === localRoutes.has(group.id))
+
+  /** Switching mode re-picks a provider/model from that mode's pool. */
+  const handleSelectMode = (mode: 'cloud' | 'local') => {
+    modeTouched.current = true
+    setBotMode(mode)
+    const pool = mode === 'local'
+      ? modelGroups.filter(group => localRoutes.has(group.id))
+      : modelGroups.filter(group => !localRoutes.has(group.id))
+    const preferred = pool.find(group => group.id === botProvider) ?? pool[0]
+    if (preferred === undefined) {
+      if (mode === 'local') { setBotProvider(''); setBotModel('') }
+      return
+    }
+    setBotProvider(preferred.id)
+    const first = preferred.models[0]
+    setBotModel(first?.id ?? '')
+    setBotEffort(prev => alignEffort(preferred.id, first?.id ?? '', prev))
+  }
+
   return (
     <NativeDialog
       open
@@ -455,10 +494,28 @@ export function BotFormDialog({
                   content: (
                     <div className={css.form}>
                       <div className={css.field}>
+                        <span className={css.fieldLabel}>Bot 模式</span>
+                        <NativeSegmentedControl
+                          id="ac-bot-mode"
+                          label="Bot 模式"
+                          value={botMode}
+                          onChange={(next: string) => handleSelectMode(next === 'local' ? 'local' : 'cloud')}
+                          options={[
+                            { value: 'cloud', label: '云模型' },
+                            { value: 'local', label: '本机 Agent' },
+                          ]}
+                        />
+                        <span className={css.fieldHint}>
+                          {botMode === 'local'
+                            ? '使用本机已安装的 agent（Claude Code、Codex 等）自己的登录与模型；不注入人设提示词。'
+                            : '使用 DSH 设置里的模型提供方与 API 凭据。'}
+                        </span>
+                      </div>
+                      <div className={css.field}>
                         <span className={css.fieldLabel}>Provider</span>
                         <span className={css.rowControl}><select className={css.select} value={botProvider} onChange={e => handleSelectProvider(e.target.value)} disabled={modelsLoading || modelGroups.length === 0}>
                           {modelGroups.length === 0 && <option value="">{modelsLoading ? '加载中…' : '没有已配置的 Provider'}</option>}
-                          {modelGroups.map(group => (
+                          {selectableGroups.map(group => (
                             <option key={group.id} value={group.id}>{providerLabelOf(group)}</option>
                           ))}
                           {botProvider !== '' && !modelGroups.some(g => g.id === botProvider) && (
