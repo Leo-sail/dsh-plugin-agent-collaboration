@@ -108,6 +108,15 @@ export class AcpDriver implements LocalAgentDriver {
     session.currentModel = model
   }
 
+  /** Forget this conversation's ACP session so the next turn opens a fresh one. */
+  resetSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId)
+    if (session === undefined) return
+    this.peer?.notify('session/cancel', { sessionId: session.acpSessionId })
+    session.mcp.close()
+    this.sessions.delete(sessionId)
+  }
+
   async dispose(): Promise<void> {
     this.disposed = true
     for (const session of this.sessions.values()) {

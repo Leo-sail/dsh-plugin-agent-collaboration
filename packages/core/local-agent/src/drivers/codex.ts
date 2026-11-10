@@ -91,6 +91,14 @@ export class CodexDriver implements LocalAgentDriver {
     return this.modelsCache
   }
 
+  /** Forget this conversation's thread (the app-server keeps the old thread; we stop using it). */
+  resetSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId)
+    if (session === undefined) return
+    session.mcp.close()
+    this.sessions.delete(sessionId)
+  }
+
   async dispose(): Promise<void> {
     this.disposed = true
     for (const session of this.sessions.values()) session.mcp.close()

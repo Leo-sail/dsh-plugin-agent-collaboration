@@ -60,6 +60,15 @@ export class ClaudeDriver implements LocalAgentDriver {
     return [{ id: 'default', name: 'agent default' }]
   }
 
+  /** Forget this conversation's CLI process/`--resume` id. */
+  resetSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId)
+    if (session === undefined) return
+    session.mcp.close()
+    try { session.child?.kill('SIGTERM') } catch { /* gone */ }
+    this.sessions.delete(sessionId)
+  }
+
   async dispose(): Promise<void> {
     this.disposed = true
     for (const session of this.sessions.values()) {

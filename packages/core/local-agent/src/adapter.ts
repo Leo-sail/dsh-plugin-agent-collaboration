@@ -317,7 +317,27 @@ export class LocalAgentAdapter extends LlmAdapter {
 
     const sessionId = String(options.sessionId)
     const record = this.deps.recordFor(sessionId)
-    const built = this.buildPrompt(options, record)
+    // ── A MODEL CHANGE MUST START A NEW CLI CONVERSATION ─────────────────────────
+    //
+    // The CLI thread/session was created under the OLD model. Switching the Bot's model in
+    // Settings and reusing that thread made Codex accept the turn and then never produce an
+    // item (measured 2026-11-10: gpt switched to gpt-6-astra, every following turn ended
+    // "no progress after 120s" or an empty reply). Retiring the mapping makes the driver start
+    // a fresh thread with the new model, and the replay below re-seeds it with the visible
+    // conversation, so nothing the user said is lost.
+    const requestedModel = record?.modelOverride ?? options.model
+    const explicitModel = (value: unknown): value is string => typeof value === 'string' && value !== '' && value !== 'default'
+    // A provider switch changes the route too; that conversation also cannot be resumed.
+    const modelChanged = record !== undefined
+      && (record.route !== route || (explicitModel(requestedModel) && record.model !== requestedModel))
+    let effectiveRecord = record
+    if (modelChanged) {
+      effectiveRecord = { ...record, resumeId: undefined, handedId: undefined }
+      try {
+        await driver.resetSession?.(sessionId)
+      } catch { /* the next turn still starts a fresh mapping when possible */ }
+    }
+    const built = this.buildPrompt(options, effectiveRecord)
     if (built.systemDropped) this.stats.systemDropped += 1
     this.stats.turns += 1
 
@@ -356,9 +376,9 @@ export class LocalAgentAdapter extends LlmAdapter {
         sessionId,
         prompt: built.prompt,
         cwd: this.deps.cwdFor(sessionId),
-        model: record?.modelOverride ?? options.model,
+        model: effectiveRecord?.modelOverride ?? options.model,
         permission: this.deps.permissionFor(sessionId),
-        resumeId: record?.resumeId,
+        resumeId: modelChanged ? undefined : effectiveRecord?.resumeId,
         ...(bridgedTools.length === 0 ? {} : { mcp: { tools: bridgedTools } }),
         ...(toolResults.length === 0 ? {} : { toolResults }),
         signal: options.signal,

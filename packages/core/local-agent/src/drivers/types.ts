@@ -77,5 +77,7 @@ export interface LocalAgentDriver {
   readonly route: string
   stream(input: DriverStreamInput): AsyncIterable<AgentEvent>
   listModels(): Promise<readonly DriverModel[]>
+  /** Drop this conversation's CLI-side state so the next turn starts a fresh thread. */
+  resetSession?(sessionId: string): void | Promise<void>
   dispose(): Promise<void>
 }
