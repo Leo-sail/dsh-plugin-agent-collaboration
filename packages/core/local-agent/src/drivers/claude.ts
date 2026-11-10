@@ -224,7 +224,11 @@ export class ClaudeDriver implements LocalAgentDriver {
       const usage = usageOf(message['usage'])
       if (usage !== undefined) this.push(session, { type: 'usage', usage })
       if (message['is_error'] === true) {
-        const text = typeof message['result'] === 'string' ? message['result'] : 'claude reported an error'
+        const text = typeof message['result'] === 'string' && message['result'] !== '' ? message['result'] : 'claude reported an error'
+        // Surface the CLI's own reason in the transcript before failing the turn. Without it a
+        // not-logged-in run settles as an empty turn and the room only shows a generic
+        // "模型输出为空" diagnosis (measured 2026-11-10); the actual cause is right here.
+        this.push(session, { type: 'activity', text: `Claude Code: ${text}` })
         this.push(session, { type: 'error', error: new Error(text) })
         return
       }

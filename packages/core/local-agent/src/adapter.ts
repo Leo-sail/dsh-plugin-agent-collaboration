@@ -394,7 +394,12 @@ export class LocalAgentAdapter extends LlmAdapter {
             yield { type: 'finish', reason: { kind: 'tool-calls' } }
             return
           }
-          case 'error': throw event.error
+          case 'error':
+            // Yield a proper failure finish instead of throwing mid-stream: a throw can be seen
+            // as an empty completion (the room then shows "模型输出为空" and loses the CLI's
+            // reason). LOCAL_AGENT_FAILED keeps the cause visible in the turn error.
+            yield* failureChunks('LOCAL_AGENT_FAILED', event.error.message)
+            return
           case 'permission': {
             yield* closeText()
             if (thinkIndex < 0) { thinkIndex = nextIndex++; yield { type: 'block-start', index: thinkIndex, blockType: 'reasoning' } }

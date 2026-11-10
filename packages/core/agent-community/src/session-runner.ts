@@ -1472,7 +1472,7 @@ export class SessionRunner {
    */
   private providerFailure(session: SessionView): string | undefined {
     const withEvents = session as unknown as {
-      ownEvents?(): readonly { type?: string; data?: { reason?: { kind?: string; error?: { message?: string } } } }[]
+      ownEvents?(): readonly { type?: string; data?: { reason?: { kind?: string; error?: { message?: string; code?: string } } } }[]
     }
     const events = withEvents.ownEvents?.()
     if (events === undefined) return undefined
@@ -1482,9 +1482,16 @@ export class SessionRunner {
       const reason = event.data?.reason
       if (reason?.kind !== 'error') return undefined
       const message = reason.error?.message ?? ''
+      const code = reason.error?.code
+      // Local-agent drivers report their CLI's own failures with stable codes
+      // (LOCAL_AGENT_FAILED / NO_ADAPTER / INVALID_REQUEST). Those are provider-side
+      // failures even when the CLI wording matches no HTTP/transport pattern — e.g. Claude
+      // Code's "Not logged in · Please run /login" used to settle as an empty reply.
+      const localAgentFailure = typeof code === 'string'
+        && (code.startsWith('LOCAL_AGENT_') || code === 'NO_ADAPTER' || code === 'INVALID_REQUEST')
       // A provider/transport/config rejection, not an internal "the model chose not to speak".
-      const looksLikeRequestFailure = looksLikeProviderRejection(message)
-      return looksLikeRequestFailure ? message : undefined
+      const looksLikeRequestFailure = localAgentFailure || looksLikeProviderRejection(message)
+      return looksLikeRequestFailure ? (message !== '' ? message : `provider failed (${String(code)})`) : undefined
     }
     return undefined
   }
