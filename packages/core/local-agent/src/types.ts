@@ -56,6 +56,19 @@ export interface LocalAgentRouteView {
   readonly signInHint?: string
 }
 
+/** One DSH Session's mapping to a CLI-side conversation. */
+export interface LocalAgentSessionRecord {
+  readonly route: string
+  /** CLI session/thread id to resume; absent until the first turn established one. */
+  readonly resumeId?: string | undefined
+  readonly cwd?: string | undefined
+  /** Last DSH message id handed to the CLI (the delta cursor). */
+  readonly handedId?: string | undefined
+  /** Model asked for; `default` means the CLI's configured model. */
+  readonly model?: string | undefined
+  readonly updatedAt: string
+}
+
 /** What the settings page reads. Detached JSON. */
 export interface LocalAgentSnapshot {
   readonly enabled: boolean
@@ -67,6 +80,8 @@ export interface LocalAgentSnapshot {
   readonly scannedAt: string
   readonly detected: readonly LocalAgentRouteView[]
   readonly custom: readonly CustomAgent[]
+  /** Routes this host actually registered as model providers (driver-backed). */
+  readonly registeredRoutes: readonly string[]
 }
 
 export interface AddCustomAgentInput {

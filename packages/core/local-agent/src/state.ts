@@ -9,17 +9,28 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { CustomAgent } from './types.ts'
+import type { CustomAgent, LocalAgentSessionRecord } from './types.ts'
 
 export const STATE_VERSION = 1 as const
 
 export interface PersistedLocalAgentState {
   readonly version: typeof STATE_VERSION
   readonly custom: readonly CustomAgent[]
+  /**
+   * DSH Session → CLI conversation map. Additive on the same file: an older build ignores it
+   * and the next turn simply replays (worse, never wrong).
+   */
+  readonly sessions: Readonly<Record<string, LocalAgentSessionRecord>>
 }
 
 export function emptyState(): PersistedLocalAgentState {
-  return { version: STATE_VERSION, custom: [] }
+  return { version: STATE_VERSION, custom: [], sessions: {} }
+}
+
+function isSessionRecord(value: unknown): value is LocalAgentSessionRecord {
+  if (value === null || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record['route'] === 'string' && typeof record['updatedAt'] === 'string'
 }
 
 function isCustomAgent(value: unknown): value is CustomAgent {
@@ -35,8 +46,14 @@ function isCustomAgent(value: unknown): value is CustomAgent {
 /** Parse a state file tolerantly; undefined means "unreadable, start empty". */
 export function parseState(raw: string): PersistedLocalAgentState | undefined {
   try {
-    const parsed = JSON.parse(raw) as { version?: unknown; custom?: unknown }
+    const parsed = JSON.parse(raw) as { version?: unknown; custom?: unknown; sessions?: unknown }
     if (parsed.version !== STATE_VERSION || !Array.isArray(parsed.custom)) return undefined
+    const sessions: Record<string, LocalAgentSessionRecord> = {}
+    if (parsed.sessions !== null && typeof parsed.sessions === 'object') {
+      for (const [sessionId, value] of Object.entries(parsed.sessions as Record<string, unknown>)) {
+        if (isSessionRecord(value)) sessions[sessionId] = value
+      }
+    }
     return {
       version: STATE_VERSION,
       custom: parsed.custom.filter(isCustomAgent).map(agent => ({
@@ -45,6 +62,7 @@ export function parseState(raw: string): PersistedLocalAgentState | undefined {
         command: agent.command,
         args: [...agent.args],
       })),
+      sessions,
     }
   } catch {
     return undefined

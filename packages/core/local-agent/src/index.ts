@@ -18,6 +18,10 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import z from '@deepseek-ai/schemastery'
+import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
+import { LocalAgentAdapter } from './adapter.ts'
+import { CodexDriver } from './drivers/codex.ts'
+import type { LocalAgentDriver } from './drivers/types.ts'
 import { ENGINES, customRoute, engineOf, validateCustomAgent } from './engines.ts'
 import { findExecutable, probeVersion, refreshSearchDirs } from './discover.ts'
 import { emptyState, loadState, newCustomAgentId, saveState, type PersistedLocalAgentState } from './state.ts'
@@ -28,6 +32,7 @@ import type {
   LocalAgentKind,
   LocalAgentRouteView,
   LocalAgentSnapshot,
+  LocalAgentSessionRecord,
   RemoveCustomAgentInput,
   UpdateCustomAgentInput,
 } from './types.ts'
@@ -126,6 +131,12 @@ export class LocalAgentService extends TypertRemoteService {
   private detected: LocalAgentRouteView[] = []
   private scannedAt = ''
   private writeQueue: Promise<void> = Promise.resolve()
+  /** Driver per registered route (currently Codex only; ACP/Claude add entries later). */
+  private drivers = new Map<string, LocalAgentDriver>()
+  private adapter: LocalAgentAdapter | undefined
+  private registration: AdapterRegistrationHandle | undefined
+  /** Resolved when Cordis injects the host's LLM registry (absent on hosts that cannot route). */
+  private llmService: { registerAdapter(providers: string[], adapter: LocalAgentAdapter): AdapterRegistrationHandle } | undefined
 
   constructor(ctx: Context, config: LocalAgentConfig = {}) {
     super(ctx, 'localAgent')
@@ -136,7 +147,35 @@ export class LocalAgentService extends TypertRemoteService {
     }
     this.home = resolveLocalAgentHome(config.homeDir)
     this.statePath = join(this.home, 'local-agent', 'state.json')
-    void this.initialize()
+    // The documented way for a Service to hold an injected service: a scoped callback that
+    // fires once the service exists. Reading this.ctx.llm directly during load throws
+    // "cannot get required service ... in inactive context" — measured as a fatal load failure.
+    ctx.inject(['llm'], (child) => {
+      const service = (child as unknown as { llm?: unknown }).llm
+      if (service !== null && typeof service === 'object' && typeof (service as { registerAdapter?: unknown }).registerAdapter === 'function') {
+        this.llmService = service as { registerAdapter(providers: string[], adapter: LocalAgentAdapter): AdapterRegistrationHandle }
+        // REGISTER SYNCHRONOUSLY HERE. `registerAdapter` creates a Cordis effect on the LLM
+        // service's context; calling it from a later timer hit "cannot create effect on
+        // inactive context" (measured as a silent no-route boot). The injection callback is a
+        // lifecycle window where that effect is legal. Later scans only call handle.replace().
+        this.scanSync()
+        this.rebuildRoutes()
+      }
+      // No cleanup here on purpose: returning a disposer makes Cordis tear the child scope
+      // down again (measured: supported flipped back to false before the first scan finished).
+      // This service's own fiber disposal releases the adapter registration.
+    })
+    ctx.effect(() => () => { void this.dispose() }, 'local-agent: runtime')
+    // DEFERRED ON PURPOSE: a Cordis plugin's own fiber is not active while its constructor is
+    // still being loaded, and reading an injected service in that window throws
+    // "cannot get required service ... in inactive context" — measured on 2026-11-10 as a fatal
+    // load failure. A macrotask runs after activation completes.
+    const boot = setTimeout(() => {
+      void this.initialize().catch((error: unknown) => {
+        ctx.logger?.warn?.(`[local-agent] initialization failed: ${String(error)}`)
+      })
+    }, 0)
+    boot.unref?.()
   }
 
   private async initialize(): Promise<void> {
@@ -147,12 +186,37 @@ export class LocalAgentService extends TypertRemoteService {
     }
     await this.scan()
     await this.probeVersions()
+    this.rebuildRoutes()
+  }
+
+  /** The host LLM registry, or undefined on a host that cannot register routes. */
+  private llm(): { registerAdapter(providers: string[], adapter: LocalAgentAdapter): AdapterRegistrationHandle } | undefined {
+    return this.llmService
   }
 
   /** Whether this host can register model routes (A2); independent of discovery. */
   private supported(): boolean {
-    const llm = (this.ctx as unknown as { llm?: { registerAdapter?: unknown } }).llm
-    return typeof llm?.registerAdapter === 'function'
+    return this.llm() !== undefined
+  }
+
+  /**
+   * Synchronous scan used at registration time: PATH + app-bundle candidates only.
+   * The login-shell PATH and version probes are filled in by the async scan afterwards.
+   */
+  private scanSync(): void {
+    const detected: LocalAgentRouteView[] = []
+    for (const spec of Object.values(ENGINES)) {
+      detected.push(routeView(spec, false, findExecutable(spec.command, spec.appPaths)))
+    }
+    for (const agent of this.state.custom) {
+      detected.push(routeView(
+        { route: customRoute(agent.id), name: agent.name, kind: 'acp' },
+        true,
+        findExecutable(agent.command),
+      ))
+    }
+    this.detected = detected
+    this.scannedAt = new Date().toISOString()
   }
 
   private async scan(): Promise<void> {
@@ -195,6 +259,7 @@ export class LocalAgentService extends TypertRemoteService {
       scannedAt: this.scannedAt,
       detected: this.detected.map(entry => ({ ...entry })),
       custom: this.state.custom.map(agent => ({ ...agent, args: [...agent.args] })),
+      registeredRoutes: [...this.drivers.keys()],
     }
   }
 
@@ -203,6 +268,7 @@ export class LocalAgentService extends TypertRemoteService {
     if (!this.cfg.enabled) return this.snapshot()
     await this.scan()
     await this.probeVersions()
+    this.rebuildRoutes()
     return this.snapshot()
   }
 
@@ -212,6 +278,7 @@ export class LocalAgentService extends TypertRemoteService {
     this.state = { ...this.state, custom: [...this.state.custom, agent] }
     await this.persist()
     await this.scan()
+    this.rebuildRoutes()
     return this.snapshot()
   }
 
@@ -229,6 +296,7 @@ export class LocalAgentService extends TypertRemoteService {
     }
     await this.persist()
     await this.scan()
+    this.rebuildRoutes()
     return this.snapshot()
   }
 
@@ -239,7 +307,73 @@ export class LocalAgentService extends TypertRemoteService {
     this.state = { ...this.state, custom: this.state.custom.filter(agent => agent.id !== input.id) }
     await this.persist()
     await this.scan()
+    this.rebuildRoutes()
     return this.snapshot()
+  }
+
+  /** Build the route→driver table for everything discovery found and A2 can drive. */
+  private rebuildRoutes(): void {
+    if (!this.cfg.enabled || !this.supported()) return
+    const next = new Map<string, LocalAgentDriver>()
+    for (const entry of this.detected) {
+      if (!entry.available || entry.path === undefined) continue
+      const spec = engineOf(entry.route, this.state.custom)
+      if (spec === undefined) continue
+      // A2 drives Codex natively; ACP drivers land in A2b, Claude in A6. Registering a route
+      // without a driver would put an unusable model in the Bot picker.
+      if (spec.kind === 'codex') {
+        next.set(entry.route, new CodexDriver({ route: entry.route, name: spec.name, executable: entry.path }))
+      }
+    }
+    for (const [route, driver] of this.drivers) {
+      if (!next.has(route)) void driver.dispose()
+    }
+    this.drivers = next
+    const routes = [...next.keys()]
+    const llm = this.llm()
+    if (llm === undefined) {
+      this.ctx.logger?.warn?.('[local-agent] this host cannot register model routes; discovery only')
+      return
+    }
+    try {
+    if (this.registration === undefined) {
+      if (routes.length === 0) return
+      this.adapter = new LocalAgentAdapter(this.adapterDeps())
+      this.registration = llm.registerAdapter(routes, this.adapter)
+    } else {
+      this.registration.replace(routes)
+    }
+    } catch (error) {
+      this.ctx.logger?.warn?.(`[local-agent] route registration failed: ${String(error)}`)
+      return
+    }
+    this.ctx.logger?.info?.(`[local-agent] routes registered: ${routes.length === 0 ? '(none)' : routes.join(', ')}`)
+  }
+
+  private adapterDeps(): ConstructorParameters<typeof LocalAgentAdapter>[0] {
+    return {
+      driverFor: route => this.drivers.get(route),
+      specFor: route => engineOf(route, this.state.custom),
+      recordFor: sessionId => this.state.sessions[sessionId],
+      saveRecord: (sessionId, record: LocalAgentSessionRecord) => {
+        this.state = {
+          ...this.state,
+          sessions: { ...this.state.sessions, [sessionId]: record },
+        }
+        void this.persist()
+      },
+      // A6 resolves the Bot/session workspace; A2 runs from the host's working directory.
+      cwdFor: () => process.cwd(),
+    }
+  }
+
+  async dispose(): Promise<void> {
+    this.registration?.()
+    this.registration = undefined
+    await this.adapter?.dispose()
+    this.adapter = undefined
+    for (const driver of this.drivers.values()) await driver.dispose()
+    this.drivers = new Map()
   }
 }
 
