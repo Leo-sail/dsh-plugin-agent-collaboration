@@ -21,6 +21,7 @@ import z from '@deepseek-ai/schemastery'
 import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 import { LocalAgentAdapter } from './adapter.ts'
 import { AcpDriver } from './drivers/acp.ts'
+import { ClaudeDriver } from './drivers/claude.ts'
 import { CodexDriver } from './drivers/codex.ts'
 import type { LocalAgentDriver } from './drivers/types.ts'
 import { ENGINES, customRoute, engineOf, validateCustomAgent } from './engines.ts'
@@ -391,14 +392,14 @@ export class LocalAgentService extends TypertRemoteService {
    */
   private rebuildRoutes(): void {
     if (!this.cfg.enabled || !this.supported()) return
-    const wanted = new Map<string, { executable: string; name: string; kind: 'codex' | 'acp'; args: readonly string[]; env?: Readonly<Record<string, string>> }>()
+    const wanted = new Map<string, { executable: string; name: string; kind: 'claude' | 'codex' | 'acp'; args: readonly string[]; env?: Readonly<Record<string, string>> }>()
     for (const entry of this.detected) {
       if (!entry.available || entry.path === undefined) continue
       const spec = engineOf(entry.route, this.state.custom)
       if (spec === undefined) continue
       // A2 drives Codex natively; ACP drivers land in A2b, Claude in A6. Registering a route
       // without a driver would put an unusable model in the Bot picker.
-      if (spec.kind === 'codex' || spec.kind === 'acp') {
+      if (spec.kind === 'codex' || spec.kind === 'acp' || spec.kind === 'claude') {
         wanted.set(entry.route, {
           executable: entry.path,
           name: spec.name,
@@ -434,7 +435,9 @@ export class LocalAgentService extends TypertRemoteService {
           args: spec.args,
           ...(spec.env === undefined ? {} : { env: spec.env }),
         })
-        : new CodexDriver({ route, name: spec.name, executable: spec.executable, args: spec.args }))
+        : spec.kind === 'claude'
+          ? new ClaudeDriver({ route, name: spec.name, executable: spec.executable, args: spec.args })
+          : new CodexDriver({ route, name: spec.name, executable: spec.executable, args: spec.args }))
     }
     for (const [route, driver] of this.drivers) {
       if (!next.has(route)) void driver.dispose()
