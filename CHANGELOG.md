@@ -1,3 +1,48 @@
+## 0.5.0 — 本机 Agent：让 Bot 直接接管你电脑上的 CLI（2026-11-10）
+
+### 主要功能
+
+- **本机 Agent（local-agent）**：新增 `@dsh-plugin-agent-community/local-agent` 组件与 LLM 适配器，把本机
+  已安装的 CLI 注册成 Bot 可选的模型路由。支持 **Codex CLI**（原生 app-server）、**Claude Code**（原生
+  stream-json）与 **ACP 家族**（Gemini CLI / Grok Build / OpenCode / Cline / Cursor CLI / Goose / Qwen Code /
+  自定义 ACP CLI 等）。
+- **CLI 自己的登录与模型**：Bot 接管后使用该 CLI 已有的登录、认证与默认模型；DSH 不存 API Key，不注入
+  人设/系统提示词（adapter 主动过滤 system / runtime-context / skill-catalog 注入）。
+- **团队工具桥**：每会话一个 loopback MCP server（127.0.0.1、随机端口、随机 bearer token），CLI 可调用
+  `message_member` / `assign_task` / `ask_user_question` 等房间工具，由 DSH 执行与审计；Codex app-server 的
+  `item/tool/call` 与 ACP 的 MCP 通道两条路径都接入。
+- **审批留在 DSH**：Codex 的 elicitation / 命令 / 文件审批与 ACP 的 `session/request_permission` 统一转成
+  `approve_agent_action` 工具 → DSH 审批卡；默认 fail-closed；额外沙箱权限 v1 一律拒绝。
+- **模型语义**：Bot 级模型、会话级切换工具 `agent_switch_model`（自然语言「换成 opus」）；模型目录来自
+  Codex `model/list` / ACP `configOptions`；改模型或换 provider 会自动重开 CLI 会话并 replay 房间可见历史。
+- **权限映射**：Bot 的 `read-only / workspace-write / full-access` 映射到 Codex sandbox 与 Claude
+  `--permission-mode`；Codex full-access 使用 `danger-full-access` + `never` 审批。
+- **UI**：新建 Bot 第一步是「Bot 类型」卡片（云模型 / 本机 Agent）；本机模式显示「选择已安装的 CLI」下拉与
+  「使用该 CLI 的模型」；自定义 ACP CLI 从表单底部「管理自定义 CLI」维护；Bot 列表显示「本机」badge；
+  「本机 Agent」不新增侧栏入口。
+- **发现与设置**：登录 shell PATH / npm 全局 / app bundle / 自定义搜索目录扫描；
+  `snapshot / refresh / addCustomAgent / updateCustomAgent / removeCustomAgent` RPC 供面板使用。
+
+### 修复
+
+- **@all 轮次过度编排**：并行轮内禁止重复 `dispatch` / `assign_task`、禁止用 `message_member` 二次唤醒本轮成员；
+  leader 已作为成员回答时不再额外汇总（灰色收口行会说明原因）。
+- **运行中改模型不生效**：缓存 agent 路径现在每回合同步 Bot 当前 route（`f44864d`）。
+- **改模型/换 provider 后静默无输出**：旧 Codex thread 会接受请求但不再产出，表现为「连续 120s 无进展」或空回合；
+  现在自动退役 CLI 会话、用新模型重开 thread 并 replay 房间历史（`71aa2af`）。
+- **`extraSearchDirs` 未生效**：注册期的同步扫描只看 PATH，配置目录里的 CLI 要等异步扫描才出现，中间的回合撞
+  `NO_ADAPTER`；同步扫描现在也使用配置目录。
+- **ACP 续跑总是 replay**：handedId 改用 `buildPrompt` 过滤后的消息 id（此前记录的是被丢弃的 runtime-context
+  注入 id，导致每次续跑都全量重放）。
+- **本机 CLI 失败被吞**：未登录等故障此前只显示「本轮没有产生任何回复（模型输出为空）」，现在展示 CLI 的原因
+  （activity + 运行失败行）并保留 `LOCAL_AGENT_FAILED` 语义。
+
+### 版本与兼容
+
+- 包版本：bundle / core / tools / ui 全部 **0.5.0**；新增 **core/local-agent 0.5.0**。
+- 状态文件仅增量：`$DSH_HOME/local-agent/state.json` 为新文件；旧版回退会忽略它。
+- 引擎列表固定；缺失的 CLI 只是不可选条目，不影响插件加载。桌面 profile 需重启一次以加载宿主代码。
+
 # Changelog
 
 ## 0.4.1 — 群主判断、经验自动整理与安全边界（2026-11-09）

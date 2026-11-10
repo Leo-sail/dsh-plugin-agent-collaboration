@@ -137,6 +137,11 @@ fix.
 - **Compaction that you can trigger.** `/compact` summarises the older part of a room with the room's own
   Bot model, keeps the newest messages verbatim, and retires the session that was carrying the old
   history — so the next answer continues from the summary instead of replaying the transcript.
+- **Local agents: a Bot that IS your installed CLI.** Instead of a cloud model, a Bot can run
+  Codex CLI, Claude Code, Gemini CLI, Grok Build, OpenCode, Cline, Cursor CLI, Goose, Qwen Code or any
+  ACP-compatible CLI on this machine. The CLI keeps its own login, auth and model configuration — no
+  API key is stored in DSH and no persona prompt is injected. See
+  [Local agents](#local-agents--a-bot-that-is-your-own-cli).
 - **Unread state that follows what you actually see.** A read water mark records when you read, not
   just which message, so a room that has been compacted can still tell you what is new. The room on
   screen counts as read — its badge clears as soon as it is displayed, and a reply that lands while
@@ -144,6 +149,34 @@ fix.
   stay unread, so the count is right when you come back. The badge counts **unread replies** — each bot run
   is one (so several scheduled runs are several unread, not one) — and a bot's extra post in the same turn
   does not double-count.
+
+## Local agents — a Bot that is your own CLI
+
+A Bot can be backed by an **installed local agent** rather than a cloud provider. This is the same
+conversation pipeline: rooms, runs, the ledger, team tools and approvals — only the model call is
+replaced by the CLI's own turn.
+
+- **Bots from what is already on the machine.** Creating a Bot starts with two type cards —
+  **云模型 / 本机 Agent**. Local mode lists every CLI discovered on this machine (Codex CLI, Claude
+  Code, Gemini CLI, Grok Build, OpenCode, Cline, Cursor CLI, Goose, Qwen Code, plus custom ACP CLIs)
+  and that CLI's configured models. Unavailable entries are shown as 未安装.
+- **The CLI's own login, not yours in DSH.** A local Bot uses the CLI's existing sign-in and model
+  configuration; DSH stores no API key for it and injects no persona or system prompt. The CLI's own
+  auth environment (`ANTHROPIC_*`, etc.) and third-party relays work as they do in a terminal.
+- **Team tools still work.** The collaboration tools are exposed to the CLI through a per-session
+  loopback MCP server: the CLI calls `message_member`, `assign_task`, `ask_user_question` and DSH
+  executes and audits them like any other tool call.
+- **Approvals stay in DSH.** Permission prompts (commands, file changes, MCP tool calls) become the
+  normal DSH approval card. A Bot's permission preset maps onto the CLI's own sandbox/mode
+  (Codex sandbox, Claude `--permission-mode`); a deny is fail-closed.
+- **Model switching is real switching.** Pick a model in Settings or ask the Bot to switch it
+  (“换成 …”); a model/provider change starts a fresh CLI conversation seeded with the visible room
+  history, so an old thread can never keep answering with the previous model.
+- **Custom CLIs.** Add any ACP-speaking CLI from the Bot form's 管理自定义 CLI; it appears in the
+  same dropdown.
+
+The engine list is fixed (Codex, Claude Code and the ACP family); each driver is data-driven, and a
+missing CLI degrades to an empty option instead of failing the plugin.
 
 ## Requirements
 
@@ -165,7 +198,7 @@ those packages.
 dsh plugin --profile <your-profile> add dsh-plugin-agent-collaboration
 ```
 
-The published package carries all three packages prebuilt, so nothing is compiled on your machine.
+The published package carries all four components prebuilt, so nothing is compiled on your machine.
 Restart DSH and refresh the page — **Bots团队** appears in the sidebar.
 
 ### Installing the release tarball instead
@@ -175,7 +208,7 @@ not install through a registry:
 
 ```bash
 dsh plugin --profile <your-profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.4.1/dsh-plugin-agent-collaboration-0.4.1.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.5.0/dsh-plugin-agent-collaboration-0.5.0.tgz
 ```
 
 ### Installing from a checkout instead
@@ -189,7 +222,7 @@ the bundle's own `file:` dependencies; the profile ends up with the bundle and n
 and every row fails to import. The same applies to DSH's own plugin manager, which passes an absolute
 path through unchanged.
 
-Verify the install — all three must be real directories, not symlinks:
+Verify the install — all four must be real directories, not symlinks:
 
 ```bash
 ls -ld ~/.dsh/profiles/<your-profile>/node_modules/@dsh-plugin-agent-community/*
@@ -199,7 +232,7 @@ ls -ld ~/.dsh/profiles/<your-profile>/node_modules/@dsh-plugin-agent-community/*
 
 ```text
 Install the DSH plugin at
-https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.4.1/dsh-plugin-agent-collaboration-0.4.1.tgz
+https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.5.0/dsh-plugin-agent-collaboration-0.5.0.tgz
 into my DSH profile, restart DSH, and confirm the "Bots团队" entry appears in the sidebar.
 ```
 
@@ -308,6 +341,13 @@ The composer's menu — 文件 / 压缩 / 权限 / 模型, then the skills group
 
 ![Composer menu](packages/bundle/agent-collaboration/screenshots/04-composer-menu.png)
 
+Creating a Bot now starts with a type card — **云模型 / 本机 Agent** — and local mode lists the CLIs
+installed on this machine:
+
+![Bot type cards](packages/bundle/agent-collaboration/screenshots/05-local-agent-types.png)
+
+![Installed CLI dropdown](packages/bundle/agent-collaboration/screenshots/06-local-agent-cli.png)
+
 These are declared in [`screenshots.json`](packages/bundle/agent-collaboration/screenshots.json) — beside
 the bundle's `package.json`, because this plugin is listed as a monorepo subpackage and that is where
 storefronts read it from. See
@@ -343,13 +383,15 @@ build output; the release tarball is built by `scripts/pack-release.sh`.
 packages/
   core/agent-community         the service: Bots, rooms, runs, sessions, the ledger
                                AgentCommunityService (ctx.agentCommunity), persists state.json
+  core/local-agent             local-agent service: discovery, the LLM adapter and the
+                               Codex / Claude Code / ACP drivers (loopback MCP, approvals)
   tools/tool-agent-community   the model-facing tools (ctx.tools.register)
   ui/ui-agent-community        the browser panel: sidebar entry, transcript, composer,
                                right-hand preview dock and the PDF/DOCX/spreadsheet viewers
   bundle/agent-collaboration   the installable entry (cordis.patch.yml)
 ```
 
-The bundle mounts all three; each package is also installable on its own — `core/agent-community` ships
+The bundle mounts all four; each package is also installable on its own — `core/agent-community` ships
 its own `cordis.patch.yml` and `dsh.bundle`, which is the right shape for a headless deployment.
 
 See [DESIGN.md](DESIGN.md) for the UI decisions (DSH token system, DSH client primitives, `StateDot` for

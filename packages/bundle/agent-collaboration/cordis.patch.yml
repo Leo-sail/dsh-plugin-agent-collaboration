@@ -216,3 +216,10 @@
             name: '@deepseek-ai/dsh-tool-todo'
             config:
               allowParallelInProgress: true
+
+# ── A1: local-agent discovery service ────────────────────────────────────────
+# Finds the agent CLIs installed on this machine and keeps the user's custom ACP agents.
+# Route registration (A2) mounts on top of this row; the row itself adds no tools and no model route.
+- insert:
+    - id: plugin-local-agent
+      name: "@dsh-plugin-agent-community/local-agent"

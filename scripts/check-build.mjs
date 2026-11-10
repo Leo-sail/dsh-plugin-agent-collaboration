@@ -31,6 +31,7 @@ const note = (m) => console.log(`check-build: ${m}`)
 // ── 1. exports/types targets exist ───────────────────────────────────────────
 const PACKAGES = [
   'packages/core/agent-community',
+  'packages/core/local-agent',
   'packages/tools/tool-agent-community',
   'packages/ui/ui-agent-community',
   'packages/bundle/agent-collaboration',

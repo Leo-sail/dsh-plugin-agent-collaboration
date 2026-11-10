@@ -126,9 +126,31 @@ function param(name: string, codec: ReturnType<typeof str>) {
   return { name, wire: name, source: 'json', codec }
 }
 
+/** Descriptor factory for a second Remote namespace this plugin owns (A6: local agents). */
+function serviceDescriptor(service: string, method: string, parameters: { name: string; wire: string; source: string; codec: ReturnType<typeof str> }[]) {
+  return {
+    id: '@dsh-plugin-agent-community/ui-agent-community#' + service + '/' + method,
+    service,
+    namespace: service,
+    method,
+    invocation: { kind: 'direct' as const },
+    parameters,
+    result: { mode: 'src-json' as const },
+  }
+}
+
+
 const contribution = {
   package: '@dsh-plugin-agent-community/ui-agent-community',
   descriptors: [
+    // A6: second namespace owned by this package. It MUST be mounted as part of this same
+    // contribution: typert keys a remote package by name, so a second $mount with the same
+    // package failed with 'Remote package ... is already registered' (measured 2026-11-10).
+    serviceDescriptor('localAgent', 'snapshot', []),
+    serviceDescriptor('localAgent', 'refresh', []),
+    serviceDescriptor('localAgent', 'addCustomAgent', [param('input', obj('AddLocalAgentRequest'))]),
+    serviceDescriptor('localAgent', 'updateCustomAgent', [param('input', obj('UpdateLocalAgentRequest'))]),
+    serviceDescriptor('localAgent', 'removeCustomAgent', [param('input', obj('RemoveLocalAgentInput'))]),
     descriptor('snapshot', []),
     // 2026-11-09: manual experience condense (read-only except the hidden refine run).
     descriptor('compactGroupExperience', [param('input', obj('CompactExperienceRequest'))]),
@@ -267,7 +289,9 @@ function CommunityPagePanel() {
 // label — and once the entry got a real name ("Bots团队") that lookup silently stopped
 // matching, taking the unread count with it. The icon is the one node this plugin owns
 // inside that button, so the marker lives here and `navBadge` walks up to the button.
+
 function CommunityPanelIcon({ size, active }: { size: number; active: boolean }) {
+
   const stroke = active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)'
   return createElement(
     'svg',
@@ -308,8 +332,10 @@ export function apply(ctx: ClientContext): void {
     layout: { selectPanel(id: string | null): void } | undefined
     /** The right Sidebar's navigation controller; only present while a Session is on screen. */
     sidebarRight: { openResource(address: string): void } | undefined
+    /** A6: local-agent discovery/settings namespace (optional capability). */
+    localAgent: RemoteFace | undefined
   }
-  const caps: Capabilities = { community: undefined, session: undefined, workspace: undefined, sidebarRight: undefined, layout: undefined }
+  const caps: Capabilities = { community: undefined, session: undefined, workspace: undefined, sidebarRight: undefined, layout: undefined, localAgent: undefined }
 
   // The mount promise is observed, never awaited blindly: a rejection is captured
   // for the diagnostic message, a stall is caught by the deadline below.
@@ -329,6 +355,12 @@ export function apply(ctx: ClientContext): void {
     state.status = 'ready'
     state.detail = 'RPC 已就绪'
     return () => { caps.community = undefined }
+  })
+
+  // A6: the local-agent namespace is published as part of the single contribution above.
+  ctx.inject(['remote.localAgent'], (scope) => {
+    caps.localAgent = scope.remote['localAgent'] as RemoteFace
+    return () => { caps.localAgent = undefined }
   })
 
   // Optional Host faces: the panel must survive their absence.
@@ -491,6 +523,23 @@ export function apply(ctx: ClientContext): void {
     return unwrap<T>(await withDeadline(fn(...args), deadlineMs, `${NS}/${method}`), `${NS}/${method}`)
   }
 
+  /** Same contract as `call`, for the optional local-agent namespace. */
+  async function localCall<T>(method: string, ...args: unknown[]): Promise<T> {
+    const deadline = Date.now() + MOUNT_DEADLINE_MS
+    for (;;) {
+      if (caps.localAgent !== undefined) {
+        const fn = caps.localAgent[method]
+        if (typeof fn !== 'function') throw new Error('localAgent/' + method + ' 未在 RPC 面上注册')
+        return unwrap<T>(
+          await withDeadline(fn(...args), CALL_DEADLINE_MS, 'localAgent/' + method),
+          'localAgent/' + method,
+        )
+      }
+      if (Date.now() >= deadline) throw new Error('localAgent RPC 不可用：本机 Agent 服务未加载')
+      await delay(POLL_INTERVAL_MS)
+    }
+  }
+
   /**
    * Providers and models configured in DSH Settings, as the model selector sees them.
    *
@@ -570,6 +619,11 @@ export function apply(ctx: ClientContext): void {
     getBotPresence: (botId) => call('getBotPresence', botId),
     listModelGroups,
     modelCatalog,
+    localAgentSnapshot: () => localCall('snapshot'),
+    localAgentRefresh: () => localCall('refresh'),
+    localAgentAddCustomAgent: (input) => localCall('addCustomAgent', input),
+    localAgentUpdateCustomAgent: (input) => localCall('updateCustomAgent', input),
+    localAgentRemoveCustomAgent: (input) => localCall('removeCustomAgent', input),
     pickDirectory,
     getDefaults: () => call('getDefaults'),
     controlRun: (input) => call('controlRun', input),
@@ -671,8 +725,8 @@ export function apply(ctx: ClientContext): void {
   // this label) and `navBadge.ts` finds it by that same id to hang the unread count on,
   // so renaming the id would silently drop the badge.
   ctx.locale.register(NS, {
-    zh: { panel: 'Bots团队' },
-    en: { panel: 'Bots团队' },
+    zh: { panel: 'Bots团队', localAgentPanel: '本机 Agent' },
+    en: { panel: 'Bots团队', localAgentPanel: 'Local agents' },
   })
   // Bound ONCE: `bind` is the documented way in (there is no unbound `t`), and the
   // sidebar re-reads the label through this function on every locale change.

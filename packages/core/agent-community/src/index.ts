@@ -163,6 +163,7 @@ import {
   decideRoundSettle,
   interruptRound,
   isRoundClosed,
+  leaderIsParticipant,
   noteStarted,
   parseRoundState,
   roundStatusLine,
@@ -2869,9 +2870,17 @@ export class AgentCommunityService extends TypertRemoteService {
         }
         const driver = this.groupTask
         if (driver === undefined) return { assigned: [], refused: input.botIds }
+        // Same no-double-duty rule as dispatchToMembers: an @all round already woke these
+        // members for THIS user message, so a second assignment is a duplicate turn.
+        const room = this.state.rooms.find(r => r.id === input.roomId)
+        const openRound = room?.round !== undefined && !isRoundClosed(room.round) ? room.round : undefined
+        const participating = new Set(openRound === undefined ? [] : openRound.participants.map(participant => participant.botId))
+        const allowed = input.botIds.filter(id => !participating.has(id))
+        const blocked = input.botIds.filter(id => participating.has(id))
+        if (allowed.length === 0) return { assigned: [], refused: blocked }
         return driver.assign({
           roomId: input.roomId,
-          botIds: input.botIds,
+          botIds: allowed,
           task: input.task,
           ...(input.requiresDeliverables === true ? { requiresDeliverables: true } : {}),
         })
@@ -2971,6 +2980,21 @@ export class AgentCommunityService extends TypertRemoteService {
           senderIsLeader,
         })
         if (!decision.allow) return { ok: false, reason: a2aDenialText(decision) }
+        // ── AN @all ROUND ALREADY WOKE THE MEMBERS ─────────────────────────────────
+        //
+        // The leader's run sees the user's @all message and tries to "pass the greeting
+        // along" with one message_member per member. Each of those wakes a member that the
+        // round is ALREADY running, so the room gets a second, duplicate greeting round
+        // (measured 2026-11-10: @所有人 你们好 produced 7 replies and a summary). The round is
+        // the wake-up: while it is open, its participants cannot be poked again.
+        const targetId = room?.memberIds.find(id => this.state.bots.find(bot => bot.id === id)?.name.trim() === targetName)
+        const openRound = room?.round !== undefined && !isRoundClosed(room.round) ? room.round : undefined
+        if (openRound !== undefined && targetId !== undefined && openRound.participants.some(participant => participant.botId === targetId)) {
+          return {
+            ok: false,
+            reason: '该成员已经在本轮（用户这条消息的并行回答轮）里回应或正在回应，系统已经唤醒了全体成员，不要再逐个通知；等本轮结束后再说。',
+          }
+        }
         try {
           await this.postBotMessage({
             roomId: brandId<BotRoomId>(input.roomId),
@@ -8091,16 +8115,42 @@ export class AgentCommunityService extends TypertRemoteService {
         .map(b => ({ id: b.id, name: b.name })),
       tasks: input.tasks,
     })
-    if (plan.accepted.length === 0) {
-      return { ok: false, queued: [], refused: plan.refused, ...(plan.refusal !== undefined ? { reason: plan.refusal } : {}) }
+    // ── NO DOUBLE-DUTY INSIDE ONE ROUND ─────────────────────────────────────────
+    //
+    // An @all round already wakes the leader AND the members for the same instruction. The
+    // leader's run sees the user's message, decides "members must answer" and calls
+    // dispatch/assign_task — queueing a SECOND turn for members that are answering right now.
+    // Measured 2026-10-11: 「@所有人 你们好」 got three replies, then two more duplicate ones.
+    // So while the round is open, its participants are off-limits for dispatch: the round is
+    // the assignment. After it settles, a new instruction can dispatch again.
+    const openRound = room.round !== undefined && !isRoundClosed(room.round) ? room.round : undefined
+    const participating = new Set(openRound === undefined ? [] : openRound.participants.map(participant => participant.botId))
+    const blocked = plan.accepted.filter(task => participating.has(task.botId))
+    const accepted = plan.accepted.filter(task => !participating.has(task.botId))
+    const refused = [
+      ...plan.refused,
+      ...blocked.map(task => ({
+        bot: this.state.bots.find(bot => bot.id === task.botId)?.name ?? task.botId,
+        reason: '该成员已经在本轮（用户这条消息的并行回答轮）里回应或正在回应，不能重复派工；等本轮结束后再安排。',
+      })),
+    ]
+    if (accepted.length === 0) {
+      return {
+        ok: false,
+        queued: [],
+        refused,
+        reason: blocked.length > 0
+          ? '本轮的成员已经在回应这条消息了，不要重复派工；各说各的，等本轮收口即可。'
+          : plan.refusal ?? '这次没有任何任务派出去。',
+      }
     }
     const result = this.groupTask?.assignEach({
       roomId: input.roomId,
-      tasks: plan.accepted.map(task => ({
+      tasks: accepted.map(task => ({
         ...task,
         ...(input.requiresDeliverables === true ? { requiresDeliverables: true } : {}),
       })),
-    }) ?? { assigned: [], refused: plan.accepted.map(t => t.botId) }
+    }) ?? { assigned: [], refused: accepted.map(t => t.botId) }
     this.recordNotice(
       input.roomId,
       `已派工：${result.assigned.length} 位成员（${result.assigned.map(id => this.state.bots.find(b => b.id === id)?.name ?? id).join('、')}），等待回报。`,
@@ -8108,7 +8158,7 @@ export class AgentCommunityService extends TypertRemoteService {
     return {
       ok: result.assigned.length > 0,
       queued: result.assigned,
-      refused: plan.refused,
+      refused,
       ...(result.assigned.length === 0 ? { reason: '派工失败：成员当前无法运行。' } : {}),
     }
   }
@@ -8856,18 +8906,22 @@ export class AgentCommunityService extends TypertRemoteService {
     // last member cannot enqueue a second integration turn. A SINGLE-target round has nothing to
     // integrate (the user addressed one bot and got its answer) — only a multi-member parallel
     // fan-out gets a summary turn, and only when at least one member actually delivered.
+    const leader = this.leaderOfRoom(roomId)
+    // In an @all round the leader IS one of the answering members. Waking it again would only
+    // re-state what the room already saw — exactly the duplicate summary the user complained
+    // about after 「@所有人 你们好」. A leader that did not answer in this round still integrates
+    // the dispatched members' reports as before.
+    const leaderInRound = leaderIsParticipant(round, leader)
     const canWake = decision.wakeLeader
+      && !leaderInRound
       && round.mode === 'parallel'
       && round.participants.length > 1
       && round.participants.some(participant => participant.status === 'done')
     let woke = false
     let wakeRefused = false
-    if (canWake) {
-      const leader = this.leaderOfRoom(roomId)
-      if (leader !== undefined) {
-        woke = this.enqueueGroupRun(roomId, leader, this.roundIntegratePrompt(round), { internal: true })
-        wakeRefused = !woke
-      }
+    if (canWake && leader !== undefined) {
+      woke = this.enqueueGroupRun(roomId, leader, this.roundIntegratePrompt(round), { internal: true })
+      wakeRefused = !woke
     }
     if (decision.allPassed) {
       this.ledger.push({
@@ -8884,7 +8938,9 @@ export class AgentCommunityService extends TypertRemoteService {
       ? '；已唤醒 leader 汇总'
       : wakeRefused
         ? '；leader 汇总未能启动，可在群里再发一句话重试'
-        : ''
+        : leaderInRound && decision.wakeLeader
+          ? '；leader 已在本轮回答，不再额外汇总'
+          : ''
     this.ledger.push({
       type: 'round',
       roundId: round.id,

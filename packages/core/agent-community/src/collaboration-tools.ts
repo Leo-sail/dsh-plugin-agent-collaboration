@@ -1349,7 +1349,7 @@ export function registerCollaborationTools(
           ...(result.refused.length > 0 ? { refused: result.refused } : {}),
         },
         text: result.refused.length > 0
-          ? '被拒绝的成员不在本群，先用 invite_bot 邀请。'
+          ? `有成员这次没有派出：${result.refused.join('、')}（不在本群，或已经在本轮回应中，不能重复派工）。`
           : '已分派，等待成员汇报。不要再重复分派同一件事。',
       }
     },

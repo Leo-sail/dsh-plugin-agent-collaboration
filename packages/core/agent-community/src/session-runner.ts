@@ -1472,7 +1472,7 @@ export class SessionRunner {
    */
   private providerFailure(session: SessionView): string | undefined {
     const withEvents = session as unknown as {
-      ownEvents?(): readonly { type?: string; data?: { reason?: { kind?: string; error?: { message?: string } } } }[]
+      ownEvents?(): readonly { type?: string; data?: { reason?: { kind?: string; error?: { message?: string; code?: string } } } }[]
     }
     const events = withEvents.ownEvents?.()
     if (events === undefined) return undefined
@@ -1482,9 +1482,16 @@ export class SessionRunner {
       const reason = event.data?.reason
       if (reason?.kind !== 'error') return undefined
       const message = reason.error?.message ?? ''
+      const code = reason.error?.code
+      // Local-agent drivers report their CLI's own failures with stable codes
+      // (LOCAL_AGENT_FAILED / NO_ADAPTER / INVALID_REQUEST). Those are provider-side
+      // failures even when the CLI wording matches no HTTP/transport pattern — e.g. Claude
+      // Code's "Not logged in · Please run /login" used to settle as an empty reply.
+      const localAgentFailure = typeof code === 'string'
+        && (code.startsWith('LOCAL_AGENT_') || code === 'NO_ADAPTER' || code === 'INVALID_REQUEST')
       // A provider/transport/config rejection, not an internal "the model chose not to speak".
-      const looksLikeRequestFailure = looksLikeProviderRejection(message)
-      return looksLikeRequestFailure ? message : undefined
+      const looksLikeRequestFailure = localAgentFailure || looksLikeProviderRejection(message)
+      return looksLikeRequestFailure ? (message !== '' ? message : `provider failed (${String(code)})`) : undefined
     }
     return undefined
   }
@@ -1558,7 +1565,21 @@ export class SessionRunner {
   private async ensureAgent(roomId: string, botId: string): Promise<Agent> {
     const key = SessionRunner.key(roomId, botId)
     const live = this.agents.get(key)
-    if (live !== undefined) return live
+    if (live !== undefined) {
+      // THE CACHED AGENT STILL CARRIES THE OLD ROUTE.
+      //
+      // The fast path used to return the live agent untouched, so a Bot whose provider/model
+      // the user changed in Settings kept requesting the OLD model until the app restarted
+      // (measured 2026-11-11: gpt was switched back to gpt-6-astra, but its live agent kept
+      // asking for gpt-5.6-sol because the resume/adopt paths — the only ones that called
+      // applyBotModel — were never reached). Re-select the Bot's CURRENT route before every
+      // turn; syncAgentModelSelection is a no-op when the agent already matches.
+      const cachedBot = this.accessor.botById(botId)
+      if (cachedBot !== undefined) {
+        this.applyBotModel(roomId, botId, live, cachedBot)
+      }
+      return live
+    }
 
     const bot = this.accessor.botById(botId)
     if (bot === undefined) throw new Error(`agent-community: bot "${botId}" no longer exists`)
@@ -2091,6 +2112,18 @@ export class SessionRunner {
     const bot = this.accessor.botById(botId)
     const permission = bot?.permission
     if (permission === undefined || permission === '') return
+    // A6b: local-agent routes read the permission from their session record to map it onto
+    // the CLI's own sandbox/permission flags (Codex sandbox, Claude --permission-mode).
+    const localAgent = optionalService<{ setSessionPermission?(sessionId: string, permission: string): void }>(
+      this.ctx, 'localAgent',
+    )
+    if (localAgent?.setSessionPermission !== undefined) {
+      try {
+        localAgent.setSessionPermission(this.accessor.sessionIdFor(roomId, botId) as unknown as string, permission)
+      } catch (error: unknown) {
+        this.ctx.logger?.warn?.(`agent-community: could not report permission to local-agent: ${String(error)}`)
+      }
+    }
     const svc = optionalService<{ set?(session: unknown, name: string): void }>(
       this.ctx, 'permissionPresets',
     )

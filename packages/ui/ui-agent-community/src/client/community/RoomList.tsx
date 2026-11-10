@@ -76,6 +76,8 @@ export interface RoomListProps {
   attention?: Readonly<Record<string, number>> | undefined
   directTabUnread: boolean
   groupTabUnread: boolean
+  /** A6b: providers served by a local agent CLI; those Bots carry a 本机 badge. */
+  localRoutes?: ReadonlySet<string> | undefined
   onSelectRoom: (roomId: string) => void
   onCreate: () => void
   onEditBot: (bot: BotIdentity) => void
@@ -86,7 +88,7 @@ export interface RoomListProps {
 
 export function RoomList({
   tab, onSelectTab, bots, rooms, selectedId, unread, attention,
-  directTabUnread, groupTabUnread,
+  directTabUnread, groupTabUnread, localRoutes,
   onSelectRoom, onCreate, onEditBot, onOpenRoomSettings, onDeleteBot, onDeleteRoom,
 }: RoomListProps) {
   const isBotMode = tab === 'bots'
@@ -137,6 +139,16 @@ export function RoomList({
                         <span className={css.rowMeta} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                           <StateDot state={presenceToState(bot.presence)} />
                           {bot.presence === 'running' ? '运行中' : bot.presence === 'queued' ? '排队中' : '空闲'}
+                          {bot.provider !== undefined && localRoutes?.has(bot.provider) === true && (
+                            <span
+                              data-testid="local-agent-badge"
+                              style={{
+                                fontSize: 10, lineHeight: '14px', padding: '0 4px', borderRadius: 4,
+                                border: '1px solid var(--dsw-alias-border-secondary, #d6d6d6)',
+                                color: 'var(--dsw-alias-label-secondary, #666)',
+                              }}
+                            >本机</span>
+                          )}
                           {attention?.[room?.id ?? ''] !== undefined && (
                             <span className={css.attention} title="这个房间有待人工处理的事">需要你 {attention[room?.id ?? '']}</span>
                           )}

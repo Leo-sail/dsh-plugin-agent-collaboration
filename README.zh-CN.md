@@ -64,7 +64,31 @@
   许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 - **附件。** 消息可以带文件与图片，存放在接收方 Bot 自己的工作区里，并附到模型看到的内容上；气泡里显示的仍然是你原样输入的东西。
 - **可手动触发的压缩。** `/compact` 用该房间自己的 Bot 模型把较早的对话总结成摘要，原样保留最近几条，并**退掉承载旧历史的会话**——所以下一次回答是从摘要继续，而不是把整份记录重放一遍。
+- **本机 Agent：Bot 就是你电脑上的 CLI。** Bot 也可以不接云模型，而是直接接管本机已安装的 Codex CLI、
+  Claude Code、Gemini CLI、Grok Build、OpenCode、Cline、Cursor CLI、Goose、Qwen Code，或任意兼容 ACP 的
+  CLI。它用 CLI 自己的登录、认证与模型配置——DSH 里不存 API Key，也不注入人设提示词。详见
+  [本机 Agent](#本机-agent--bot-就是你电脑上的-cli)。
 - **未读角标跟着你实际看到的内容走。** 已读水位记的是"读到什么时间"，而不是只记一个消息 id，因此被压缩过的房间仍然能告诉你哪些是新的。**屏幕上的房间即视为已读**——它一显示出来角标就清零，停留期间到达的回复也会立刻清零；只有 DSH 窗口在后台/最小化时到达的消息保持未读，所以你回来时看到的数字仍然是准的。角标按**未读回复条数**计数：每次 Bot 运行算 1 条（定时任务的多次运行分别计数），同一回合里同一 Bot 的附加消息不重复计数。
+
+## 本机 Agent — Bot 就是你电脑上的 CLI
+
+一个 Bot 可以由**本机已安装的 agent** 驱动，而不是云模型。房间、运行、账本、团队工具、审批全部不变，
+只是把模型调用换成 CLI 自己的回合。
+
+- **用电脑上已装的 CLI 建 Bot。** 新建 Bot 第一步是两张类型卡片——**云模型 / 本机 Agent**。本机模式会
+  列出本机检测到的所有 CLI（Codex CLI、Claude Code、Gemini CLI、Grok Build、OpenCode、Cline、Cursor CLI、
+  Goose、Qwen Code，以及自定义 ACP CLI）和该 CLI 配置的模型；未安装的条目显示「未安装」并置灰。
+- **用 CLI 自己的登录，而不是 DSH 里的 Key。** 本机 Bot 沿用该 CLI 已有的登录与模型配置；DSH 不为它存
+  API Key，也不注入人设/系统提示词。CLI 自己的认证环境变量（`ANTHROPIC_*` 等）和第三方中转照常生效。
+- **团队工具照常可用。** 协作工具通过每会话一个 loopback MCP server 暴露给 CLI：CLI 调
+  `message_member`、`assign_task`、`ask_user_question`，DSH 像普通工具调用一样执行与审计。
+- **审批留在 DSH。** CLI 的命令/文件/MCP 工具权限请求会变成 DSH 审批卡；Bot 的权限 preset 映射到 CLI
+  自己的 sandbox/mode（Codex sandbox、Claude `--permission-mode`），拒绝一律 fail-closed。
+- **切换模型是真的切换。** 在设置里选模型，或在对话里让 Bot「换成 …」——模型/provider 变化会自动开启
+  新的 CLI 会话，并把房间可见历史重新灌入，旧 thread 不会继续用上一个模型回答。
+- **自定义 CLI。** 在 Bot 表单底部「管理自定义 CLI」里添加任意 ACP CLI，它会出现在同一个下拉里。
+
+引擎列表是固定的（Codex、Claude Code、ACP 家族）；驱动数据化，缺失的 CLI 只会显示为不可选项，不会让插件失败。
 
 ## 环境要求
 
@@ -84,13 +108,13 @@
 dsh plugin --profile <你的profile> add dsh-plugin-agent-collaboration
 ```
 
-包里已经带了三个**预构建**的包，本机不会编译任何东西。装完重启 DSH 并刷新页面，侧栏会出现 **Bots团队**。
+包里已经带了四个**预构建**的组件，本机不会编译任何东西。装完重启 DSH 并刷新页面，侧栏会出现 **Bots团队**。
 
 ### 改用 release tarball 安装
 
 ```bash
 dsh plugin --profile <你的profile> add \
-  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.4.1/dsh-plugin-agent-collaboration-0.4.1.tgz
+  https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.5.0/dsh-plugin-agent-collaboration-0.5.0.tgz
 ```
 
 同一份产物，附在 release 上——不想经过 registry 就直接用它。
@@ -104,7 +128,7 @@ dsh plugin --profile <你的profile> add "file:/path/to/this/repo/packages/bundl
 **`file:` 前缀不要去掉。** pnpm 会把裸绝对路径记成 `link:` 符号链接，于是 bundle 自己的 `file:` 依赖一个都不会被安装：
 profile 里只有 bundle、没有 `@dsh-plugin-agent-community/*` 那几行，结果每一行都 import 失败。DSH 自带的插件管理器同样如此，它会把绝对路径原样透传。
 
-确认安装结果——三行都必须是**真实目录**而不是符号链接：
+确认安装结果——四行都必须是**真实目录**而不是符号链接：
 
 ```bash
 ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/*
@@ -113,9 +137,9 @@ ls -ld ~/.dsh/profiles/<你的profile>/node_modules/@dsh-plugin-agent-community/
 ### 让 Agent 帮你装
 
 ```text
-> **注意**：仓库当前版本是 **0.4.1**，与下面的链接一致；改动见 [CHANGELOG.md](CHANGELOG.md)。
+> **注意**：仓库当前版本是 **0.5.0**，与下面的链接一致；改动见 [CHANGELOG.md](CHANGELOG.md)。
 
-把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.4.1/dsh-plugin-agent-collaboration-0.4.1.tgz
+把 https://github.com/Leo-sail/dsh-plugin-agent-collaboration/releases/download/v0.5.0/dsh-plugin-agent-collaboration-0.5.0.tgz
 装进目标 DSH profile，重启 DSH，并确认侧栏出现「Bots团队」。
 ```
 
@@ -218,6 +242,12 @@ Bot 列表与房间列表，侧栏入口带未读数：
 
 ![输入框菜单](packages/bundle/agent-collaboration/screenshots/04-composer-menu.png)
 
+新建 Bot 的第一步是类型卡片——**云模型 / 本机 Agent**；本机模式会列出本机已安装的 CLI：
+
+![Bot 类型卡片](packages/bundle/agent-collaboration/screenshots/05-local-agent-types.png)
+
+![已安装 CLI 下拉](packages/bundle/agent-collaboration/screenshots/06-local-agent-cli.png)
+
 这些截图声明在 [`screenshots.json`](packages/bundle/agent-collaboration/screenshots.json) 里——它放在
 bundle 的 `package.json` 旁边，因为本插件以 monorepo 子包的形式收录，市场正是从这个位置读取它。
 拍摄方式见 [screenshots/README.md](packages/bundle/agent-collaboration/screenshots/README.md)。
@@ -249,11 +279,12 @@ packages/
   core/agent-community         服务：Bot、房间、运行、会话、ledger
                                AgentCommunityService（ctx.agentCommunity），持久化 state.json
   tools/tool-agent-community   模型可调用工具（ctx.tools.register）
+  core/local-agent             本机 Agent 服务：发现、LLM 适配器与 Codex / Claude Code / ACP 驱动（loopback MCP、审批）
   ui/ui-agent-community        浏览器面板：侧栏入口、转录区、输入框、右侧预览栏与三个查看器
   bundle/agent-collaboration   可安装入口（cordis.patch.yml）
 ```
 
-bundle 会挂载上面三个包；每个包也**可以单独安装**——`core/agent-community` 自带 `cordis.patch.yml` 与 `dsh.bundle`，
+bundle 会挂载上面四个包；每个包也**可以单独安装**——`core/agent-community` 自带 `cordis.patch.yml` 与 `dsh.bundle`，
 这正是无界面部署需要的形态。
 
 界面相关决策见 [DESIGN.md](DESIGN.md)（DSH token 体系、DSH 客户端原语、用 `StateDot` 表示状态）。

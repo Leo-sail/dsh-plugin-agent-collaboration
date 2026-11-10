@@ -94,6 +94,19 @@ export function isTerminalParticipantStatus(status: RoundParticipantStatus): boo
   return status === 'done' || status === 'failed' || status === 'pass'
 }
 
+/**
+ * True when the room's leader is itself a participant of this round.
+ *
+ * A parallel round triggered by `@all` includes the leader as one of the answering members.
+ * The leader has already spoken in that round, so the once-only integration wake would only
+ * produce a duplicate summary of the same replies (measured 2026-11-10: an @all greeting got
+ * three replies, a re-dispatch and a final summary).
+ */
+export function leaderIsParticipant(round: RoundState, leaderId: string | undefined): boolean {
+  if (leaderId === undefined) return false
+  return round.participants.some(participant => participant.botId === leaderId)
+}
+
 /** A settled or interrupted round does not accept any further transition. */
 export function isRoundClosed(round: RoundState): boolean {
   return round.status !== 'open'

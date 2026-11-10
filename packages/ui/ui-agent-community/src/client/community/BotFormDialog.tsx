@@ -53,11 +53,13 @@ export interface BotFormDialogProps {
   onClose: () => void
   /** Saved: the shell closes the dialog and reloads the snapshot. */
   onSaved: () => void
+  /** Opens the custom-CLI manager (ACP agents the user adds by hand). */
+  onManageCustomCli?: (() => void) | undefined
 }
 
 export function BotFormDialog({
   isBotMode, editingBot, visibleBots, busy, setBusy, remote,
-  modelGroups, setModelGroups, defaultWorkspace, setNotice, onClose, onSaved,
+  modelGroups, setModelGroups, defaultWorkspace, setNotice, onClose, onSaved, onManageCustomCli,
 }: BotFormDialogProps) {
   // Bot form fields
   const [botName, setBotName] = useState(editingBot?.name ?? '')
@@ -74,12 +76,25 @@ export function BotFormDialog({
   const [botRole, setBotRole] = useState<'bot' | 'coordinator'>(editingBot?.agentPreset ?? 'bot')
   const [botPermission, setBotPermission] = useState<'read-only' | 'workspace-write' | 'full-access'>(editingBot?.permission ?? 'full-access')
   /**
+   * A6: providers registered by the local-agent service. A Bot on one of these runs on the
+   * agent's own login/model/rules, so the persona field is hidden — the adapter never sends a
+   * system prompt to a local agent (decision D5), and showing the field would promise otherwise.
+   */
+  const [localRoutes, setLocalRoutes] = useState<ReadonlySet<string>>(new Set())
+  /** Every CLI discovery found (available or not) — the local-mode dropdown's source. */
+  const [localDetected, setLocalDetected] = useState<readonly { route: string; name: string; version?: string | undefined; available: boolean }[]>([])
+  /** A6: 云模型 (API provider) vs 本机 Agent — the product's Bot mode switch. */
+  const [botMode, setBotMode] = useState<'cloud' | 'local'>('cloud')
+  /** Once the user flips the switch, stop auto-aligning it with the selected provider. */
+  const modeTouched = useRef(false)
+  /**
    * Which tab of the bot dialog is showing. Identity first: that is what a new bot needs,
    * and the model route is prefilled from the deployment defaults.
    */
   const [botTab, setBotTab] = useState<'identity' | 'runtime'>('identity')
   const [botProvider, setBotProvider] = useState(editingBot?.provider ?? '')
-  const [botModel, setBotModel] = useState(editingBot?.model ?? '')
+  // The host stores a real id; `default` is this form's "use the CLI's own model" sentinel.
+  const [botModel, setBotModel] = useState(editingBot?.model === 'default' ? '' : (editingBot?.model ?? ''))
   const [botWorkspace, setBotWorkspace] = useState(editingBot?.workspace ?? '')
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelError, setModelError] = useState<string>()
@@ -181,12 +196,47 @@ export function BotFormDialog({
     return () => { cancelled = true }
   }, [isBotMode, remote, editingBot, setModelGroups])
 
+  // A6: learn which providers are local agents, so the identity tab can hide the persona
+  // field for them. Non-fatal: if the local-agent service is absent the form behaves as before.
+  useEffect(() => {
+    let cancelled = false
+    void remote.localAgentSnapshot().then(
+      snapshot => {
+        if (cancelled) return
+        const routes = new Set(snapshot.registeredRoutes)
+        setLocalRoutes(routes)
+        setLocalDetected(snapshot.detected.map(entry => ({
+          route: entry.route,
+          name: entry.name,
+          ...(entry.version === undefined ? {} : { version: entry.version }),
+          available: entry.available,
+        })))
+      },
+      () => undefined,
+    )
+    return () => { cancelled = true }
+  }, [remote])
+
   // When opening the create-bot form, pre-fill workspace with DSH default
   useEffect(() => {
     if (isBotMode && editingBot === undefined && botWorkspace === '' && defaultWorkspace !== '') {
       setBotWorkspace(defaultWorkspace)
     }
   }, [isBotMode, editingBot, botWorkspace, defaultWorkspace])
+
+  // A6: keep the Bot mode switch aligned with the selected provider until the user flips it
+  // by hand (a prefilled local route must open the form in 本机 Agent mode).
+  useEffect(() => {
+    if (modeTouched.current) return
+    const route = editingBot?.provider ?? botProvider
+    if (route === '') return
+    const local = localRoutes.has(route)
+    setBotMode(local ? 'local' : 'cloud')
+    if (local && editingBot === undefined) {
+      setBotModel('')
+      setBotPermission('workspace-write')
+    }
+  }, [botProvider, editingBot, localRoutes])
 
   async function handlePickWorkspace() {
     try {
@@ -249,8 +299,16 @@ export function BotFormDialog({
     e.preventDefault()
     if (busy) return
     if (botName.trim() === '') { setFormError('请填写名称'); return }
-    if (botProvider === '' || botModel === '') { setFormError('请选择 Provider 和 Model'); return }
+    if (botProvider === '' || (botMode === 'cloud' && botModel === '')) {
+      setFormError(botMode === 'cloud' ? '请选择 Provider 和 Model' : '请选择已安装的 CLI')
+      return
+    }
     if (botPermission === 'full-access' && !fullAccessConfirm) { setFormError('完全权限需要勾选风险确认'); return }
+    // A local Bot with no explicit model still needs a persisted model id: 'default' tells the
+    // driver to use whatever the CLI itself is logged into.
+    const modelToSend = botModel.trim() !== ''
+      ? botModel.trim()
+      : botMode === 'local' && botProvider.trim() !== '' ? 'default' : ''
     setBusy(true)
     setFormError(undefined)
     setNotice(undefined)
@@ -267,7 +325,7 @@ export function BotFormDialog({
           agentPreset: botRole,
           reasoningEffort: botEffort,
           ...(botProvider.trim() !== '' ? { provider: botProvider.trim() } : {}),
-          ...(botModel.trim() !== '' ? { model: botModel.trim() } : {}),
+          ...(modelToSend !== '' ? { model: modelToSend } : {}),
           ...(botWorkspace.trim() !== '' ? { workspace: botWorkspace.trim() } : {}),
         })
       } else {
@@ -281,7 +339,7 @@ export function BotFormDialog({
           agentPreset: botRole,
           reasoningEffort: botEffort,
           ...(botProvider.trim() !== '' ? { provider: botProvider.trim() } : {}),
-          ...(botModel.trim() !== '' ? { model: botModel.trim() } : {}),
+          ...(modelToSend !== '' ? { model: modelToSend } : {}),
           ...(botWorkspace.trim() !== '' ? { workspace: botWorkspace.trim() } : {}),
         })
         try {
@@ -316,12 +374,48 @@ export function BotFormDialog({
     setRoomMembers(prev => prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id])
   }
 
+  /** A6: this Bot's route is served by a local agent, not by an API provider. */
+  const isLocalRoute = localRoutes.has(botProvider.trim())
+
+  /** Which providers the current mode offers. Cloud hides local routes and vice versa. */
+  const selectableGroups = modelGroups.filter(group => (botMode === 'local') === localRoutes.has(group.id))
+
+  /** Switching mode re-picks a provider/model from that mode's pool. */
+  const handleSelectMode = (mode: 'cloud' | 'local') => {
+    modeTouched.current = true
+    setBotMode(mode)
+    const pool = mode === 'local'
+      ? modelGroups.filter(group => localRoutes.has(group.id))
+      : modelGroups.filter(group => !localRoutes.has(group.id))
+    const preferred = pool.find(group => group.id === botProvider) ?? pool[0]
+    if (preferred === undefined) {
+      if (mode === 'local') { setBotProvider(''); setBotModel('') }
+      return
+    }
+    setBotProvider(preferred.id)
+    // Local agents default to the CLI's own configured model; cloud keeps the first catalog
+    // model because a provider route always needs one.
+    const first = mode === 'local' ? undefined : preferred.models[0]
+    setBotModel(first?.id ?? '')
+    setBotEffort(prev => alignEffort(preferred.id, first?.id ?? '', prev))
+    // A local agent runs commands inside its own CLI; the safe default is the workspace, not
+    // the deployment's full-access default (which would also demand the risk checkbox).
+    if (mode === 'local' && editingBot === undefined) setBotPermission('workspace-write')
+  }
+
+  /** Local mode: the CLI itself is the provider; the model defaults to the CLI's own. */
+  const handleSelectLocalCli = (route: string) => {
+    setBotProvider(route)
+    setBotModel('')
+    setBotEffort(prev => alignEffort(route, '', prev))
+  }
+
   return (
     <NativeDialog
       open
       onClose={onClose}
       title={isBotMode ? (editingBot !== undefined ? `编辑 Bot：${editingBot.name}` : '新建 Bot') : '新建群聊'}
-      description={isBotMode ? '身份决定它叫什么、怎么被路由；运行决定它用哪个模型、能改哪些文件。' : undefined}
+      description={isBotMode ? '先选择 Bot 类型，再填写它的名字与运行方式。' : undefined}
       closeLabel="关闭"
       footer={(
         // ── THE ERROR LIVES IN THE FOOTER, ABOVE THE BUTTON THAT CAUSED IT ──────
@@ -343,12 +437,21 @@ export function BotFormDialog({
               style={{ fontSize: 12, lineHeight: '18px' }}
             >{formError}</div>
           )}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            <span>
+              {isBotMode && onManageCustomCli !== undefined ? (
+                <button type="button" className={css.rowActionButton} onClick={onManageCustomCli}>
+                  ＋ 管理自定义 CLI…
+                </button>
+              ) : null}
+            </span>
+            <div style={{ display: 'flex', gap: 8 }}>
             <Button variant="outline" onClick={onClose}>取消</Button>
             {/* `type` must come after the primitive's own defaults — Button spreads rest over them. */}
             <Button variant="primary" type="submit" form={isBotMode ? 'bot-form' : 'room-form'} disabled={busy}>
               {busy ? (editingBot !== undefined ? '保存中…' : '创建中…') : (editingBot !== undefined ? '保存' : '创建')}
             </Button>
+            </div>
           </div>
         </div>
       )}
@@ -356,6 +459,37 @@ export function BotFormDialog({
       <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 }}>
         {isBotMode ? (
           <form id="bot-form" className={css.form} onSubmit={handleCreateBot}>
+            <div className={css.field}>
+              <span className={css.fieldLabel}>Bot 类型</span>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                {(['cloud', 'local'] as const).map(mode => {
+                  const selected = botMode === mode
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => handleSelectMode(mode)}
+                      aria-pressed={selected}
+                      style={{
+                        textAlign: 'left', cursor: 'pointer', padding: '12px 14px', borderRadius: 12,
+                        display: 'flex', flexDirection: 'column', gap: 6,
+                        border: selected ? '1.5px solid var(--dsw-alias-brand-primary, #2563eb)' : '1px solid var(--dsw-alias-border-secondary, #e6e7eb)',
+                        background: selected ? 'var(--dsw-alias-fill-secondary, #eff4ff)' : 'transparent',
+                        color: 'inherit',
+                      }}
+                    >
+                      <span style={{ fontWeight: 600, fontSize: 13.5 }}>{mode === 'cloud' ? '☁️ 云模型' : '💻 本机 Agent'}</span>
+                      <span style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary, #6b7280)' }}>
+                        {mode === 'cloud'
+                          ? '使用 DSH 设置里的模型提供方与 API 凭据，可填人设与指令。'
+                          : '连接你电脑上已安装的 CLI（Codex、Claude Code 等），用它们自己的登录与模型。'}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+              <span className={css.fieldHint}>先选类型，再填下面的名字与运行方式</span>
+            </div>
             <DialogTabs
               idPrefix="ac-bot"
               label="Bot 设置"
@@ -412,11 +546,20 @@ export function BotFormDialog({
                             : '可以执行命令、读写文件；协调者适合作为群主/队长，只负责安排与汇总。'}
                         </span>
                       </div>
-                      <div className={css.field}>
-                        <span className={css.fieldLabel}>人设与指令</span>
-                        <textarea className={css.textarea} value={botPrompt} onChange={e => setBotPrompt(e.target.value)} placeholder="你是一名…" />
-                        <span className={css.fieldHint}>留空使用默认人设；只影响这个 Bot</span>
-                      </div>
+                      {isLocalRoute ? (
+                        <div className={css.field}>
+                          <span className={css.fieldLabel}>人设与指令</span>
+                          <span className={css.fieldHint}>
+                            本机 Agent 使用它自己的规则与配置，不注入人设提示词（由被接管的 agent 决定行为）。
+                          </span>
+                        </div>
+                      ) : (
+                        <div className={css.field}>
+                          <span className={css.fieldLabel}>人设与指令</span>
+                          <textarea className={css.textarea} value={botPrompt} onChange={e => setBotPrompt(e.target.value)} placeholder="你是一名…" />
+                          <span className={css.fieldHint}>留空使用默认人设；只影响这个 Bot</span>
+                        </div>
+                      )}
                     </div>
                   ),
                 },
@@ -425,11 +568,41 @@ export function BotFormDialog({
                   label: '运行',
                   content: (
                     <div className={css.form}>
+                      {botMode === 'local' ? (
+                        <>
+                          <div className={css.field}>
+                            <span className={css.fieldLabel}>选择已安装的 CLI</span>
+                            <span className={css.rowControl}><select className={css.select} value={botProvider} onChange={e => handleSelectLocalCli(e.target.value)} disabled={localDetected.length === 0}>
+                              <option value="">{localDetected.length === 0 ? '没有检测到 CLI' : '选择 CLI…'}</option>
+                              {localDetected.map(entry => (
+                                <option key={entry.route} value={entry.route} disabled={!entry.available && !localRoutes.has(entry.route)}>
+                                  {entry.name}{entry.version === undefined ? '' : ' (' + entry.version + ')'}{entry.available || localRoutes.has(entry.route) ? '' : '（未安装）'}
+                                </option>
+                              ))}
+                              {botProvider !== '' && !localDetected.some(entry => entry.route === botProvider) && (
+                                <option value={botProvider}>{botProvider}（当前值）</option>
+                              )}
+                            </select></span>
+                            <span className={css.fieldHint}>下拉列出你电脑上检测到的 CLI；未安装的置灰。未登录的 CLI 会在首次对话时报出登录命令。</span>
+                          </div>
+                          <div className={css.field}>
+                            <span className={css.fieldLabel}>使用该 CLI 的模型</span>
+                            <span className={css.rowControl}><select className={css.select} value={botModel} onChange={e => { setBotModel(e.target.value); setBotEffort(prev => alignEffort(botProvider, e.target.value, prev)) }} disabled={botProvider === ''}>
+                              <option value="">默认（跟随该 CLI 登录的模型）</option>
+                              {(modelGroups.find(group => group.id === botProvider)?.models ?? []).map(model => (
+                                <option key={model.id} value={model.id}>{model.name ?? model.id}</option>
+                              ))}
+                            </select></span>
+                            <span className={css.fieldHint}>不选则用该 CLI 的默认模型；对话里说「换成 …」只影响当前会话</span>
+                          </div>
+                        </>
+                      ) : (
+                        <>
                       <div className={css.field}>
                         <span className={css.fieldLabel}>Provider</span>
                         <span className={css.rowControl}><select className={css.select} value={botProvider} onChange={e => handleSelectProvider(e.target.value)} disabled={modelsLoading || modelGroups.length === 0}>
                           {modelGroups.length === 0 && <option value="">{modelsLoading ? '加载中…' : '没有已配置的 Provider'}</option>}
-                          {modelGroups.map(group => (
+                          {selectableGroups.map(group => (
                             <option key={group.id} value={group.id}>{providerLabelOf(group)}</option>
                           ))}
                           {botProvider !== '' && !modelGroups.some(g => g.id === botProvider) && (
@@ -461,7 +634,11 @@ export function BotFormDialog({
                             <option value={botModel}>{botModel}（当前值，设置中未列出）</option>
                           )}
                         </select></span>
-                        <span className={css.fieldHint}>{modelError !== undefined ? `读取失败：${modelError}` : '模型与提供方来自 DSH 设置，可随时切换'}</span>
+                        <span className={css.fieldHint}>{modelError !== undefined
+                          ? `读取失败：${modelError}`
+                          : isLocalRoute
+                            ? '本机 Agent：使用该 agent 自己的登录与模型，不需要 API Key'
+                            : '模型与提供方来自 DSH 设置，可随时切换'}</span>
                       </div>
                       <div className={css.field}>
                         <span className={css.fieldLabel}>思考深度</span>
@@ -484,6 +661,9 @@ export function BotFormDialog({
                         </select></span>
                         <span className={css.fieldHint}>档位由该模型在 DSH 设置中提供；越高越稳，也越慢</span>
                       </div>
+
+                        </>
+                      )}
                       <div className={css.field}>
                         <span className={css.fieldLabel}>工作区</span>
                         <div className={css.rowPair}>
