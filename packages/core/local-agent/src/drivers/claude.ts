@@ -120,6 +120,13 @@ export class ClaudeDriver implements LocalAgentDriver {
       '--output-format', 'stream-json',
       '--verbose',
       '--allowedTools', 'mcp__dshbot',
+      // A6b: map the Bot permission onto Claude's own permission mode. full-access uses the
+      // dedicated flag because bypassPermissions is not accepted in -p mode on every build.
+      ...(input.permission === 'workspace-write'
+        ? ['--permission-mode', 'acceptEdits']
+        : input.permission === 'full-access'
+          ? ['--dangerously-skip-permissions']
+          : input.permission === 'read-only' ? ['--permission-mode', 'plan'] : []),
       ...this.baseArgs,
       ...(input.resumeId === undefined ? [] : ['--resume', input.resumeId]),
       ...(input.model !== undefined && input.model !== 'default' ? ['--model', input.model] : []),

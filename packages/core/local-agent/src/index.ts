@@ -145,6 +145,8 @@ export class LocalAgentService extends TypertRemoteService {
   /** Host approval service, captured when present; absent means every agent approval is denied. */
   private approvalService: ApprovalPort | undefined
   private readonly toolsDisposers: Array<() => void> = []
+  /** Permission reported by the Bot's session runner before the first turn of a session. */
+  private readonly pendingPermissions = new Map<string, 'read-only' | 'workspace-write' | 'full-access'>()
   /** Resolved when Cordis injects the host's LLM registry (absent on hosts that cannot route). */
   private llmService: { registerAdapter(providers: string[], adapter: LocalAgentAdapter): AdapterRegistrationHandle } | undefined
 
@@ -231,13 +233,13 @@ export class LocalAgentService extends TypertRemoteService {
   private scanSync(): void {
     const detected: LocalAgentRouteView[] = []
     for (const spec of Object.values(ENGINES)) {
-      detected.push(routeView(spec, false, findExecutable(spec.command, spec.appPaths)))
+      detected.push(routeView(spec, false, findExecutable(spec.command, spec.appPaths, this.cfg.extraSearchDirs)))
     }
     for (const agent of this.state.custom) {
       detected.push(routeView(
         { route: customRoute(agent.id), name: agent.name, kind: 'acp' },
         true,
-        findExecutable(agent.command),
+        findExecutable(agent.command, [], this.cfg.extraSearchDirs),
       ))
     }
     this.detected = detected
@@ -334,6 +336,32 @@ export class LocalAgentService extends TypertRemoteService {
     await this.scan()
     this.rebuildRoutes()
     return this.snapshot()
+  }
+
+  /**
+   * Register the permission the Bot's session was created with (called by the agent-community
+   * session runner right after it applies the permission preset).
+   *
+   * The value lives on the local-agent session record because the LLM adapter only receives a
+   * session id; each driver maps it onto its CLI's own sandbox/permission flags (Codex sandbox,
+   * Claude --permission-mode). Unknown/older hosts simply never call this and the CLI keeps its
+   * default mode.
+   */
+  setSessionPermission(sessionId: string, permission: 'read-only' | 'workspace-write' | 'full-access'): void {
+    const record = this.state.sessions[sessionId]
+    if (record === undefined) {
+      this.pendingPermissions.set(sessionId, permission)
+      return
+    }
+    if (record.permission === permission) return
+    this.state = {
+      ...this.state,
+      sessions: {
+        ...this.state.sessions,
+        [sessionId]: { ...record, permission, updatedAt: new Date().toISOString() },
+      },
+    }
+    void this.persist()
   }
 
   /** Model ids available to one DSH session (empty before its first turn). */
@@ -470,12 +498,18 @@ export class LocalAgentService extends TypertRemoteService {
       specFor: route => engineOf(route, this.state.custom),
       recordFor: sessionId => this.state.sessions[sessionId],
       saveRecord: (sessionId, record: LocalAgentSessionRecord) => {
+        // Keep the permission reported by the session runner: the adapter saves on turn end
+        // without knowing about it, and dropping it would remap the CLI sandbox next turn.
+        const previous = this.state.sessions[sessionId]
+        const permission = record.permission ?? previous?.permission ?? this.pendingPermissions.get(sessionId)
+        const next: LocalAgentSessionRecord = permission === undefined ? record : { ...record, permission }
         this.state = {
           ...this.state,
-          sessions: { ...this.state.sessions, [sessionId]: record },
+          sessions: { ...this.state.sessions, [sessionId]: next },
         }
         void this.persist()
       },
+      permissionFor: sessionId => this.state.sessions[sessionId]?.permission ?? this.pendingPermissions.get(sessionId),
       // A6 resolves the Bot/session workspace; A2/A3 run from the host's working directory.
       cwdFor: () => process.cwd(),
       toolsBridge: this.cfg.toolsBridge,

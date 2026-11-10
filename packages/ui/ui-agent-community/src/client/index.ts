@@ -140,20 +140,18 @@ function serviceDescriptor(service: string, method: string, parameters: { name: 
   }
 }
 
-const localAgentContribution = {
+
+const contribution = {
   package: '@dsh-plugin-agent-community/ui-agent-community',
   descriptors: [
+    // A6: second namespace owned by this package. It MUST be mounted as part of this same
+    // contribution: typert keys a remote package by name, so a second $mount with the same
+    // package failed with 'Remote package ... is already registered' (measured 2026-11-10).
     serviceDescriptor('localAgent', 'snapshot', []),
     serviceDescriptor('localAgent', 'refresh', []),
     serviceDescriptor('localAgent', 'addCustomAgent', [param('input', obj('AddLocalAgentRequest'))]),
     serviceDescriptor('localAgent', 'updateCustomAgent', [param('input', obj('UpdateLocalAgentRequest'))]),
     serviceDescriptor('localAgent', 'removeCustomAgent', [param('input', obj('RemoveLocalAgentInput'))]),
-  ],
-}
-
-const contribution = {
-  package: '@dsh-plugin-agent-community/ui-agent-community',
-  descriptors: [
     descriptor('snapshot', []),
     // 2026-11-09: manual experience condense (read-only except the hidden refine run).
     descriptor('compactGroupExperience', [param('input', obj('CompactExperienceRequest'))]),
@@ -370,13 +368,7 @@ export function apply(ctx: ClientContext): void {
     return () => { caps.community = undefined }
   })
 
-  // A6: the local-agent namespace. Optional — on a host without the local-agent package the
-  // settings panel still registers and reports "unavailable" instead of disappearing.
-  const localMountFailure: { error?: unknown } = {}
-  ctx.remote.$mount(localAgentContribution).then(
-    () => undefined,
-    (error: unknown) => { localMountFailure.error = error },
-  )
+  // A6: the local-agent namespace is published as part of the single contribution above.
   ctx.inject(['remote.localAgent'], (scope) => {
     caps.localAgent = scope.remote['localAgent'] as RemoteFace
     return () => { caps.localAgent = undefined }
@@ -554,10 +546,7 @@ export function apply(ctx: ClientContext): void {
           'localAgent/' + method,
         )
       }
-      if (localMountFailure.error !== undefined) {
-        throw new Error('localAgent RPC 挂载失败：' + describe(localMountFailure.error))
-      }
-      if (Date.now() >= deadline) throw new Error('localAgent RPC 挂载超时：本机 Agent 服务未加载')
+      if (Date.now() >= deadline) throw new Error('localAgent RPC 不可用：本机 Agent 服务未加载')
       await delay(POLL_INTERVAL_MS)
     }
   }
@@ -730,10 +719,9 @@ export function apply(ctx: ClientContext): void {
   // Self-contained panel: the entry declares no child slot, so it consumes no
   // renderSlot. remote and diagnostics arrive through React Context below.
   function LocalAgentsPanelWithRemote(_props: Record<string, unknown>) {
-    const remote = useContext(RemoteContext)
-    if (!remote) {
-      return createElement('div', { style: { padding: 24, color: 'var(--dsw-alias-label-tertiary)', fontSize: 13 } }, '本机 Agent 初始化中…')
-    }
+    // This main slot is NOT rendered inside CommunityPage's RemoteContext.Provider, so it
+    // takes the remote face from this apply() scope directly instead of useContext — the
+    // first version showed "初始化中…" forever in the real browser (measured 2026-11-10).
     return createElement(LocalAgentsPage, { remote })
   }
 

@@ -39,6 +39,8 @@ export interface DriverStreamInput {
   readonly cwd: string
   /** Explicit model id, or undefined for the CLI's configured default. */
   readonly model?: string | undefined
+  /** Bot permission, mapped by each driver onto its CLI's sandbox/permission mode. */
+  readonly permission?: 'read-only' | 'workspace-write' | 'full-access' | undefined
   /** CLI-side session/thread to resume, when a previous turn established one. */
   readonly resumeId?: string | undefined
   /** Tools to expose over loopback MCP for this turn (empty/absent disables the bridge). */

@@ -2091,6 +2091,18 @@ export class SessionRunner {
     const bot = this.accessor.botById(botId)
     const permission = bot?.permission
     if (permission === undefined || permission === '') return
+    // A6b: local-agent routes read the permission from their session record to map it onto
+    // the CLI's own sandbox/permission flags (Codex sandbox, Claude --permission-mode).
+    const localAgent = optionalService<{ setSessionPermission?(sessionId: string, permission: string): void }>(
+      this.ctx, 'localAgent',
+    )
+    if (localAgent?.setSessionPermission !== undefined) {
+      try {
+        localAgent.setSessionPermission(this.accessor.sessionIdFor(roomId, botId) as unknown as string, permission)
+      } catch (error: unknown) {
+        this.ctx.logger?.warn?.(`agent-community: could not report permission to local-agent: ${String(error)}`)
+      }
+    }
     const svc = optionalService<{ set?(session: unknown, name: string): void }>(
       this.ctx, 'permissionPresets',
     )

@@ -56,6 +56,8 @@ export interface LocalAgentAdapterDeps {
   readonly recordFor: (sessionId: string) => LocalAgentSessionRecord | undefined
   readonly saveRecord: (sessionId: string, record: LocalAgentSessionRecord) => void
   readonly cwdFor: (sessionId: string) => string
+  /** Bot permission for this session, mapped by drivers onto their CLI's sandbox/permission mode. */
+  readonly permissionFor: (sessionId: string) => 'read-only' | 'workspace-write' | 'full-access' | undefined
   /** Config switch: expose the collaboration tools to the agent over loopback MCP. */
   readonly toolsBridge: boolean
 }
@@ -321,7 +323,11 @@ export class LocalAgentAdapter extends LlmAdapter {
 
     const toolResults = this.takeToolResults(options.messages)
     const bridgedTools = this.deps.toolsBridge ? bridgedToolsOf(options.tools) : []
-    const lastMessageId = lastMessageIdOf(options.messages)
+    // The handed marker must be an id from the SAME filtered list `buildPrompt` compared
+    // against. Using the raw message list here recorded the id of a dropped runtime-context
+    // injection, so the marker never matched on resume and every turn replayed history
+    // (measured with the fake ACP agent on 2026-11-10).
+    const lastMessageId = built.lastMessageId
 
     let nextIndex = 0
     let textIndex = -1
@@ -351,6 +357,7 @@ export class LocalAgentAdapter extends LlmAdapter {
         prompt: built.prompt,
         cwd: this.deps.cwdFor(sessionId),
         model: record?.modelOverride ?? options.model,
+        permission: this.deps.permissionFor(sessionId),
         resumeId: record?.resumeId,
         ...(bridgedTools.length === 0 ? {} : { mcp: { tools: bridgedTools } }),
         ...(toolResults.length === 0 ? {} : { toolResults }),

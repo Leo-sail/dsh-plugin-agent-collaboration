@@ -33,6 +33,16 @@ export type {
 
 export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
   const [tab, setTab] = useState<ActiveTab>('bots')
+  // A6b: providers served by a local agent CLI (badge; the Bot form hides persona for them).
+  const [localRoutes, setLocalRoutes] = useState<ReadonlySet<string>>(new Set())
+  useEffect(() => {
+    let cancelled = false
+    void remote.localAgentSnapshot().then(
+      snapshot => { if (!cancelled) setLocalRoutes(new Set(snapshot.registeredRoutes)) },
+      () => undefined,
+    )
+    return () => { cancelled = true }
+  }, [remote])
   const [selectedId, setSelectedId] = useState<string>()
   /**
    * Whether this panel is actually in front of the user.
@@ -540,6 +550,7 @@ export function CommunityPage({ remote, diagnostics }: CommunityPageProps) {
       >
         <RoomList
           tab={tab}
+          localRoutes={localRoutes}
           // `noteUserSelection()` BEFORE each pick: a snapshot fetch that started earlier
           // must lose to this click when it lands, which is the whole point of the timestamp.
           onSelectTab={(next) => { noteUserSelection(); setTab(next); setSelectedId(undefined) }}

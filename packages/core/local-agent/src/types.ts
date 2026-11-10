@@ -68,6 +68,8 @@ export interface LocalAgentSessionRecord {
   readonly model?: string | undefined
   /** Session-level model switch from the natural-language tool (overrides `model`). */
   readonly modelOverride?: string | undefined
+  /** The Bot's DSH permission presets, mapped onto the CLI's own sandbox/permission flags. */
+  readonly permission?: 'read-only' | 'workspace-write' | 'full-access' | undefined
   readonly updatedAt: string
 }
 

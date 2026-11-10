@@ -147,7 +147,7 @@ function candidates(name: string): readonly string[] {
  * @param name - bare program name, absolute path, or `~/path`.
  * @param appPaths - absolute paths to check after PATH (e.g. a CLI bundled in a desktop app).
  */
-export function findExecutable(name: string, appPaths: readonly string[] = []): string | undefined {
+export function findExecutable(name: string, appPaths: readonly string[] = [], extraDirs: readonly string[] = []): string | undefined {
   const trimmed = name.trim()
   if (trimmed === '') return undefined
   if (isPathLike(trimmed)) {
@@ -155,6 +155,12 @@ export function findExecutable(name: string, appPaths: readonly string[] = []): 
     return existsSync(path) ? path : undefined
   }
   for (const dir of searchDirs()) {
+    for (const file of candidates(trimmed)) {
+      const path = join(dir, file)
+      if (existsSync(path)) return path
+    }
+  }
+  for (const dir of extraDirs) {
     for (const file of candidates(trimmed)) {
       const path = join(dir, file)
       if (existsSync(path)) return path

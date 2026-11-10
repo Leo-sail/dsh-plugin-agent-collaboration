@@ -240,10 +240,15 @@ export class CodexDriver implements LocalAgentDriver {
   }
 
   private threadParams(input: DriverStreamInput, session: SessionState): Record<string, unknown> {
+    // A6b: the Bot's DSH permission decides the CLI sandbox. Full access is the only mode
+    // where Codex needs no approval round-trips (the DSH preset already grants everything).
+    const sandbox = input.permission === 'workspace-write'
+      ? 'workspace-write'
+      : input.permission === 'full-access' ? 'danger-full-access' : 'read-only'
     return {
       cwd: input.cwd,
-      sandbox: 'read-only',
-      approvalPolicy: 'on-request',
+      sandbox,
+      approvalPolicy: input.permission === 'full-access' ? 'never' : 'on-request',
       ...(input.model !== undefined && input.model !== 'default' ? { model: input.model } : {}),
       ...(session.mcpUrl === undefined ? {} : {
         config: {
