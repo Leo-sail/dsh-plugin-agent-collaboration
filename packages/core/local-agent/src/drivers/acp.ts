@@ -41,6 +41,11 @@ export interface AcpDriverOptions {
   readonly env?: Readonly<Record<string, string>>
 }
 
+interface AcpSessionReply {
+  readonly sessionId?: unknown
+  readonly configOptions?: unknown
+}
+
 interface AcpCapabilities {
   readonly loadSession: boolean
   readonly mcpHttp: boolean
@@ -54,6 +59,10 @@ interface AcpSessionState {
   readonly mcp: LoopbackMcp
   /** Set once we know the agent cannot accept HTTP MCP servers (degradation). */
   mcpSuppressed?: boolean
+  /** Model options the agent advertised in this session (`configOptions`). */
+  modelOptions?: readonly DriverModel[]
+  /** Model currently selected on the agent side. */
+  currentModel?: string
 }
 
 export class AcpDriver implements LocalAgentDriver {
@@ -69,6 +78,7 @@ export class AcpDriver implements LocalAgentDriver {
   private readonly sessions = new Map<string, AcpSessionState>()
   /** Parked permission prompts keyed by the synthetic DSH tool-call id. */
   private readonly pendingApprovals = new Map<string, (decision: { allow: boolean }) => void>()
+  private modelsCache: readonly DriverModel[] = [{ id: 'default', name: 'agent default' }]
   private disposed = false
 
   constructor(options: AcpDriverOptions) {
@@ -80,9 +90,22 @@ export class AcpDriver implements LocalAgentDriver {
   }
 
   async listModels(): Promise<readonly DriverModel[]> {
-    // ACP model options are advertised per session (`configOptions`); A5 reads them. The
-    // honest default for now is the agent's own configured model.
-    return [{ id: 'default', name: 'agent default' }]
+    // ACP model options are advertised per session (`configOptions`); after the first
+    // session they are the real catalog. Before that the agent default is the honest answer.
+    return this.modelsCache
+  }
+
+  /** Apply a session-scoped model switch immediately on the live ACP session. */
+  async setModel(sessionId: string, model: string): Promise<void> {
+    const session = this.sessions.get(sessionId)
+    const peer = this.peer
+    if (session === undefined || session.acpSessionId === undefined || peer === undefined) return
+    await peer.request('session/set_config_option', {
+      sessionId: session.acpSessionId,
+      configId: 'model',
+      value: model,
+    }, { timeoutMs: 15_000 })
+    session.currentModel = model
   }
 
   async dispose(): Promise<void> {
@@ -128,6 +151,47 @@ export class AcpDriver implements LocalAgentDriver {
     }
   }
 
+  /** Read `configOptions` (model selector) out of a session/new|load reply. */
+  private adoptSessionOptions(session: AcpSessionState, reply: AcpSessionReply | undefined): void {
+    const options = Array.isArray(reply?.configOptions) ? reply.configOptions : []
+    for (const option of options) {
+      if (option === null || typeof option !== 'object') continue
+      const record = option as Record<string, unknown>
+      const id = String(record['id'] ?? record['category'] ?? '')
+      if (id !== 'model') continue
+      const entries = Array.isArray(record['options']) ? record['options'] : []
+      const models: DriverModel[] = []
+      for (const entry of entries) {
+        if (entry === null || typeof entry !== 'object') continue
+        const value = (entry as Record<string, unknown>)['value'] ?? (entry as Record<string, unknown>)['id']
+        if (typeof value !== 'string') continue
+        const name = (entry as Record<string, unknown>)['name']
+        models.push({ id: value, name: typeof name === 'string' ? name : value })
+      }
+      if (models.length > 0) {
+        session.modelOptions = models
+        this.modelsCache = models
+      }
+      const current = record['currentValue'] ?? record['currentValueId']
+      if (typeof current === 'string') session.currentModel = current
+    }
+  }
+
+  /** Apply the request's model selection to a freshly created/resumed session. */
+  private async applyRequestedModel(peer: JsonRpcPeer, session: AcpSessionState, model: string | undefined): Promise<void> {
+    if (model === undefined || model === 'default' || session.acpSessionId === undefined) return
+    try {
+      await peer.request('session/set_config_option', {
+        sessionId: session.acpSessionId,
+        configId: 'model',
+        value: model,
+      }, { timeoutMs: 15_000 })
+      session.currentModel = model
+    } catch {
+      // The agent may not accept runtime model selection; the turn proceeds on its default.
+    }
+  }
+
   private sessionFor(sessionId: string): AcpSessionState {
     let session = this.sessions.get(sessionId)
     if (session === undefined) {
@@ -168,8 +232,10 @@ export class AcpDriver implements LocalAgentDriver {
     const resumeId = session.acpSessionId ?? input.resumeId
     if (resumeId !== undefined) {
       try {
-        const loaded = await peer.request('session/load', { sessionId: resumeId, cwd: input.cwd, mcpServers }, { timeoutMs: SESSION_TIMEOUT_MS }) as { sessionId?: unknown }
+        const loaded = await peer.request('session/load', { sessionId: resumeId, cwd: input.cwd, mcpServers }, { timeoutMs: SESSION_TIMEOUT_MS }) as AcpSessionReply
         session.acpSessionId = typeof loaded?.sessionId === 'string' ? loaded.sessionId : resumeId
+        this.adoptSessionOptions(session, loaded)
+        await this.applyRequestedModel(peer, session, input.model)
         this.push(session, { type: 'thread', threadId: session.acpSessionId })
         return
       } catch {
@@ -177,11 +243,13 @@ export class AcpDriver implements LocalAgentDriver {
         session.acpSessionId = undefined
       }
     }
-    const created = await peer.request('session/new', { cwd: input.cwd, mcpServers }, { timeoutMs: SESSION_TIMEOUT_MS }) as { sessionId?: unknown }
+    const created = await peer.request('session/new', { cwd: input.cwd, mcpServers }, { timeoutMs: SESSION_TIMEOUT_MS }) as AcpSessionReply
     if (typeof created?.sessionId !== 'string' || created.sessionId === '') {
       throw new Error('acp agent returned no session id')
     }
     session.acpSessionId = created.sessionId
+    this.adoptSessionOptions(session, created)
+    await this.applyRequestedModel(peer, session, input.model)
     this.push(session, { type: 'thread', threadId: created.sessionId })
   }
 

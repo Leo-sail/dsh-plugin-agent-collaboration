@@ -137,6 +137,7 @@ export class CodexDriver implements LocalAgentDriver {
       const started = peer.request('turn/start', {
         threadId: session.threadId,
         input: [{ type: 'text', text: input.prompt }],
+        ...(input.model !== undefined && input.model !== 'default' ? { model: input.model } : {}),
       }, { timeoutMs: 0, signal: input.signal })
       started.then(
         reply => {

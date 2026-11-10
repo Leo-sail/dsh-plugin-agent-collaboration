@@ -24,7 +24,7 @@ import { AcpDriver } from './drivers/acp.ts'
 import { CodexDriver } from './drivers/codex.ts'
 import type { LocalAgentDriver } from './drivers/types.ts'
 import { ENGINES, customRoute, engineOf, validateCustomAgent } from './engines.ts'
-import { approveAgentActionTool, type ApprovalPort } from './tools.ts'
+import { approveAgentActionTool, switchModelTool, type ApprovalPort, type SwitchModelPort } from './tools.ts'
 import { findExecutable, probeVersion, refreshSearchDirs } from './discover.ts'
 import { emptyState, loadState, newCustomAgentId, saveState, type PersistedLocalAgentState } from './state.ts'
 import type {
@@ -143,7 +143,7 @@ export class LocalAgentService extends TypertRemoteService {
   private registration: AdapterRegistrationHandle | undefined
   /** Host approval service, captured when present; absent means every agent approval is denied. */
   private approvalService: ApprovalPort | undefined
-  private toolsDisposer: (() => void) | undefined
+  private readonly toolsDisposers: Array<() => void> = []
   /** Resolved when Cordis injects the host's LLM registry (absent on hosts that cannot route). */
   private llmService: { registerAdapter(providers: string[], adapter: LocalAgentAdapter): AdapterRegistrationHandle } | undefined
 
@@ -183,7 +183,11 @@ export class LocalAgentService extends TypertRemoteService {
     ctx.inject(['tools'], (child) => {
       const tools = (child as unknown as { tools?: { register(definition: unknown): () => void } }).tools
       if (tools === undefined || typeof tools.register !== 'function') return
-      this.toolsDisposer = tools.register(approveAgentActionTool(() => this.approvalService))
+      const port = this as unknown as SwitchModelPort
+      this.toolsDisposers.push(
+        tools.register(approveAgentActionTool(() => this.approvalService)),
+        tools.register(switchModelTool(() => port)),
+      )
     })
     ctx.effect(() => () => { void this.dispose() }, 'local-agent: runtime')
     // DEFERRED ON PURPOSE: a Cordis plugin's own fiber is not active while its constructor is
@@ -331,6 +335,50 @@ export class LocalAgentService extends TypertRemoteService {
     return this.snapshot()
   }
 
+  /** Model ids available to one DSH session (empty before its first turn). */
+  async availableModels(sessionId: string): Promise<readonly string[]> {
+    const record = this.state.sessions[sessionId]
+    if (record === undefined) return []
+    const driver = this.drivers.get(record.route)
+    if (driver === undefined) return []
+    const models = await driver.listModels().catch(() => [])
+    return models.map(model => model.id)
+  }
+
+  /**
+   * Session-scoped model switch, used by the `agent_switch_model` tool.
+   *
+   * Matching is id → display name → substring, case-insensitive; an unknown request returns the
+   * available ids instead of silently sending a bad model to the CLI. The override is stored on
+   * the session record (not the Bot), so it survives turns but not a new conversation.
+   */
+  async switchModel(sessionId: string, wanted: string): Promise<{ ok: boolean; model?: string; available?: readonly string[]; error?: string }> {
+    const record = this.state.sessions[sessionId]
+    if (record === undefined) {
+      return { ok: false, error: 'this conversation has no local-agent session yet', available: await this.availableModels(sessionId) }
+    }
+    const driver = this.drivers.get(record.route)
+    if (driver === undefined) return { ok: false, error: `no driver registered for route ${record.route}` }
+    const models = await driver.listModels().catch(() => [])
+    const available = models.length === 0 ? ['default'] : models.map(model => model.id)
+    const wantedLower = wanted.toLowerCase()
+    const match = models.find(model => model.id.toLowerCase() === wantedLower)
+      ?? models.find(model => model.name.toLowerCase() === wantedLower)
+      ?? models.find(model => model.id.toLowerCase().includes(wantedLower) || model.name.toLowerCase().includes(wantedLower))
+    if (match === undefined) return { ok: false, error: `unknown model: ${wanted}`, available }
+    this.state = {
+      ...this.state,
+      sessions: {
+        ...this.state.sessions,
+        [sessionId]: { ...record, modelOverride: match.id, updatedAt: new Date().toISOString() },
+      },
+    }
+    void this.persist()
+    const withSetModel = driver as typeof driver & { setModel?: (sessionId: string, model: string) => Promise<void> }
+    await withSetModel.setModel?.(sessionId, match.id).catch(() => undefined)
+    return { ok: true, model: match.id }
+  }
+
   /**
    * Build the route→driver table for everything discovery found, then register or refresh the
    * adapter's routes.
@@ -432,8 +480,9 @@ export class LocalAgentService extends TypertRemoteService {
   }
 
   async dispose(): Promise<void> {
-    this.toolsDisposer?.()
-    this.toolsDisposer = undefined
+    for (const dispose of this.toolsDisposers.splice(0)) {
+      try { dispose() } catch { /* teardown is best-effort */ }
+    }
     this.registration?.()
     this.registration = undefined
     await this.adapter?.dispose()

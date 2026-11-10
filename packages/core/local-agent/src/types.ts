@@ -66,6 +66,8 @@ export interface LocalAgentSessionRecord {
   readonly handedId?: string | undefined
   /** Model asked for; `default` means the CLI's configured model. */
   readonly model?: string | undefined
+  /** Session-level model switch from the natural-language tool (overrides `model`). */
+  readonly modelOverride?: string | undefined
   readonly updatedAt: string
 }
 

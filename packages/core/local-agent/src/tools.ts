@@ -87,3 +87,60 @@ export function approveAgentActionTool(approval: () => ApprovalPort | undefined)
     },
   }
 }
+
+/** What the natural-language switch asks the host to do. */
+export interface SwitchModelPort {
+  switchModel(sessionId: string, model: string): Promise<{ readonly ok: boolean; readonly model?: string; readonly available?: readonly string[]; readonly error?: string }>
+  availableModels(sessionId: string): Promise<readonly string[]>
+}
+
+/**
+ * `agent_switch_model` — change THIS conversation's model when the user asks in natural
+ * language. Session-scoped by design (the Bot's configured model is unchanged; switching
+ * there is a settings action).
+ *
+ * Unknown ids are rejected with the available list, so the agent can tell the user what it
+ * can switch to instead of silently sending a bad model to the CLI.
+ */
+export function switchModelTool(port: () => SwitchModelPort | undefined): ToolDefinition {
+  return {
+    name: 'agent_switch_model',
+    description: 'Switch the model used for THIS conversation when the user asks for it (for example "use opus" or "换成 sonnet"). Only the current conversation is affected; the Bot default model is changed in settings. Returns the applied model, or the list of available models when the request is unavailable.',
+    parameters: {
+      type: 'object',
+      properties: {
+        model: { type: 'string', description: 'The model id or name to switch to' },
+      },
+      required: ['model'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          model: { type: 'string' },
+          available: { type: 'array', items: { type: 'string' } },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value ?? { ok: false }) }],
+    },
+    async execute(args: unknown, exec: { agent?: unknown }): Promise<unknown> {
+      const switchPort = port()
+      const sessionId = exec.agent !== null && typeof exec.agent === 'object' && typeof (exec.agent as { id?: unknown }).id === 'string'
+        ? (exec.agent as { id: string }).id
+        : undefined
+      if (switchPort === undefined || sessionId === undefined) return { ok: false, error: 'model switching is unavailable in this host' }
+      const input = args !== null && typeof args === 'object' ? args as Record<string, unknown> : {}
+      const wanted = String(input['model'] ?? '').trim()
+      if (wanted === '') return { ok: false, error: 'a model is required' }
+      try {
+        return await switchPort.switchModel(sessionId, wanted)
+      } catch (error) {
+        const available = await switchPort.availableModels(sessionId).catch(() => [])
+        return { ok: false, error: error instanceof Error ? error.message : String(error), ...(available.length === 0 ? {} : { available }) }
+      }
+    },
+  }
+}

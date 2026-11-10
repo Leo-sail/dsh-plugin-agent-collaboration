@@ -350,7 +350,7 @@ export class LocalAgentAdapter extends LlmAdapter {
         sessionId,
         prompt: built.prompt,
         cwd: this.deps.cwdFor(sessionId),
-        model: options.model,
+        model: record?.modelOverride ?? options.model,
         resumeId: record?.resumeId,
         ...(bridgedTools.length === 0 ? {} : { mcp: { tools: bridgedTools } }),
         ...(toolResults.length === 0 ? {} : { toolResults }),
