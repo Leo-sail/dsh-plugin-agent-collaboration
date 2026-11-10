@@ -14,6 +14,8 @@ files and the break is right here to see, where an absolute URL to the same imag
 | `02-group-conversation.png` | A group room where three Bots answered one message, each answer attributed to its own Bot. The headline shot: it is the one thing this plugin does that nothing in the box does. |
 | `01-bot-roster.png` | The Bot roster and the room list, with the sidebar entry carrying an unread count. |
 | `04-composer-menu.png` | The composer's `＋` menu open: 文件 / 压缩 / 权限 / 模型, then the skills group. |
+| `05-local-agent-types.png` | New Bot, first step: the **云模型 / 本机 Agent** type cards. |
+| `06-local-agent-cli.png` | Local mode's **选择已安装的 CLI** dropdown with the CLI's own default model. |
 
 ## How these were taken
 

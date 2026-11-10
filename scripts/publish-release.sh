@@ -40,6 +40,7 @@ cd "$ROOT"
 
 COMPONENTS=(
   packages/core/agent-community
+  packages/core/local-agent
   packages/tools/tool-agent-community
   packages/ui/ui-agent-community
 )

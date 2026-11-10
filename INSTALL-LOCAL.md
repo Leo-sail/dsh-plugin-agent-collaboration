@@ -1,14 +1,14 @@
-# 从仓库安装到 DSH profile（0.4.1）
+# 从仓库安装到 DSH profile（0.5.0）
 
-本文档说明如何把本仓库的三个组件装进一个 DSH profile，以及安装后必须遵守的几条规则。
+本文档说明如何把本仓库的四个组件装进一个 DSH profile，以及安装后必须遵守的几条规则。
 
-> 当前源码版本 0.4.1；npm/Release 安装请优先用 README 里的包名或 tarball。
+> 当前源码版本 0.5.0；npm/Release 安装请优先用 README 里的包名或 tarball。
 
 ## 安装
 
 ```bash
 pnpm run bundle                          # 产出 lib/，check-build 校验构建形状
-bash scripts/install-profile.sh desktop  # 安装三个组件到 profile 的插件 scope
+bash scripts/install-profile.sh desktop  # 安装四个组件到 profile 的插件 scope
 ```
 
 安装脚本支持任意 DSH home（用于同一台机器上并存多个 DSH 安装）：
