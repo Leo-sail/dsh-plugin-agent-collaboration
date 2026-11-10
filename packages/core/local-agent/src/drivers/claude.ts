@@ -136,7 +136,10 @@ export class ClaudeDriver implements LocalAgentDriver {
 
     const child = spawn(this.executable, args, {
       cwd: input.cwd,
-      env: cleanEnv(),
+      // The CLI's own auth/config env is part of "the agent's own login": Anthropic relays and
+      // cc-switch-style launchers configure Claude Code through ANTHROPIC_* variables, and
+      // stripping them made a working setup look like 'Not logged in'. DSH_* stays dropped.
+      env: { ...cleanEnv(), ...claudeAuthEnv() },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })
@@ -256,6 +259,16 @@ export class ClaudeDriver implements LocalAgentDriver {
       }
     })
   }
+}
+
+/** Pass through only Claude Code's own auth/config environment. */
+function claudeAuthEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!/^(?:ANTHROPIC_|CLAUDE_CODE_)/.test(key)) continue
+    if (value !== undefined) env[key] = value
+  }
+  return env
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
