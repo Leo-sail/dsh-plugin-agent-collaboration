@@ -346,7 +346,55 @@ export interface CommunityRemote {
     application?: string
     action?: 'reveal'
   }): Promise<{ opened: boolean }>
+  // ── Local agents (A6): discovery + custom ACP agents for the settings panel ──────
+  localAgentSnapshot(): Promise<LocalAgentSnapshotView>
+  localAgentRefresh(): Promise<LocalAgentSnapshotView>
+  localAgentAddCustomAgent(input: AddLocalAgentRequest): Promise<LocalAgentSnapshotView>
+  localAgentUpdateCustomAgent(input: UpdateLocalAgentRequest): Promise<LocalAgentSnapshotView>
+  localAgentRemoveCustomAgent(input: { readonly id: string }): Promise<LocalAgentSnapshotView>
 
+}
+
+/** One local agent route as the discovery service reports it. */
+export interface LocalAgentRouteView {
+  readonly route: string
+  readonly name: string
+  readonly kind: 'acp' | 'claude' | 'codex'
+  readonly custom: boolean
+  readonly available: boolean
+  readonly path?: string | undefined
+  readonly version?: string | undefined
+  readonly signInHint?: string | undefined
+}
+
+/** A user-added ACP agent. */
+export interface LocalAgentCustomAgent {
+  readonly id: string
+  readonly name: string
+  readonly command: string
+  readonly args: readonly string[]
+}
+
+/** The local-agent settings snapshot (mirrors the host type). */
+export interface LocalAgentSnapshotView {
+  readonly enabled: boolean
+  readonly supported: boolean
+  readonly home: string
+  readonly scannedAt: string
+  readonly detected: readonly LocalAgentRouteView[]
+  readonly custom: readonly LocalAgentCustomAgent[]
+  /** Routes actually registered as model providers (the Bot form hides persona for these). */
+  readonly registeredRoutes: readonly string[]
+}
+
+export interface AddLocalAgentRequest {
+  readonly name: string
+  readonly command: string
+  readonly args?: readonly string[] | string | undefined
+}
+
+export interface UpdateLocalAgentRequest extends AddLocalAgentRequest {
+  readonly id: string
 }
 
 /** One preview payload for a declared deliverable. */

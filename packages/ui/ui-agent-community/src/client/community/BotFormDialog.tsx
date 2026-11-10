@@ -74,6 +74,12 @@ export function BotFormDialog({
   const [botRole, setBotRole] = useState<'bot' | 'coordinator'>(editingBot?.agentPreset ?? 'bot')
   const [botPermission, setBotPermission] = useState<'read-only' | 'workspace-write' | 'full-access'>(editingBot?.permission ?? 'full-access')
   /**
+   * A6: providers registered by the local-agent service. A Bot on one of these runs on the
+   * agent's own login/model/rules, so the persona field is hidden — the adapter never sends a
+   * system prompt to a local agent (decision D5), and showing the field would promise otherwise.
+   */
+  const [localRoutes, setLocalRoutes] = useState<ReadonlySet<string>>(new Set())
+  /**
    * Which tab of the bot dialog is showing. Identity first: that is what a new bot needs,
    * and the model route is prefilled from the deployment defaults.
    */
@@ -180,6 +186,17 @@ export function BotFormDialog({
     })()
     return () => { cancelled = true }
   }, [isBotMode, remote, editingBot, setModelGroups])
+
+  // A6: learn which providers are local agents, so the identity tab can hide the persona
+  // field for them. Non-fatal: if the local-agent service is absent the form behaves as before.
+  useEffect(() => {
+    let cancelled = false
+    void remote.localAgentSnapshot().then(
+      snapshot => { if (!cancelled) setLocalRoutes(new Set(snapshot.registeredRoutes)) },
+      () => undefined,
+    )
+    return () => { cancelled = true }
+  }, [remote])
 
   // When opening the create-bot form, pre-fill workspace with DSH default
   useEffect(() => {
@@ -316,6 +333,9 @@ export function BotFormDialog({
     setRoomMembers(prev => prev.includes(id) ? prev.filter(m => m !== id) : [...prev, id])
   }
 
+  /** A6: this Bot's route is served by a local agent, not by an API provider. */
+  const isLocalRoute = localRoutes.has(botProvider.trim())
+
   return (
     <NativeDialog
       open
@@ -412,11 +432,20 @@ export function BotFormDialog({
                             : '可以执行命令、读写文件；协调者适合作为群主/队长，只负责安排与汇总。'}
                         </span>
                       </div>
-                      <div className={css.field}>
-                        <span className={css.fieldLabel}>人设与指令</span>
-                        <textarea className={css.textarea} value={botPrompt} onChange={e => setBotPrompt(e.target.value)} placeholder="你是一名…" />
-                        <span className={css.fieldHint}>留空使用默认人设；只影响这个 Bot</span>
-                      </div>
+                      {isLocalRoute ? (
+                        <div className={css.field}>
+                          <span className={css.fieldLabel}>人设与指令</span>
+                          <span className={css.fieldHint}>
+                            本机 Agent 使用它自己的规则与配置，不注入人设提示词（由被接管的 agent 决定行为）。
+                          </span>
+                        </div>
+                      ) : (
+                        <div className={css.field}>
+                          <span className={css.fieldLabel}>人设与指令</span>
+                          <textarea className={css.textarea} value={botPrompt} onChange={e => setBotPrompt(e.target.value)} placeholder="你是一名…" />
+                          <span className={css.fieldHint}>留空使用默认人设；只影响这个 Bot</span>
+                        </div>
+                      )}
                     </div>
                   ),
                 },
@@ -461,7 +490,11 @@ export function BotFormDialog({
                             <option value={botModel}>{botModel}（当前值，设置中未列出）</option>
                           )}
                         </select></span>
-                        <span className={css.fieldHint}>{modelError !== undefined ? `读取失败：${modelError}` : '模型与提供方来自 DSH 设置，可随时切换'}</span>
+                        <span className={css.fieldHint}>{modelError !== undefined
+                          ? `读取失败：${modelError}`
+                          : isLocalRoute
+                            ? '本机 Agent：使用该 agent 自己的登录与模型，不需要 API Key'
+                            : '模型与提供方来自 DSH 设置，可随时切换'}</span>
                       </div>
                       <div className={css.field}>
                         <span className={css.fieldLabel}>思考深度</span>

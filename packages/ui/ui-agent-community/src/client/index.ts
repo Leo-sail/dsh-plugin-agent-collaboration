@@ -24,6 +24,7 @@ import type {
   CommunityRemote, CommunityPageProps, CommunityDiagnostics, ModelCatalog, ModelCatalogFailure, ModelGroup,
 } from './CommunityPage.tsx'
 import { CommunityPage } from './CommunityPage.tsx'
+import { LocalAgentsPage } from './community/LocalAgentsPage.tsx'
 import { installNavBadge } from './navBadge.ts'
 // The native-conversation surface is deliberately NOT embedded: the plugin draws its own
 // transcript and composer from its own ledger. The two components that used to do that
@@ -124,6 +125,30 @@ function descriptor(method: string, parameters: { name: string; wire: string; so
 
 function param(name: string, codec: ReturnType<typeof str>) {
   return { name, wire: name, source: 'json', codec }
+}
+
+/** Descriptor factory for a second Remote namespace this plugin owns (A6: local agents). */
+function serviceDescriptor(service: string, method: string, parameters: { name: string; wire: string; source: string; codec: ReturnType<typeof str> }[]) {
+  return {
+    id: '@dsh-plugin-agent-community/ui-agent-community#' + service + '/' + method,
+    service,
+    namespace: service,
+    method,
+    invocation: { kind: 'direct' as const },
+    parameters,
+    result: { mode: 'src-json' as const },
+  }
+}
+
+const localAgentContribution = {
+  package: '@dsh-plugin-agent-community/ui-agent-community',
+  descriptors: [
+    serviceDescriptor('localAgent', 'snapshot', []),
+    serviceDescriptor('localAgent', 'refresh', []),
+    serviceDescriptor('localAgent', 'addCustomAgent', [param('input', obj('AddLocalAgentRequest'))]),
+    serviceDescriptor('localAgent', 'updateCustomAgent', [param('input', obj('UpdateLocalAgentRequest'))]),
+    serviceDescriptor('localAgent', 'removeCustomAgent', [param('input', obj('RemoveLocalAgentInput'))]),
+  ],
 }
 
 const contribution = {
@@ -267,7 +292,19 @@ function CommunityPagePanel() {
 // label — and once the entry got a real name ("Bots团队") that lookup silently stopped
 // matching, taking the unread count with it. The icon is the one node this plugin owns
 // inside that button, so the marker lives here and `navBadge` walks up to the button.
+function LocalAgentPanelIcon({ size, active }: { size: number; active: boolean }) {
+  return createElement(
+    'svg',
+    { width: size, height: size, viewBox: '0 0 20 20', fill: 'none', 'aria-hidden': true, 'data-local-agent-panel': 'local-agent' },
+    createElement('rect', { x: 2.5, y: 3.5, width: 15, height: 5, rx: 2, stroke: 'currentColor', strokeWidth: 1.4, opacity: active ? 1 : 0.85 }),
+    createElement('rect', { x: 2.5, y: 11.5, width: 15, height: 5, rx: 2, stroke: 'currentColor', strokeWidth: 1.4, opacity: active ? 1 : 0.85 }),
+    createElement('circle', { cx: 6, cy: 6, r: 1, fill: 'currentColor' }),
+    createElement('circle', { cx: 6, cy: 14, r: 1, fill: 'currentColor' }),
+  )
+}
+
 function CommunityPanelIcon({ size, active }: { size: number; active: boolean }) {
+
   const stroke = active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)'
   return createElement(
     'svg',
@@ -308,8 +345,10 @@ export function apply(ctx: ClientContext): void {
     layout: { selectPanel(id: string | null): void } | undefined
     /** The right Sidebar's navigation controller; only present while a Session is on screen. */
     sidebarRight: { openResource(address: string): void } | undefined
+    /** A6: local-agent discovery/settings namespace (optional capability). */
+    localAgent: RemoteFace | undefined
   }
-  const caps: Capabilities = { community: undefined, session: undefined, workspace: undefined, sidebarRight: undefined, layout: undefined }
+  const caps: Capabilities = { community: undefined, session: undefined, workspace: undefined, sidebarRight: undefined, layout: undefined, localAgent: undefined }
 
   // The mount promise is observed, never awaited blindly: a rejection is captured
   // for the diagnostic message, a stall is caught by the deadline below.
@@ -329,6 +368,18 @@ export function apply(ctx: ClientContext): void {
     state.status = 'ready'
     state.detail = 'RPC 已就绪'
     return () => { caps.community = undefined }
+  })
+
+  // A6: the local-agent namespace. Optional — on a host without the local-agent package the
+  // settings panel still registers and reports "unavailable" instead of disappearing.
+  const localMountFailure: { error?: unknown } = {}
+  ctx.remote.$mount(localAgentContribution).then(
+    () => undefined,
+    (error: unknown) => { localMountFailure.error = error },
+  )
+  ctx.inject(['remote.localAgent'], (scope) => {
+    caps.localAgent = scope.remote['localAgent'] as RemoteFace
+    return () => { caps.localAgent = undefined }
   })
 
   // Optional Host faces: the panel must survive their absence.
@@ -491,6 +542,26 @@ export function apply(ctx: ClientContext): void {
     return unwrap<T>(await withDeadline(fn(...args), deadlineMs, `${NS}/${method}`), `${NS}/${method}`)
   }
 
+  /** Same contract as `call`, for the optional local-agent namespace. */
+  async function localCall<T>(method: string, ...args: unknown[]): Promise<T> {
+    const deadline = Date.now() + MOUNT_DEADLINE_MS
+    for (;;) {
+      if (caps.localAgent !== undefined) {
+        const fn = caps.localAgent[method]
+        if (typeof fn !== 'function') throw new Error('localAgent/' + method + ' 未在 RPC 面上注册')
+        return unwrap<T>(
+          await withDeadline(fn(...args), CALL_DEADLINE_MS, 'localAgent/' + method),
+          'localAgent/' + method,
+        )
+      }
+      if (localMountFailure.error !== undefined) {
+        throw new Error('localAgent RPC 挂载失败：' + describe(localMountFailure.error))
+      }
+      if (Date.now() >= deadline) throw new Error('localAgent RPC 挂载超时：本机 Agent 服务未加载')
+      await delay(POLL_INTERVAL_MS)
+    }
+  }
+
   /**
    * Providers and models configured in DSH Settings, as the model selector sees them.
    *
@@ -570,6 +641,11 @@ export function apply(ctx: ClientContext): void {
     getBotPresence: (botId) => call('getBotPresence', botId),
     listModelGroups,
     modelCatalog,
+    localAgentSnapshot: () => localCall('snapshot'),
+    localAgentRefresh: () => localCall('refresh'),
+    localAgentAddCustomAgent: (input) => localCall('addCustomAgent', input),
+    localAgentUpdateCustomAgent: (input) => localCall('updateCustomAgent', input),
+    localAgentRemoveCustomAgent: (input) => localCall('removeCustomAgent', input),
     pickDirectory,
     getDefaults: () => call('getDefaults'),
     controlRun: (input) => call('controlRun', input),
@@ -653,6 +729,14 @@ export function apply(ctx: ClientContext): void {
 
   // Self-contained panel: the entry declares no child slot, so it consumes no
   // renderSlot. remote and diagnostics arrive through React Context below.
+  function LocalAgentsPanelWithRemote(_props: Record<string, unknown>) {
+    const remote = useContext(RemoteContext)
+    if (!remote) {
+      return createElement('div', { style: { padding: 24, color: 'var(--dsw-alias-label-tertiary)', fontSize: 13 } }, '本机 Agent 初始化中…')
+    }
+    return createElement(LocalAgentsPage, { remote })
+  }
+
   function CommunityPageWithRemote(_props: Record<string, unknown>) {
     const slotProps: CommunityPageProps = { remote, diagnostics }
     return createElement(
@@ -671,8 +755,8 @@ export function apply(ctx: ClientContext): void {
   // this label) and `navBadge.ts` finds it by that same id to hang the unread count on,
   // so renaming the id would silently drop the badge.
   ctx.locale.register(NS, {
-    zh: { panel: 'Bots团队' },
-    en: { panel: 'Bots团队' },
+    zh: { panel: 'Bots团队', localAgentPanel: '本机 Agent' },
+    en: { panel: 'Bots团队', localAgentPanel: 'Local agents' },
   })
   // Bound ONCE: `bind` is the documented way in (there is no unbound `t`), and the
   // sidebar re-reads the label through this function on every locale change.
@@ -743,6 +827,23 @@ export function apply(ctx: ClientContext): void {
       name: 'main',
       key: PANEL_ID,
     }, CommunityPageWithRemote),
+  ))
+
+  // ── A6: 本机 Agent panel (discovery + custom ACP agents) ─────────────────────
+  registerSlot('sidebar.panellist', () => ctx.slots.inject('sidebar.panellist', () =>
+    ctx.slots.register(
+      {
+        name: 'sidebar.panellist',
+        id: 'local-agent',
+        order: 23,
+        locale: NS,
+        label: () => t('localAgentPanel'),
+      },
+      LocalAgentPanelIcon,
+    ),
+  ))
+  registerSlot('main', () => ctx.slots.inject('main', () =>
+    ctx.slots.register({ name: 'main', key: 'local-agent' }, LocalAgentsPanelWithRemote),
   ))
 
   // NOTE: 'agent-community.conversation' and 'conversation.view' are deliberately
