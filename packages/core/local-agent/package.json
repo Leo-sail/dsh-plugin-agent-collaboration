@@ -1,0 +1,66 @@
+{
+  "name": "@dsh-plugin-agent-community/local-agent",
+  "description": "Local agent discovery — find installed agent CLIs and expose them as DSH model routes",
+  "version": "0.4.1",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./types": {
+      "types": "./lib/types.d.ts",
+      "default": "./lib/types.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "bundle": "tsdown"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-typert-protocol": "*",
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-llm": "*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0 <5.0.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.0-rc.1 <0.3.0",
+    "@types/node": "^22.20.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "leochang <leochang@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Leo-sail/dsh-plugin-agent-collaboration.git",
+    "directory": "packages/core/local-agent"
+  },
+  "homepage": "https://github.com/Leo-sail/dsh-plugin-agent-collaboration/tree/main/packages/core/local-agent#readme",
+  "bugs": {
+    "url": "https://github.com/Leo-sail/dsh-plugin-agent-collaboration/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "agent",
+    "local-agent"
+  ],
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    }
+  }
+}

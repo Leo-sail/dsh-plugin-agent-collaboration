@@ -36,7 +36,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 # ── 1. refuse to package a tree that is not built ─────────────────────────────
-for p in core/agent-community tools/tool-agent-community ui/ui-agent-community bundle/agent-collaboration; do
+for p in core/agent-community core/local-agent tools/tool-agent-community ui/ui-agent-community bundle/agent-collaboration; do
   lib="$ROOT/packages/$p/lib/index.js"
   [ -s "$lib" ] || { echo "pack-release: MISSING build output: packages/$p/lib/index.js — run 'pnpm bundle' first." >&2; exit 1; }
 done
@@ -58,6 +58,7 @@ const [root, pkgDir] = process.argv.slice(2)
 
 const COMPONENTS = {
   '@dsh-plugin-agent-community/agent-community': 'packages/core/agent-community',
+  '@dsh-plugin-agent-community/local-agent': 'packages/core/local-agent',
   '@dsh-plugin-agent-community/tool-agent-community': 'packages/tools/tool-agent-community',
   '@dsh-plugin-agent-community/ui-agent-community': 'packages/ui/ui-agent-community',
 }
@@ -109,6 +110,7 @@ if (local.length) {
 }
 const expected = [
   '@dsh-plugin-agent-community/agent-community',
+  '@dsh-plugin-agent-community/local-agent',
   '@dsh-plugin-agent-community/tool-agent-community',
   '@dsh-plugin-agent-community/ui-agent-community',
 ]

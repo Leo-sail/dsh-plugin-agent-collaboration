@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-agent-collaboration",
-  "description": "Bot Community plugin for DSH — persistent bots, rooms, and runs",
+  "description": "Bot Community plugin for DSH \u2014 persistent bots, rooms, and runs",
   "version": "0.4.1",
   "type": "module",
   "main": "lib/index.js",
@@ -26,7 +26,8 @@
   "dependencies": {
     "@dsh-plugin-agent-community/agent-community": "file:../../core/agent-community",
     "@dsh-plugin-agent-community/tool-agent-community": "file:../../tools/tool-agent-community",
-    "@dsh-plugin-agent-community/ui-agent-community": "file:../../ui/ui-agent-community"
+    "@dsh-plugin-agent-community/ui-agent-community": "file:../../ui/ui-agent-community",
+    "@dsh-plugin-agent-community/local-agent": "file:../../core/local-agent"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*"

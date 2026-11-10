@@ -51,6 +51,8 @@ node "$ROOT/scripts/check-build.mjs" || { echo "install-profile: build shape che
 declare -a PAIRS=(
   "packages/core/agent-community/lib/index.js|agent-community/lib/index.js"
   "packages/core/agent-community/lib/index.d.ts|agent-community/lib/index.d.ts"
+  "packages/core/local-agent/lib/index.js|local-agent/lib/index.js"
+  "packages/core/local-agent/lib/index.d.ts|local-agent/lib/index.d.ts"
   "packages/tools/tool-agent-community/lib/index.js|tool-agent-community/lib/index.js"
   "packages/tools/tool-agent-community/lib/index.d.ts|tool-agent-community/lib/index.d.ts"
   "packages/ui/ui-agent-community/lib/index.js|ui-agent-community/lib/index.js"
@@ -69,7 +71,7 @@ done
 [ "$fail" = 0 ] || { echo "install-profile: build first; nothing was copied." >&2; exit 1; }
 
 # A stale-but-non-empty lib/ used to install cleanly and ship an old plugin. Compare mtimes.
-for pkg in core/agent-community tools/tool-agent-community ui/ui-agent-community; do
+for pkg in core/agent-community core/local-agent tools/tool-agent-community ui/ui-agent-community; do
   lib="$ROOT/packages/$pkg/lib/index.js"
   [ -e "$lib" ] || continue
   newer=$(find "$ROOT/packages/$pkg/src" -type f \( -name '*.ts' -o -name '*.tsx' \) -newer "$lib" -print -quit)
@@ -113,7 +115,7 @@ fi
 #
 # Mirroring the directory also means a file DELETED from a package (a module merged away,
 # an entry removed from `exports`) cannot survive in the profile as a phantom.
-for pkg in core/agent-community tools/tool-agent-community ui/ui-agent-community; do
+for pkg in core/agent-community core/local-agent tools/tool-agent-community ui/ui-agent-community; do
   src="$ROOT/packages/$pkg/lib"
   name="$(basename "$pkg")"
   dst="$DEST/$name/lib"
